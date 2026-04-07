@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MNM - Endpoints</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <header>
+    <div class="logo"><span>MNM</span> Controller</div>
+    <nav>
+      <a href="/">Dashboard</a>
+      <a href="/discover">Discovery</a>
+      <a href="/endpoints" class="active">Endpoints</a>
+      <a href="/events">Events</a>
+      <div class="theme-switcher">
+        <button data-theme="light" title="Light">Light</button>
+        <button data-theme="dark" title="Dark" class="active">Dark</button>
+        <button data-theme="system" title="System">Auto</button>
+      </div>
+      <a href="/logs">Logs</a>
+      <a href="#" id="prefs-btn" title="Preferences">&#9881;</a>
+      <a id="logout-link" href="#">Logout</a>
+    </nav>
+  </header>
+
+  <div class="container">
+    <!-- Summary stats -->
+    <div class="grid-4" style="margin-bottom: 16px;">
+      <div class="card">
+        <div class="stat">
+          <div class="value" id="total-endpoints">-</div>
+          <div class="label">Total Endpoints</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stat">
+          <div class="value" id="vlans-active">-</div>
+          <div class="label">VLANs Active</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stat">
+          <div class="value" id="vendors-seen">-</div>
+          <div class="label">Vendors Seen</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stat">
+          <div class="value" id="last-collection">-</div>
+          <div class="label">Last Collection</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Filter bar and actions -->
+    <div class="card">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+        <h2 style="margin-bottom: 0;">Endpoints</h2>
+        <button id="trigger-collection-btn" class="btn">Trigger Collection</button>
+      </div>
+
+      <div class="filter-bar">
+        <input type="text" id="filter-search" placeholder="Search by IP, MAC, or hostname...">
+        <select id="filter-switch">
+          <option value="">All Switches</option>
+        </select>
+        <select id="filter-vlan">
+          <option value="">All VLANs</option>
+        </select>
+        <select id="filter-vendor">
+          <option value="">All Vendors</option>
+        </select>
+        <select id="filter-source">
+          <option value="">All Sources</option>
+          <option value="sweep">Sweep</option>
+          <option value="infrastructure">Infrastructure</option>
+          <option value="both">Both</option>
+        </select>
+      </div>
+
+      <div id="endpoints-dt" class="full-width-table"></div>
+    </div>
+
+    <!-- Watchlist -->
+    <div class="card">
+      <h2>Watched MACs</h2>
+      <p style="color:var(--text-muted); font-size:0.85rem; margin-top:-8px">
+        Events for these MACs are highlighted in the activity feed.
+      </p>
+      <div class="filter-bar">
+        <input type="text" id="watch-mac" placeholder="MAC address (e.g. AA:BB:CC:DD:EE:FF)" style="flex:1">
+        <input type="text" id="watch-reason" placeholder="Reason (optional)" style="flex:2">
+        <button id="watch-add-btn" class="btn">Add Watch</button>
+      </div>
+      <table>
+        <thead><tr><th>MAC</th><th>Reason</th><th>Added By</th><th>Added</th><th></th></tr></thead>
+        <tbody id="watches-tbody">
+          <tr><td colspan="5" style="color:var(--text-muted); text-align:center">No watches</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Collection History -->
+    <div class="card">
+      <h2>Collection History</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Started</th>
+            <th>Duration</th>
+            <th>Devices</th>
+            <th>Endpoints Found</th>
+            <th>Recorded</th>
+            <th>Failed</th>
+          </tr>
+        </thead>
+        <tbody id="collection-history-table">
+          <tr><td colspan="6" style="color: var(--text-muted); text-align: center;">No collection history yet</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <script src="/static/js/datatable.js"></script>
+  <script src="/static/js/preferences.js"></script>
+  <script src="/static/js/endpoints.js"></script>
+</body>
+</html>

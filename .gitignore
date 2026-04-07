@@ -1,0 +1,43 @@
+cat > .gitignore << 'EOF'
+# Environment and secrets
+.env
+*.pem
+*.key
+*.crt
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+
+# Docker volumes (local data)
+data/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Node (for MCP tooling)
+node_modules/
+
+# Claude Code
+.claude/
+
+# Working documents

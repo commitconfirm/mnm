@@ -1,0 +1,316 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    { "title": "Network Overview", "url": "/grafana/d/mnm-network-overview", "type": "link" }
+  ],
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "id": 1,
+      "title": "Hypervisor Nodes",
+      "type": "stat",
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }] } }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [{ "refId": "A", "expr": "count(mnm_proxmox_node_uptime_seconds)" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "id": 2,
+      "title": "VMs Running",
+      "type": "stat",
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }] } }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [{ "refId": "A", "expr": "sum(mnm_proxmox_vm_status)" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "id": 3,
+      "title": "Containers Running",
+      "type": "stat",
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }] } }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [{ "refId": "A", "expr": "sum(mnm_proxmox_ct_status)" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "id": 4,
+      "title": "ZFS Pools",
+      "type": "stat",
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }] } }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [{ "refId": "A", "expr": "count(mnm_proxmox_zfs_pool_size_bytes)" }]
+    },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "id": 10,
+      "title": "Node CPU Usage",
+      "type": "timeseries",
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1, "color": { "mode": "palette-classic" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true } },
+      "targets": [{ "refId": "A", "expr": "mnm_proxmox_node_cpu_usage", "legendFormat": "{{node}}" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "id": 12,
+      "title": "Node IO Wait — storage latency signal",
+      "description": "Fraction of CPU time blocked on I/O. Sustained values above ~5% indicate the storage layer is the bottleneck for VMs on this host. Cross-reference with ZFS pool fragmentation and disk SMART health.",
+      "type": "timeseries",
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 0.05 }, { "color": "red", "value": 0.15 }] } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true } },
+      "targets": [{ "refId": "A", "expr": "mnm_proxmox_node_iowait", "legendFormat": "{{node}}" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "id": 13,
+      "title": "Load Average",
+      "description": "1m / 5m / 15m load averages. Values above mnm_proxmox_node_cpu_count indicate the CPU run queue is backing up — too many runnable processes for the available cores.",
+      "type": "timeseries",
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "palette-classic" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true } },
+      "targets": [
+        { "refId": "A", "expr": "mnm_proxmox_node_loadavg_1m", "legendFormat": "{{node}} 1m" },
+        { "refId": "B", "expr": "mnm_proxmox_node_loadavg_5m", "legendFormat": "{{node}} 5m" },
+        { "refId": "C", "expr": "mnm_proxmox_node_loadavg_15m", "legendFormat": "{{node}} 15m" },
+        { "refId": "D", "expr": "mnm_proxmox_node_cpu_count", "legendFormat": "{{node}} cpus" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "id": 11,
+      "title": "Node Memory Used",
+      "type": "timeseries",
+      "fieldConfig": { "defaults": { "unit": "bytes", "color": { "mode": "palette-classic" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true } },
+      "targets": [
+        { "refId": "A", "expr": "mnm_proxmox_node_memory_used_bytes", "legendFormat": "{{node}} used" },
+        { "refId": "B", "expr": "mnm_proxmox_node_memory_total_bytes", "legendFormat": "{{node}} total" },
+        { "refId": "C", "expr": "mnm_proxmox_node_swap_used_bytes", "legendFormat": "{{node}} swap" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 20 },
+      "id": 14,
+      "title": "Memory Pressure",
+      "description": "Percentage of host RAM in use. Approaching 100% means new VM allocations will swap or fail.",
+      "type": "gauge",
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 80 }, { "color": "red", "value": 95 }] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "showThresholdLabels": false, "showThresholdMarkers": true },
+      "targets": [{ "refId": "A", "expr": "100 * mnm_proxmox_node_memory_used_bytes / mnm_proxmox_node_memory_total_bytes", "legendFormat": "{{node}}" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 20 },
+      "id": 15,
+      "title": "Swap Usage",
+      "description": "Any sustained swap usage on a hypervisor is a red flag — it means VMs are competing for RAM that isn't there.",
+      "type": "gauge",
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 1 }, { "color": "red", "value": 25 }] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "showThresholdMarkers": true },
+      "targets": [{ "refId": "A", "expr": "100 * mnm_proxmox_node_swap_used_bytes / clamp_min(mnm_proxmox_node_swap_total_bytes, 1)", "legendFormat": "{{node}}" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 20 },
+      "id": 16,
+      "title": "Root Filesystem",
+      "description": "PVE root filesystem fill — distinct from VM storage pools. If this fills up the host loses ability to write logs / package state.",
+      "type": "gauge",
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 80 }, { "color": "red", "value": 90 }] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "showThresholdMarkers": true },
+      "targets": [{ "refId": "A", "expr": "100 * mnm_proxmox_node_rootfs_used_bytes / mnm_proxmox_node_rootfs_total_bytes", "legendFormat": "{{node}}" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 20 },
+      "id": 17,
+      "title": "KSM Shared",
+      "description": "Kernel Same-page Merging — bytes of RAM saved by deduplicating identical pages across VMs. Higher = more efficient memory utilization across similar guests.",
+      "type": "stat",
+      "fieldConfig": { "defaults": { "unit": "bytes", "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }] } }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [{ "refId": "A", "expr": "mnm_proxmox_node_ksm_shared_bytes", "legendFormat": "{{node}}" }]
+    },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 26 },
+      "id": 18,
+      "title": "Top VMs by Disk I/O (read + write)",
+      "description": "Per-VM aggregate disk throughput. The cumulative byte counters are converted to a rate over the dashboard window. Use this to identify which guests are stressing the storage layer when IO Wait climbs.",
+      "type": "bargauge",
+      "fieldConfig": { "defaults": { "unit": "Bps", "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }] } }, "overrides": [] },
+      "options": { "displayMode": "gradient", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [{ "refId": "A", "expr": "topk(10, rate(mnm_proxmox_vm_disk_read_bytes[5m]) + rate(mnm_proxmox_vm_disk_write_bytes[5m]))", "legendFormat": "{{name}}" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 26 },
+      "id": 19,
+      "title": "Top VMs by Network I/O (in + out)",
+      "type": "bargauge",
+      "fieldConfig": { "defaults": { "unit": "Bps", "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }] } }, "overrides": [] },
+      "options": { "displayMode": "gradient", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [{ "refId": "A", "expr": "topk(10, rate(mnm_proxmox_vm_netin_bytes[5m]) + rate(mnm_proxmox_vm_netout_bytes[5m]))", "legendFormat": "{{name}}" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 34 },
+      "id": 70,
+      "title": "Per-VM CPU Usage Over Time",
+      "description": "CPU utilization per VM as a fraction of one vCPU. Sustained values near 1.0 indicate the guest is CPU-bound; combined with high host load average this points to vCPU oversubscription.",
+      "type": "timeseries",
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "color": { "mode": "palette-classic" }, "custom": { "fillOpacity": 10, "showPoints": "never", "lineInterpolation": "smooth" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [{ "refId": "A", "expr": "mnm_proxmox_vm_cpu_usage and on(vmid) (mnm_proxmox_vm_status == 1)", "legendFormat": "{{name}}" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 34 },
+      "id": 71,
+      "title": "Per-VM Memory Usage Over Time",
+      "description": "Used memory as a percentage of the VM's configured maximum. Watch for VMs creeping toward 100% — they will pressure the guest OS into swapping inside the VM.",
+      "type": "timeseries",
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "color": { "mode": "palette-classic" }, "custom": { "fillOpacity": 10, "showPoints": "never", "lineInterpolation": "smooth" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [{ "refId": "A", "expr": "100 * mnm_proxmox_vm_memory_used_bytes / clamp_min(mnm_proxmox_vm_memory_total_bytes, 1) and on(vmid) (mnm_proxmox_vm_status == 1)", "legendFormat": "{{name}}" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 42 },
+      "id": 72,
+      "title": "Per-VM Network Throughput Over Time",
+      "description": "Aggregate bytes/sec (in + out) per VM, derived from cumulative counters with rate(). The 5-minute window smooths out short bursts; widen the dashboard time range to see daily/weekly patterns.",
+      "type": "timeseries",
+      "fieldConfig": { "defaults": { "unit": "Bps", "min": 0, "color": { "mode": "palette-classic" }, "custom": { "fillOpacity": 10, "showPoints": "never", "lineInterpolation": "smooth" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [{ "refId": "A", "expr": "rate(mnm_proxmox_vm_netin_bytes[5m]) + rate(mnm_proxmox_vm_netout_bytes[5m])", "legendFormat": "{{name}}" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 42 },
+      "id": 73,
+      "title": "Per-VM Disk I/O Throughput Over Time",
+      "description": "Aggregate read+write bytes/sec per VM. Spikes correlated with host IO Wait pinpoint the noisy neighbor causing storage contention.",
+      "type": "timeseries",
+      "fieldConfig": { "defaults": { "unit": "Bps", "min": 0, "color": { "mode": "palette-classic" }, "custom": { "fillOpacity": 10, "showPoints": "never", "lineInterpolation": "smooth" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [{ "refId": "A", "expr": "rate(mnm_proxmox_vm_disk_read_bytes[5m]) + rate(mnm_proxmox_vm_disk_write_bytes[5m])", "legendFormat": "{{name}}" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 50 },
+      "id": 20,
+      "title": "Top VMs by CPU",
+      "type": "bargauge",
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1, "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 0.7 }, { "color": "red", "value": 0.9 }] } }, "overrides": [] },
+      "options": { "displayMode": "gradient", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [{ "refId": "A", "expr": "topk(10, mnm_proxmox_vm_cpu_usage)", "legendFormat": "{{name}}" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 50 },
+      "id": 21,
+      "title": "Top VMs by Memory",
+      "type": "bargauge",
+      "fieldConfig": { "defaults": { "unit": "bytes", "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }] } }, "overrides": [] },
+      "options": { "displayMode": "gradient", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [{ "refId": "A", "expr": "topk(10, mnm_proxmox_vm_memory_used_bytes)", "legendFormat": "{{name}}" }]
+    },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 58 },
+      "id": 30,
+      "title": "VM Inventory",
+      "type": "table",
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }] } }, "overrides": [{ "matcher": { "id": "byName", "options": "Value #C" }, "properties": [{ "id": "unit", "value": "bytes" }] }, { "matcher": { "id": "byName", "options": "Value #D" }, "properties": [{ "id": "unit", "value": "bytes" }] }] },
+      "options": { "showHeader": true },
+      "targets": [
+        { "refId": "A", "expr": "mnm_proxmox_vm_status", "format": "table", "instant": true, "legendFormat": "" },
+        { "refId": "B", "expr": "mnm_proxmox_vm_cpu_usage", "format": "table", "instant": true, "legendFormat": "" },
+        { "refId": "C", "expr": "mnm_proxmox_vm_memory_used_bytes", "format": "table", "instant": true, "legendFormat": "" },
+        { "refId": "D", "expr": "mnm_proxmox_vm_memory_total_bytes", "format": "table", "instant": true, "legendFormat": "" }
+      ],
+      "transformations": [
+        { "id": "joinByField", "options": { "byField": "vmid", "mode": "outer" } },
+        { "id": "organize", "options": { "excludeByName": { "Time 1": true, "Time 2": true, "Time 3": true, "Time 4": true, "__name__ 1": true, "__name__ 2": true, "__name__ 3": true, "__name__ 4": true, "job 1": true, "job 2": true, "job 3": true, "job 4": true, "instance 1": true, "instance 2": true, "instance 3": true, "instance 4": true, "node 2": true, "node 3": true, "node 4": true, "name 2": true, "name 3": true, "name 4": true }, "renameByName": { "vmid": "VMID", "name 1": "Name", "node 1": "Node", "Value #A": "Running", "Value #B": "CPU", "Value #C": "Mem Used", "Value #D": "Mem Total" } } }
+      ]
+    },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 66 },
+      "id": 40,
+      "title": "ZFS Pool Usage %",
+      "type": "bargauge",
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 70 }, { "color": "red", "value": 85 }] } }, "overrides": [] },
+      "options": { "displayMode": "gradient", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [{ "refId": "A", "expr": "100 * mnm_proxmox_zfs_pool_used_bytes / mnm_proxmox_zfs_pool_size_bytes", "legendFormat": "{{node}}/{{pool}}" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 66 },
+      "id": 41,
+      "title": "ZFS Pool Health",
+      "type": "table",
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }, "mappings": [{ "type": "value", "options": { "0": { "text": "DEGRADED", "color": "red" }, "1": { "text": "ONLINE", "color": "green" } } }] }, "overrides": [{ "matcher": { "id": "byName", "options": "Value" }, "properties": [{ "id": "custom.cellOptions", "value": { "type": "color-background" } }] }] },
+      "options": { "showHeader": true },
+      "targets": [{ "refId": "A", "expr": "mnm_proxmox_zfs_pool_health", "format": "table", "instant": true, "legendFormat": "" }],
+      "transformations": [{ "id": "organize", "options": { "excludeByName": { "Time": true, "__name__": true, "job": true, "instance": true }, "renameByName": { "node": "Node", "pool": "Pool", "Value": "Health" } } }]
+    },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 74 },
+      "id": 50,
+      "title": "ZFS Pool Used Bytes Over Time",
+      "type": "timeseries",
+      "fieldConfig": { "defaults": { "unit": "bytes", "color": { "mode": "palette-classic" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true } },
+      "targets": [{ "refId": "A", "expr": "mnm_proxmox_zfs_pool_used_bytes", "legendFormat": "{{node}}/{{pool}}" }]
+    },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 82 },
+      "id": 60,
+      "title": "Physical Disks",
+      "type": "table",
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }, "mappings": [{ "type": "value", "options": { "0": { "text": "FAILING", "color": "red" }, "1": { "text": "PASSED", "color": "green" } } }] }, "overrides": [{ "matcher": { "id": "byName", "options": "Value #B" }, "properties": [{ "id": "unit", "value": "bytes" }] }, { "matcher": { "id": "byName", "options": "Value #A" }, "properties": [{ "id": "custom.cellOptions", "value": { "type": "color-background" } }] }] },
+      "options": { "showHeader": true },
+      "targets": [
+        { "refId": "A", "expr": "mnm_proxmox_disk_health", "format": "table", "instant": true, "legendFormat": "" },
+        { "refId": "B", "expr": "mnm_proxmox_disk_size_bytes", "format": "table", "instant": true, "legendFormat": "" }
+      ],
+      "transformations": [
+        { "id": "joinByField", "options": { "byField": "device", "mode": "outer" } },
+        { "id": "organize", "options": { "excludeByName": { "Time 1": true, "Time 2": true, "__name__ 1": true, "__name__ 2": true, "job 1": true, "job 2": true, "instance 1": true, "instance 2": true, "node 2": true, "model 2": true, "type 2": true }, "renameByName": { "device": "Device", "node 1": "Node", "model 1": "Model", "type 1": "Type", "Value #A": "Health", "Value #B": "Size" } } }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["mnm", "proxmox"],
+  "templating": { "list": [] },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "MNM - Proxmox Overview",
+  "uid": "mnm-proxmox-overview",
+  "version": 3,
+  "weekStart": ""
+}

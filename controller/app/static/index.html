@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MNM - Dashboard</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <header>
+    <div class="logo"><span>MNM</span> Controller</div>
+    <nav>
+      <a href="/" class="active">Dashboard</a>
+      <a href="/discover">Discovery</a>
+      <a href="/endpoints">Endpoints</a>
+      <a href="/events">Events</a>
+      <div class="theme-switcher">
+        <button data-theme="light" title="Light">Light</button>
+        <button data-theme="dark" title="Dark" class="active">Dark</button>
+        <button data-theme="system" title="System">Auto</button>
+      </div>
+      <a href="/logs">Logs</a>
+      <a href="#" id="prefs-btn" title="Preferences">&#9881;</a>
+      <a id="logout-link" href="#">Logout</a>
+    </nav>
+  </header>
+
+  <div class="container">
+    <!-- Stats row -->
+    <div class="grid-4" style="margin-bottom: 16px;">
+      <div class="card">
+        <div class="stat">
+          <div class="value" id="device-count">-</div>
+          <div class="label">Devices</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stat">
+          <div class="value" id="ip-count">-</div>
+          <div class="label">IPs Tracked</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stat">
+          <div class="value" id="container-count">-</div>
+          <div class="label">Docker Containers</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stat">
+          <div class="value" id="healthy-count">-</div>
+          <div class="label">Healthy</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Service links + actions -->
+    <div class="card">
+      <h2>Services</h2>
+      <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
+        <div class="service-links">
+          <a class="service-link" href="#" target="_blank" rel="noopener">Nautobot</a>
+          <a class="service-link" href="#" target="_blank" rel="noopener">Grafana</a>
+          <a class="service-link" href="#" target="_blank" rel="noopener">Prometheus</a>
+        </div>
+        <div style="display: flex; gap: 8px;">
+          <button id="sync-all-btn" class="btn" title="Sync interfaces, cables, and LLDP data from all onboarded devices">Sync Network Data</button>
+        </div>
+      </div>
+      <div id="sync-status" style="display: none; margin-top: 8px; font-size: 0.85rem; color: var(--text-muted);"></div>
+    </div>
+
+    <!-- Discovery summary -->
+    <div class="card" id="sweep-info-card" style="display: none;">
+      <h2>Discovery</h2>
+      <div class="schedule-info" id="sweep-summary">Last sweep info loading...</div>
+    </div>
+
+    <!-- Endpoints -->
+    <div class="card" id="endpoints-card">
+      <h2>Endpoints</h2>
+      <div class="grid-3" style="margin-bottom: 12px;">
+        <div class="stat">
+          <div class="value" id="endpoint-count">-</div>
+          <div class="label">Endpoints Tracked</div>
+        </div>
+        <div class="stat">
+          <div class="value" id="endpoint-vlans">-</div>
+          <div class="label">VLANs Active</div>
+        </div>
+        <div class="stat">
+          <div class="value" id="endpoint-last">-</div>
+          <div class="label">Last Collection</div>
+        </div>
+      </div>
+      <div style="display: flex; gap: 12px; align-items: center;">
+        <a href="/endpoints" class="btn">View Endpoints</a>
+        <button id="trigger-collection-btn" class="btn">Trigger Collection</button>
+        <span class="schedule-info" id="collection-status"></span>
+      </div>
+      <div id="collection-progress" style="display: none; margin-top: 12px;">
+        <div class="progress-bar-wrap">
+          <div class="progress-bar" id="collection-bar"></div>
+        </div>
+        <div style="display: flex; justify-content: space-between; margin-top: 4px; font-size: 0.8rem; color: var(--text-muted);">
+          <span id="collection-phase">Collecting...</span>
+          <span id="collection-count">0 / 0 devices</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Proxmox connector (Phase 2.7+) -->
+    <div class="card" id="proxmox-card" style="display:none">
+      <h2>Proxmox <span id="proxmox-link" style="font-size:0.8rem;font-weight:normal;float:right"></span></h2>
+      <div class="grid-4" style="margin-bottom:12px">
+        <div class="stat"><div class="value" id="proxmox-nodes">-</div><div class="label">Nodes</div></div>
+        <div class="stat"><div class="value" id="proxmox-vms">-</div><div class="label">VMs</div></div>
+        <div class="stat"><div class="value" id="proxmox-cts">-</div><div class="label">Containers</div></div>
+        <div class="stat"><div class="value" id="proxmox-last">-</div><div class="label">Last Collection</div></div>
+      </div>
+      <div id="proxmox-nodes-table"></div>
+      <div id="proxmox-storage" style="margin-top:8px;font-size:0.85rem;color:var(--text-muted)"></div>
+      <div id="proxmox-alerts" style="margin-top:8px"></div>
+    </div>
+
+    <!-- Recent Events (Phase 2.7) -->
+    <div class="card" id="recent-events-card">
+      <h2>Recent Events <a href="/events" style="font-size:0.8rem;font-weight:normal;float:right">View all &rarr;</a></h2>
+      <table>
+        <thead><tr><th>When</th><th>MAC</th><th>Event</th><th>From &rarr; To</th></tr></thead>
+        <tbody id="recent-events-tbody">
+          <tr><td colspan="4" style="text-align:center;color:var(--text-muted)">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Container status -->
+    <div class="card">
+      <h2>Container Status</h2>
+      <div class="full-width-table"><table>
+        <thead>
+          <tr>
+            <th class="center">Status</th>
+            <th>Container</th>
+            <th>Image</th>
+            <th>Health</th>
+            <th>Ports</th>
+          </tr>
+        </thead>
+        <tbody id="container-table"></tbody>
+      </table></div>
+    </div>
+
+    <!-- Incomplete onboarding advisory: devices in Nautobot with no IPs -->
+    <div class="card" id="incomplete-card" style="display:none">
+      <h2>Incomplete Devices
+        <button id="sync-incomplete-btn" class="btn" style="float:right">Sync All</button>
+      </h2>
+      <div id="incomplete-summary" class="alert warning"></div>
+      <div id="sync-incomplete-progress" style="display:none; margin: 8px 0;">
+        <div class="progress-bar-wrap"><div class="progress-bar" id="sync-incomplete-bar"></div></div>
+        <div style="display:flex; justify-content:space-between; margin-top:4px; font-size:0.8rem; color:var(--text-muted)">
+          <span id="sync-incomplete-phase">Starting...</span>
+          <span id="sync-incomplete-count">0 / 0</span>
+        </div>
+      </div>
+      <table>
+        <thead><tr><th>Device</th><th>Type</th><th>Platform</th><th>Location</th><th>Status</th><th>Sync</th></tr></thead>
+        <tbody id="incomplete-table"></tbody>
+      </table>
+      <p style="color:var(--text-muted); font-size:0.8rem; margin-top:8px">
+        These devices exist in Nautobot but have no primary IP and no interface
+        IPs assigned, so MNM cannot SNMP-poll or ARP-collect from them. Click
+        <strong>Sync All</strong> to trigger Nautobot's "Sync Network Data From
+        Network" job for each device — the card will disappear once they're healthy.
+      </p>
+    </div>
+
+    <!-- Subnet advisory: subnets seen on onboarded devices but not in any sweep schedule -->
+    <div class="card" id="subnets-card" style="display:none">
+      <h2>Discovered Subnets <span style="font-size:0.8rem;font-weight:normal;color:var(--text-muted);float:right">advisory only</span></h2>
+      <p style="color:var(--text-muted); font-size:0.85rem; margin-top:-8px">
+        These subnets were observed on onboarded devices but aren't in any sweep
+        schedule yet. MNM never auto-expands scope (Rule 6) — review and add
+        the ones you want included in periodic sweeps.
+      </p>
+      <table>
+        <thead><tr><th>CIDR</th><th>IPs Seen</th><th>Sample</th><th></th></tr></thead>
+        <tbody id="subnets-table"></tbody>
+      </table>
+    </div>
+
+    <!-- LLDP Neighbors -->
+    <div class="card" id="neighbors-card" style="display: none;">
+      <h2>Unrecognized LLDP Neighbors</h2>
+      <div class="alert warning" id="neighbor-alert"></div>
+      <table>
+        <thead>
+          <tr>
+            <th>Neighbor</th>
+            <th>Connected To</th>
+            <th>Classification</th>
+            <th>MAC Vendor</th>
+          </tr>
+        </thead>
+        <tbody id="neighbor-table"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script src="/static/js/datatable.js"></script>
+  <script src="/static/js/preferences.js"></script>
+  <script src="/static/js/status.js"></script>
+</body>
+</html>

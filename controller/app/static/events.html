@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MNM - Events</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <header>
+    <div class="logo"><span>MNM</span> Controller</div>
+    <nav>
+      <a href="/">Dashboard</a>
+      <a href="/discover">Discovery</a>
+      <a href="/endpoints">Endpoints</a>
+      <a href="/events" class="active">Events</a>
+      <div class="theme-switcher">
+        <button data-theme="light">Light</button>
+        <button data-theme="dark" class="active">Dark</button>
+        <button data-theme="system">Auto</button>
+      </div>
+      <a href="/logs">Logs</a>
+      <a id="logout-link" href="#">Logout</a>
+    </nav>
+  </header>
+
+  <div class="container">
+    <div class="card">
+      <h2>Network Activity Feed</h2>
+      <div class="filter-bar">
+        <select id="filter-type">
+          <option value="">All Event Types</option>
+          <option value="appeared">Appeared</option>
+          <option value="moved_port">Moved Port</option>
+          <option value="moved_switch">Moved Switch</option>
+          <option value="ip_changed">IP Changed</option>
+          <option value="hostname_changed">Hostname Changed</option>
+        </select>
+        <select id="filter-since">
+          <option value="1h">Last hour</option>
+          <option value="24h" selected>Last 24 hours</option>
+          <option value="7d">Last 7 days</option>
+          <option value="30d">Last 30 days</option>
+        </select>
+        <button id="refresh-btn" class="btn">Refresh</button>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Timestamp</th>
+            <th>MAC</th>
+            <th>Event</th>
+            <th>From</th>
+            <th>To</th>
+            <th>Details</th>
+          </tr>
+        </thead>
+        <tbody id="events-table"></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>Anomalies</h2>
+      <p style="color:var(--text-muted); font-size:0.85rem; margin-top:-8px">
+        Endpoints that look wrong, suspicious, or unidentifiable. These usually
+        indicate something worth investigating — never auto-acted on.
+      </p>
+      <div id="anomalies-summary"></div>
+      <div id="anomalies-detail"></div>
+    </div>
+  </div>
+
+  <script src="/static/js/preferences.js"></script>
+  <script src="/static/js/events.js"></script>
+</body>
+</html>

@@ -1,0 +1,125 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    { "title": "Device Dashboard", "url": "/grafana/d/mnm-device-dashboard", "type": "link" }
+  ],
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "colorMode": "value", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "title": "Devices Monitored",
+      "type": "stat",
+      "targets": [{ "refId": "A", "expr": "count(count by (instance) (ifNumber))", "legendFormat": "" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "id": 2,
+      "options": { "colorMode": "value", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "title": "Total Interfaces",
+      "type": "stat",
+      "targets": [{ "refId": "A", "expr": "sum(ifNumber)", "legendFormat": "" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 0.5 }] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "id": 3,
+      "options": { "colorMode": "value", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "title": "Interfaces Down",
+      "type": "stat",
+      "targets": [{ "refId": "A", "expr": "count(ifOperStatus == 2)", "legendFormat": "" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "id": 4,
+      "options": { "colorMode": "value", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "title": "Interfaces Up",
+      "type": "stat",
+      "targets": [{ "refId": "A", "expr": "count(ifOperStatus == 1)", "legendFormat": "" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "bps", "color": { "mode": "palette-classic" } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "id": 5,
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi" } },
+      "title": "Top Interfaces — Inbound Traffic",
+      "type": "timeseries",
+      "targets": [{ "refId": "A", "expr": "topk(10, rate(ifHCInOctets[5m]) * 8)", "legendFormat": "{{instance}} {{ifName}}" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "bps", "color": { "mode": "palette-classic" } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "id": 6,
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi" } },
+      "title": "Top Interfaces — Outbound Traffic",
+      "type": "timeseries",
+      "targets": [{ "refId": "A", "expr": "topk(10, rate(ifHCOutOctets[5m]) * 8)", "legendFormat": "{{instance}} {{ifName}}" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "pps", "color": { "mode": "palette-classic" } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "id": 7,
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi" } },
+      "title": "Interface Errors (In)",
+      "type": "timeseries",
+      "targets": [{ "refId": "A", "expr": "topk(5, rate(ifInErrors[5m]))", "legendFormat": "{{instance}} {{ifName}}" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "pps", "color": { "mode": "palette-classic" } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "id": 8,
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi" } },
+      "title": "Interface Errors (Out)",
+      "type": "timeseries",
+      "targets": [{ "refId": "A", "expr": "topk(5, rate(ifOutErrors[5m]))", "legendFormat": "{{instance}} {{ifName}}" }]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["mnm", "network", "overview"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Network Overview",
+  "uid": "mnm-network-overview",
+  "version": 1
+}

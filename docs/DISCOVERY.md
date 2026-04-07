@@ -1,0 +1,171 @@
+# Network Discovery
+
+MNM uses a **seed-and-sweep** discovery model. The operator defines CIDR ranges and credential sets; MNM probes the ranges, enriches what it finds, and records everything in Nautobot's IPAM.
+
+```
+Operator defines CIDR ranges + credentials
+    │
+    ▼
+Controller Sweep Engine
+    ├── TCP probe (ports 22,23,80,161,443,830,8080,8443,9100)
+    ├── ARP table lookup → MAC address → OUI vendor
+    ├── DNS reverse lookup → PTR record
+    └── SNMP GET (if port 161 open) → sysName, sysDescr, etc.
+    │
+    ▼
+Classify: network_device | server | web_service | printer | access_point | endpoint
+    │
+    ├──► Nautobot IPAM (ALL alive IPs recorded with custom fields)
+    │
+    └──► network_device → Nautobot Onboarding Job → Device record
+              │
+              ▼
+         LLDP Neighbor Advisory → Operator reviews → Onboard / Ignore
+```
+
+## Discovery Modes
+
+**Manual sweep** — triggered via the Controller UI at `:9090/discover`. Enter CIDR ranges, select a location and credential set, optionally provide an SNMP community string, and click Start Sweep.
+
+**Scheduled re-sweep** — configure automatic re-sweeps at intervals (1h to 7d) via the Controller UI. The controller runs sweeps in the background and updates all records.
+
+## Enriched Collection
+
+For every IP in the sweep range, MNM passively collects:
+
+| Data | Method | Notes |
+|------|--------|-------|
+| Alive/dead | TCP connect (ports 22, 23, 80, 161, 443, 830, 8080, 8443, 9100) | 2s timeout, 10 concurrent probes |
+| Open ports | Same TCP probes | Recorded as comma-separated list |
+| MAC address | Local ARP table (`ip neigh show`) | Only works on same L2 segment |
+| MAC vendor | OUI lookup | Built-in database of common network vendor prefixes |
+| DNS name | Reverse DNS (PTR) | Uses system resolver |
+| SNMP system info | SNMPv2c GET | sysName, sysDescr, sysObjectID, sysUpTime, sysContact, sysLocation. Requires community string. See [RFC 3418](https://www.rfc-editor.org/rfc/rfc3418) for OIDs. |
+
+All collection is read-only. SNMP uses GET only (never SET). TCP probes connect and immediately close. MNM never tries credentials against unrecognized services.
+
+## Device Classification
+
+Each host is classified based on available data:
+
+| Classification | Criteria |
+|---------------|----------|
+| `network_device` | SNMP responds with recognizable sysDescr, OR port 830 (NETCONF) open, OR ports 22+161 open with known network vendor MAC |
+| `server` | Port 22 open, no SNMP, no NETCONF |
+| `web_service` | Ports 80 or 443 open |
+| `printer` | Port 9100 open |
+| `access_point` | Known AP vendor MAC (Aruba, Ubiquiti, Ruckus, Meraki) |
+| `endpoint` | Responds to probe but no interesting ports |
+| `unknown` | Responsive but doesn't match any classification |
+
+## Nautobot IPAM Integration
+
+Every alive IP from a sweep is recorded in Nautobot IPAM as an IP Address object with custom fields:
+
+- `discovery_first_seen` / `discovery_last_seen` — temporal brackets for when this IP was active
+- `discovery_classification` — device classification result
+- `discovery_ports_open` — open ports
+- `discovery_mac_address` / `discovery_mac_vendor` — L2 identity
+- `discovery_dns_name` — reverse DNS
+- `discovery_snmp_sysname` / `discovery_snmp_sysdescr` / `discovery_snmp_syslocation` — SNMP data
+- `discovery_method` — how the IP was discovered (sweep, lldp, manual)
+
+Records are never deleted. IPs that stop responding retain their last known data with `discovery_last_seen` frozen.
+
+## LLDP Neighbor Advisory
+
+After device onboarding, LLDP/CDP neighbor data is surfaced in the Controller dashboard. Neighbors not matching known devices appear as advisories with "Onboard" and "Ignore" buttons. No automatic onboarding — Rule 6 (Human-in-the-Loop).
+
+## Re-sweep and Data Lifecycle
+
+- Re-sweeps update `discovery_last_seen` and detect changes (new hosts, changed ports/services)
+- `discovery_first_seen` is never overwritten
+- Prefixes are auto-created in Nautobot IPAM when CIDR ranges are swept
+- To query historical data: filter IP Addresses in Nautobot by `cf_discovery_*` custom fields
+
+## Infrastructure Endpoint Collection
+
+In addition to active sweeps, MNM passively collects endpoint data from onboarded network devices' forwarding tables.
+
+### Data Sources
+
+| Source | Method | Data Returned |
+|--------|--------|---------------|
+| ARP table | NAPALM `get_arp_table()` via Nautobot proxy | IP, MAC, interface |
+| MAC address table | NAPALM `get_mac_address_table()` via Nautobot proxy | MAC, VLAN, port, static/dynamic |
+| DHCP server bindings | Junos NETCONF RPC `get-dhcp-server-binding-information` | IP, MAC, hostname, lease times |
+| DHCP snooping | Junos NETCONF RPC `get-dhcp-snooping-binding-information` | IP, MAC, VLAN, interface |
+
+See [NAPALM documentation](https://napalm.readthedocs.io/en/latest/support/) for supported getters by platform. Junos DHCP RPCs are documented in the [Junos XML API Explorer](https://apps.juniper.net/xmlapi/).
+
+### Correlation
+
+The collector merges data from multiple tables by joining on MAC address:
+- ARP → IP-to-MAC mapping
+- MAC table → MAC-to-port and MAC-to-VLAN mapping
+- DHCP → MAC-to-hostname and lease timing
+
+When the same MAC appears from multiple devices, MNM prefers the entry from the device where it's learned on an access port (not an uplink/trunk).
+
+### Merge with Sweep Data
+
+IPs found by both sweep and infrastructure collection are merged:
+- `endpoint_data_source` is set to "both"
+- Sweep custom fields (`discovery_*`) and infrastructure fields (`endpoint_*`) coexist on the same IP Address record
+- `discovery_first_seen` is never overwritten
+
+### Collection Schedule
+
+Default: every 15 minutes (configurable in controller config). Runs independently from sweep schedules. Each run collects from all onboarded devices and updates Nautobot IPAM incrementally.
+
+### Platform Support
+
+| Platform | ARP | MAC Table | DHCP Server | DHCP Snooping |
+|----------|-----|-----------|-------------|---------------|
+| Junos | Yes | Yes | Yes (NETCONF RPC) | Yes (NETCONF RPC) |
+| Cisco IOS/IOS-XE | Yes | Yes | Future | Future |
+| FortiOS | Yes | Limited | Future | N/A |
+| Arista EOS | Yes | Yes | Future | Future |
+
+The collector gracefully skips unsupported operations — a getter failure on one device never stops the collection run.
+
+## Endpoint Correlation Engine (Phase 2.7)
+
+Every collection run and sweep run feeds the controller's `mnm_controller`
+PostgreSQL database (see [ARCHITECTURE.md](ARCHITECTURE.md#controller-database-phase-27)).
+Endpoints are keyed on **MAC address**, the most stable identifier for an
+endpoint, so the same device retains its identity even when its IP changes.
+
+For each upsert, the controller diffs the incoming record against the prior
+state and writes one or more rows to `endpoint_events`:
+
+| Change | Event type |
+|--------|-----------|
+| MAC seen for the first time | `appeared` |
+| MAC moved to a different port on the same switch | `moved_port` |
+| MAC moved to a different switch | `moved_switch` |
+| MAC's IP changed | `ip_changed` |
+| Hostname (DHCP > DNS > sysName) changed | `hostname_changed` |
+
+A MAC that's missing from a given run is **not** deleted. Its `last_seen`
+timestamp simply stops advancing — historical queries still resolve, and the
+endpoint can be flagged as stale by inspection.
+
+When the same MAC is observed by both the sweep (active probe) and the
+infrastructure collector (ARP/MAC table query), its `data_source` field is
+upgraded to `both`, recording that we have corroborating evidence of the
+endpoint.
+
+### Querying endpoint history
+
+The controller exposes the endpoint store via several REST endpoints (see
+[API.md](API.md#phase-27--endpoint-correlation-endpoints)):
+
+- `GET /api/endpoints/{mac}/timeline` — human-readable narrative of every
+  movement, IP change, and hostname change for one MAC, in chronological order.
+- `GET /api/endpoints/events?type=moved_port&since=24h` — filtered activity
+  feed across the whole network.
+- `GET /api/endpoints/conflicts` — IPs currently claimed by more than one MAC.
+
+In the UI, click any MAC in the Endpoints table to open its detail page, or
+visit `/events` for the network activity feed.

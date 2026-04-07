@@ -1,0 +1,40 @@
+# gnmic configuration for MNM
+# gNMI streaming telemetry collector
+
+targets:
+  juniper-ex4300:
+    address: "192.0.2.5:32767"  # Replace with your gNMI-capable device IP
+    username: "${GNMI_USERNAME}"
+    password: "${GNMI_PASSWORD}"
+    insecure: true
+    skip-verify: true
+
+subscriptions:
+  interface_counters:
+    paths:
+      - /interfaces/interface/state/counters
+    mode: stream
+    stream-mode: sample
+    sample-interval: 30s
+
+  interface_status:
+    paths:
+      - /interfaces/interface/state/oper-status
+    mode: stream
+    stream-mode: sample
+    sample-interval: 30s
+
+  system_state:
+    paths:
+      - /system/state
+    mode: stream
+    stream-mode: sample
+    sample-interval: 30s
+
+outputs:
+  prometheus:
+    type: prometheus
+    listen: ":9804"
+    path: /metrics
+    metric-prefix: gnmic
+    append-subscription-name: true

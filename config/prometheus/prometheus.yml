@@ -1,0 +1,49 @@
+# Prometheus scrape configuration for MNM
+
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+scrape_configs:
+  # Self-scrape
+  - job_name: "prometheus"
+    metrics_path: /prometheus/metrics
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # SNMP Exporter — poll network devices via SNMP
+  #
+  # Targets are pulled dynamically from the MNM controller via http_sd. As
+  # devices are onboarded into Nautobot they automatically appear here on
+  # the next refresh — no manual edits to this file required.
+  # Inviolable Rule 8 honored: no real device IPs in source.
+  - job_name: "snmp_exporter"
+    scrape_interval: 60s
+    scrape_timeout: 30s
+    metrics_path: /snmp
+    params:
+      module: [if_mib]
+    http_sd_configs:
+      - url: http://controller:9090/api/prometheus/snmp-targets
+        refresh_interval: 60s
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - source_labels: [device_name]
+        target_label: device_name
+      - target_label: __address__
+        replacement: snmp-exporter:9116
+
+  # gnmic — gNMI streaming telemetry
+  - job_name: "gnmic"
+    static_configs:
+      - targets: ["gnmic:9804"]
+
+  # MNM Controller — Proxmox connector metrics (Phase 2.7+)
+  - job_name: "proxmox"
+    scrape_interval: 30s
+    metrics_path: /api/proxmox/metrics
+    static_configs:
+      - targets: ["controller:9090"]

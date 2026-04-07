@@ -1,0 +1,18 @@
+# Traefik v2 static configuration for MNM
+# Auto-discovers services via Docker labels
+
+entryPoints:
+  web:
+    address: ":8080"
+
+providers:
+  docker:
+    endpoint: "unix:///var/run/docker.sock"
+    exposedByDefault: false
+    network: mnm-network
+
+api:
+  dashboard: false
+
+log:
+  level: WARN

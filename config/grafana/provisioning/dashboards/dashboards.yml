@@ -1,0 +1,19 @@
+# Auto-provision dashboards from filesystem.
+# All dashboards live in a single "MNM" folder so they're easy to find in
+# Grafana's sidebar (Dashboards → MNM). updateIntervalSeconds=10 means edits
+# to the JSON files are picked up without restarting Grafana.
+apiVersion: 1
+
+providers:
+  - name: "MNM Dashboards"
+    orgId: 1
+    folder: "MNM"
+    folderUid: "mnm"
+    type: file
+    disableDeletion: false
+    editable: true
+    updateIntervalSeconds: 10
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MNM - Endpoint Detail</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <header>
+    <div class="logo"><span>MNM</span> Controller</div>
+    <nav>
+      <a href="/">Dashboard</a>
+      <a href="/discover">Discovery</a>
+      <a href="/endpoints" class="active">Endpoints</a>
+      <a href="/events">Events</a>
+      <div class="theme-switcher">
+        <button data-theme="light">Light</button>
+        <button data-theme="dark" class="active">Dark</button>
+        <button data-theme="system">Auto</button>
+      </div>
+      <a href="/logs">Logs</a>
+      <a id="logout-link" href="#">Logout</a>
+    </nav>
+  </header>
+
+  <div class="container">
+    <div class="card">
+      <h2 id="ep-title">Endpoint</h2>
+      <div id="ep-meta" class="grid-3"></div>
+    </div>
+
+    <div class="card">
+      <h2>Timeline</h2>
+      <div id="ep-timeline">Loading...</div>
+    </div>
+
+    <div class="card">
+      <h2>Raw Events</h2>
+      <table>
+        <thead><tr><th>Timestamp</th><th>Type</th><th>Old</th><th>New</th></tr></thead>
+        <tbody id="ep-events"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script src="/static/js/preferences.js"></script>
+  <script src="/static/js/endpoint_detail.js"></script>
+</body>
+</html>

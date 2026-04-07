@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MNM - Login</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <div class="login-container">
+    <div class="login-box">
+      <h1><span>MNM</span></h1>
+      <p>Modular Network Monitor</p>
+      <div id="error" class="login-error"></div>
+      <form id="login-form">
+        <input type="password" id="password" placeholder="Password" autofocus>
+        <button type="submit" class="btn primary">Log In</button>
+      </form>
+    </div>
+  </div>
+  <script>
+    // Apply saved theme
+    const t = localStorage.getItem('mnm-theme') || 'dark';
+    document.documentElement.setAttribute('data-theme', t);
+
+    document.getElementById('login-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const errEl = document.getElementById('error');
+      errEl.style.display = 'none';
+
+      const resp = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: document.getElementById('password').value }),
+      });
+
+      if (resp.ok) {
+        window.location.href = '/';
+      } else {
+        errEl.textContent = 'Invalid password';
+        errEl.style.display = 'block';
+      }
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,196 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    { "title": "Network Overview", "url": "/grafana/d/mnm-network-overview", "type": "link" }
+  ],
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "colorMode": "value", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "title": "Total Interfaces",
+      "type": "stat",
+      "targets": [{ "refId": "A", "expr": "ifNumber{device_name=\"$device\"}", "legendFormat": "" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
+      "id": 2,
+      "options": { "colorMode": "value", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "title": "Interfaces Up",
+      "type": "stat",
+      "targets": [{ "refId": "A", "expr": "count(ifOperStatus{device_name=\"$device\"} == 1)", "legendFormat": "" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "red", "value": null }] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 0 },
+      "id": 3,
+      "options": { "colorMode": "value", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "title": "Interfaces Down",
+      "type": "stat",
+      "targets": [{ "refId": "A", "expr": "count(ifOperStatus{device_name=\"$device\"} == 2)", "legendFormat": "" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "unit": "Bps", "thresholds": { "steps": [{ "color": "green", "value": null }] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 0 },
+      "id": 9,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "title": "Total In (rate)",
+      "type": "stat",
+      "targets": [{ "refId": "A", "expr": "sum(rate(ifHCInOctets{device_name=\"$device\"}[5m]))", "legendFormat": "" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "unit": "Bps", "thresholds": { "steps": [{ "color": "blue", "value": null }] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 0 },
+      "id": 10,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "title": "Total Out (rate)",
+      "type": "stat",
+      "targets": [{ "refId": "A", "expr": "sum(rate(ifHCOutOctets{device_name=\"$device\"}[5m]))", "legendFormat": "" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "unit": "s", "thresholds": { "steps": [{ "color": "green", "value": null }] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 0 },
+      "id": 11,
+      "options": { "colorMode": "value", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "title": "Uptime",
+      "type": "stat",
+      "targets": [{ "refId": "A", "expr": "sysUpTime{device_name=\"$device\"} / 100", "legendFormat": "" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "bps", "color": { "mode": "palette-classic" } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "id": 4,
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "last"] }, "tooltip": { "mode": "multi" } },
+      "title": "Interface Traffic — Inbound",
+      "type": "timeseries",
+      "targets": [{ "refId": "A", "expr": "rate(ifHCInOctets{device_name=\"$device\"}[5m]) * 8", "legendFormat": "{{ifName}}" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "bps", "color": { "mode": "palette-classic" } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "id": 5,
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "last"] }, "tooltip": { "mode": "multi" } },
+      "title": "Interface Traffic — Outbound",
+      "type": "timeseries",
+      "targets": [{ "refId": "A", "expr": "rate(ifHCOutOctets{device_name=\"$device\"}[5m]) * 8", "legendFormat": "{{ifName}}" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "pps", "color": { "mode": "palette-classic" } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "id": 6,
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi" } },
+      "title": "Errors (In / Out)",
+      "type": "timeseries",
+      "targets": [
+        { "refId": "A", "expr": "rate(ifInErrors{device_name=\"$device\"}[5m])", "legendFormat": "{{ifName}} in" },
+        { "refId": "B", "expr": "rate(ifOutErrors{device_name=\"$device\"}[5m])", "legendFormat": "{{ifName}} out" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "pps", "color": { "mode": "palette-classic" } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "id": 7,
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi" } },
+      "title": "Discards (In / Out)",
+      "type": "timeseries",
+      "targets": [
+        { "refId": "A", "expr": "rate(ifInDiscards{device_name=\"$device\"}[5m])", "legendFormat": "{{ifName}} in" },
+        { "refId": "B", "expr": "rate(ifOutDiscards{device_name=\"$device\"}[5m])", "legendFormat": "{{ifName}} out" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] },
+          "mappings": [{ "options": { "1": { "text": "Up", "color": "green" }, "2": { "text": "Down", "color": "red" }, "3": { "text": "Testing", "color": "yellow" } }, "type": "value" }],
+          "custom": { "filterable": true }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 20 },
+      "id": 8,
+      "options": { "showHeader": true, "sortBy": [{ "displayName": "Name", "desc": false }], "footer": { "show": true, "reducer": ["count"] } },
+      "title": "Interface Status Table",
+      "type": "table",
+      "targets": [{ "refId": "A", "expr": "ifOperStatus{device_name=\"$device\"}", "legendFormat": "{{ifName}}", "format": "table", "instant": true }]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["mnm", "network", "device"],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": false, "text": "All", "value": "$__all" },
+        "datasource": { "type": "prometheus", "uid": "mnm-prometheus" },
+        "definition": "label_values(ifNumber, device_name)",
+        "query": {
+          "qryType": 1,
+          "query": "label_values(ifNumber, device_name)",
+          "refId": "StandardVariableQuery"
+        },
+        "name": "device",
+        "label": "Device",
+        "type": "query",
+        "refresh": 1,
+        "sort": 1,
+        "includeAll": false,
+        "multi": false,
+        "regex": ""
+      }
+    ]
+  },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Device Dashboard",
+  "uid": "mnm-device-dashboard",
+  "version": 1
+}
