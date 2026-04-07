@@ -1,39 +1,81 @@
 # MNM — Modular Network Monitor
 
-MNM is a self-contained, Docker-based network discovery and monitoring appliance. Deploy it on a network, give it seed devices and credentials, and it discovers, inventories, and monitors your infrastructure — across vendors, across sites.
+MNM is a self-contained, Docker-based network discovery and monitoring appliance. Point it at a few seed devices and credentials, and it builds a complete inventory of every device, endpoint, and IP it can see — across vendors, across VLANs, across hypervisors. It then watches that network over time, tracking what changes.
 
-MNM is designed for network engineers who need to quickly understand what's on a network: during onboarding at a new job, during M&A integration, or as a standing monitoring platform for small-to-medium environments.
+It's built for network engineers who need to quickly understand what's on a network: during onboarding at a new job, during M&A integration, after inheriting an undocumented environment, or as a standing monitoring platform for small-to-medium environments.
+
+This is **v0.1.0**. The discovery, monitoring, and endpoint correlation pieces are working and tested on real hardware. The AI assistant and config-backup pieces are on the roadmap (see below).
 
 ## Principles
 
-- **Read-only.** MNM never writes configuration changes to network devices or cloud services. It observes. It does not modify.
-- **Self-contained.** MNM runs entirely on a single host with no external subscriptions or cloud dependencies. Everything — including the AI assistant — runs locally.
-- **Privacy-first.** No telemetry, no phone-home, no data leaves the box.
-- **Modular.** Enable only the components you need. Discovery and inventory are always on. Monitoring, config backup, log aggregation, and cloud connectors are optional.
+- **Read-only.** MNM never writes configuration to network devices or cloud services. Every API call, SNMP operation, and SSH session is read-only. This is enforced architecturally — there are no create/update/delete code paths in the tool layer.
+- **Self-contained.** Runs on a single host with no external subscriptions or cloud dependencies. Designed to function fully on an isolated network.
+- **Privacy-first.** No telemetry, no phone-home, no usage tracking. Network data stays on the box.
+- **Modular.** Discovery and inventory are always on. Monitoring, hypervisor connectors, and (eventually) AI assistance are opt-in.
 - **Open source.** MIT licensed. Built in the open.
 
-## What It Does
+## What's in v0.1.0
 
-**Discovery & Inventory** — Hand MNM a few seed IP addresses and SNMP/SSH credentials. It connects to each device, identifies the vendor and platform, pulls interface data, routing tables, ARP/MAC tables, and LLDP/CDP neighbor information, then follows those neighbors to map the full topology. The result is a populated [Nautobot](https://github.com/nautobot/nautobot) instance with your complete network inventory.
+### Discovery & Inventory
+- **Nautobot 3.0** as the source of truth, with the device-onboarding plugin and 5,200+ pre-loaded community device types ready on first boot
+- **Seed-and-sweep** discovery — give MNM CIDR ranges and credentials, it scans, fingerprints every IP it can reach (open ports, banners, TLS certs, HTTP titles, SSH versions, SNMP system data, MAC vendor lookup), classifies the host, and onboards anything that looks like a network device
+- **Periodic re-sweeps** on a configurable schedule, so you can watch a network evolve over weeks and months
+- **LLDP neighbor advisory** — newly discovered neighbors are surfaced for the operator to approve. MNM never recursively crawls (Rule 6: human-in-the-loop for scope decisions)
 
-**AI-Powered Querying** — MNM includes an embedded AI assistant (powered by a local LLM via [Ollama](https://ollama.ai)) that can answer natural language questions about your network: *"What Juniper devices are on the network?"*, *"Which interfaces are down?"*, *"Show me the routing table for the core switch."* The assistant is scoped exclusively to MNM's data — it cannot answer general questions, and it cannot make changes.
+### Endpoint Correlation Engine
+- **MAC-keyed identity records** with composite-key tracking of every (switch, port, VLAN) location a MAC has occupied
+- **Movement detection** — emits `appeared`, `moved_port`, `moved_switch`, `ip_changed`, and `hostname_changed` events as endpoints move around the network
+- **Multi-source correlation** — joins switch ARP tables, MAC tables, DHCP bindings, sweep results, and Proxmox guest data into one unified record per MAC
+- **Multi-IP support** — `additional_ips` tracking for dual-stack and multi-NIC endpoints
+- **Watchlist** — flag MACs of interest; their movement events get highlighted across the activity feed
+- **Anomaly detection** — surfaces IP conflicts, MACs active on multiple switches, endpoints with no IP, unclassified hosts, and stale endpoints (configurable threshold)
+- **Historical timeline** — every (mac, switch, port, vlan) row ever recorded is preserved for forensics
 
-**MCP Server** — MNM exposes a [Model Context Protocol](https://modelcontextprotocol.io/) server, allowing external AI tools like Claude Desktop or Claude Code to query MNM's data directly. This gives you the option of using a more capable external model for complex analysis while MNM provides the data access layer.
+### Infrastructure Collection
+Once a device is onboarded, MNM polls it on a schedule for forwarding-plane data:
+- **ARP tables** via SNMP / NAPALM
+- **MAC address tables** with VLAN context
+- **DHCP server bindings** (Junos via PyEZ; other vendors as drivers mature)
+- **Uplink detection** with three-tier fallback: cables → NAPALM LLDP neighbors → access-port heuristic. Uplink ports are excluded from endpoint location to avoid mistaking trunk-transit MACs for endpoints
 
-**Monitoring & Telemetry** — Prometheus and Grafana provide metric collection and dashboards for device health, interface utilization, and alerting. MNM supports both SNMP polling (universal fallback) and gNMI/gRPC streaming telemetry (preferred when devices support it) via gnmic. Both paths feed into Prometheus for a unified view.
+### Hypervisor Connector — Proxmox VE
+- **Read-only** API client (PVEAuditor role) collecting nodes, VMs, LXC containers, host status, ZFS pools, storage, and physical disk SMART health
+- **VM IP enrichment** with three sources: QEMU Guest Agent for VMs that have it, `/lxc/{vmid}/interfaces` for containers, and cross-MAC propagation from switch ARP tables for everything else
+- **VMs and containers become endpoints** in the same unified store, joined to their on-the-wire identity by MAC
+- **Prometheus exposition** of 30+ host and guest metrics for the Grafana dashboard
+- **ZFS pool monitoring** with usage thresholds, fragmentation, dedup ratio, and per-disk SMART status
 
-**Cloud Connectors** — Optional read-only integrations with cloud-managed networking platforms (Juniper Mist, with more planned) pull inventory and status data into MNM's unified view.
+### Monitoring
+- **Prometheus** with 365-day retention by default
+- **Grafana** with three pre-built dashboards in the `MNM` folder: Device Dashboard, Network Overview, and Proxmox Overview
+- **Dynamic SNMP target discovery** — Prometheus pulls the SNMP scrape target list from the controller via `http_sd`, so newly onboarded devices automatically appear in monitoring with no config edits
+- **gnmic** for gNMI streaming telemetry (active when devices have gNMI enabled)
+- **snmp_exporter** for the universal SNMP-polling fallback
 
-**Config Backup** — Oxidized performs automated read-only configuration backups, pulling its device list directly from Nautobot's inventory.
+### Controller UI
+A FastAPI + vanilla-JS web app on port 9090 that's the primary operator entry point:
+- **Dashboard** — container health, device count, IPs tracked, recent events, Proxmox node status, advisory cards (incomplete devices, discovered subnets, LLDP neighbors)
+- **Discovery** — trigger sweeps, view live progress, manage CIDR ranges and schedules
+- **Endpoints** — sortable / filterable table, per-MAC detail page with full movement timeline
+- **Events** — network activity feed with filtering, IP conflict detection, anomaly buckets
+- **Logs** — structured log viewer with level/module filters and a one-click export bundle for GitHub issue reports
+- **Watchlist** — add/remove MACs of interest, see flagged events
+- **One-click sync** for incomplete devices (devices that exist in Nautobot but lack IPs)
+
+### Backend
+- **PostgreSQL** for both Nautobot and the controller's endpoint store
+- **Redis** for Nautobot's cache and Celery broker
+- **Celery worker + scheduler** for Nautobot background jobs
+- **Traefik** as the reverse proxy
+- **Structured JSON logging** with secret masking and an in-memory ring buffer for the log viewer
 
 ## Quick Start
 
 ### Prerequisites
-
-- Ubuntu 24.04 LTS (VM recommended, x86_64)
-- Docker CE and Docker Compose v2
-- Minimum 16 GB RAM, 4 CPU cores (32 GB recommended if using larger LLM models)
-- Network access to target devices (SNMP and/or SSH)
+- Ubuntu 24.04 LTS or any Linux host capable of running Docker
+- Docker Engine and Docker Compose v2
+- 16 GB RAM minimum, 4 vCPUs
+- Network reachability to the devices you want to monitor (typically port 161 SNMP, port 22 SSH, port 830 NETCONF, ICMP)
 
 ### Deploy
 
@@ -41,91 +83,122 @@ MNM is designed for network engineers who need to quickly understand what's on a
 git clone https://github.com/commitconfirm/mnm.git
 cd mnm
 cp .env.example .env
-# Edit .env with your timezone, passwords, etc.
+# Edit .env — set MNM_ADMIN_PASSWORD, NAUTOBOT_NAPALM_USERNAME/PASSWORD,
+# SNMP_COMMUNITY, and (optionally) PROXMOX_HOST/TOKEN if you have a Proxmox host
 docker compose up -d
+./bootstrap/bootstrap.sh
 ```
 
-MNM will start Nautobot and its dependencies. Once healthy, access the web interface via your browser.
+The bootstrap script is idempotent — it creates the Nautobot superuser, locations, roles, manufacturers, secrets, the controller's PostgreSQL database, and the device-type library. Safe to re-run.
 
-### Discover Your Network
+### First Login
 
-1. Open Nautobot at `http://<server-ip>:8443`
-2. Add your SNMP communities and/or SSH credentials
-3. Seed your first device IPs
-4. MNM discovers neighbors and builds your inventory
+Once `docker compose ps` shows everything healthy, the **controller** at **`http://<host>:9090`** is your primary entry point. Log in with the password you set in `.env`. From there:
 
-### Connect Claude Desktop (Optional)
+1. Open **Discovery**, add a CIDR range and select the credential set you configured during bootstrap, click **Start Sweep**
+2. Watch the discovery table populate as MNM probes each IP
+3. Onboarded devices automatically appear in **Prometheus** monitoring within ~60 seconds via dynamic SNMP target discovery
+4. Open **Endpoints** to see what's been correlated; **Events** to see what's been changing
 
-Add MNM's MCP server to your Claude Desktop configuration to query your network data with Claude:
+### Service URLs
 
-```json
-{
-  "mcpServers": {
-    "mnm": {
-      "command": "npx",
-      "args": [
-        "mcp-remote",
-        "http://<server-ip>:8444/mcp"
-      ]
-    }
-  }
-}
-```
+| Service | URL | Notes |
+|---------|-----|------|
+| **MNM Controller** | `http://<host>:9090` | Primary operator UI — start here |
+| Nautobot | `http://<host>:8443` | Source-of-truth inventory + IPAM |
+| Grafana | `http://<host>:8080/grafana/` | Dashboards in the `MNM` folder |
+| Prometheus | `http://<host>:8080/prometheus/` | Raw metrics + scrape target status |
+
+For a step-by-step deployment walkthrough including credential setup, see [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
 ## Architecture
 
-MNM is built on proven open-source tools, composed via Docker:
+MNM ships as 11 Docker services:
 
-| Component | Tool | Purpose |
-|-----------|------|---------|
-| Inventory & Discovery | Nautobot + NAPALM | Multi-vendor device onboarding, topology mapping |
-| Monitoring | Prometheus + Grafana | Metrics, dashboards, alerting |
-| Network Telemetry | gnmic + snmp_exporter | gNMI streaming (preferred) + SNMP polling (fallback) |
-| Config Backup | Oxidized | Read-only configuration archival |
-| Log Aggregation | Loki | Centralized syslog and log search |
-| AI Assistant | Ollama | Local LLM for natural language queries |
-| Reverse Proxy | Traefik | Automatic service discovery and TLS |
-| Cloud Connectors | Custom (Python) | Read-only ingestion from Mist, etc. |
+| Service | Tool | Purpose |
+|---------|------|---------|
+| `controller` | FastAPI + vanilla JS | Primary operator UI, discovery engine, endpoint store, connectors, advisories |
+| `nautobot` | Nautobot 3.0 + device-onboarding | Source-of-truth inventory, device records, IPAM |
+| `nautobot-worker` | Celery worker | Runs Nautobot's background jobs (onboarding, sync) |
+| `nautobot-scheduler` | Celery beat | Scheduled Nautobot tasks |
+| `postgres` | PostgreSQL 15 | Backs both Nautobot and the controller's `mnm_controller` database |
+| `redis` | Redis 7 | Nautobot cache + Celery broker |
+| `traefik` | Traefik v2.11 | Reverse proxy routing `/`, `/grafana`, `/prometheus` to backend services |
+| `prometheus` | Prometheus v3 | Metrics storage with 365-day retention |
+| `grafana` | Grafana 12 | Dashboards (auto-provisioned into the `MNM` folder) |
+| `snmp-exporter` | snmp_exporter | SNMP polling, scrape targets pulled dynamically from the controller |
+| `gnmic` | gnmic | gNMI streaming telemetry collector |
+
+The controller is the heart of MNM. It owns the discovery engine, the endpoint correlation store, the connector framework, and every operator-facing UI. Nautobot remains the source of truth for device records and IPAM; the controller's PostgreSQL store handles temporal data (movement events, sweep history, IP observations) that Nautobot's model doesn't represent natively.
+
+For the full architectural breakdown including container map, port assignments, data flows, and security model, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## Documentation
+
+| Doc | What's in it |
+|-----|--------------|
+| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Every `.env` variable, what it does, defaults, and gotchas |
+| [docs/DISCOVERY.md](docs/DISCOVERY.md) | How seed-and-sweep, fingerprinting, and the endpoint correlation engine work |
+| [docs/MONITORING.md](docs/MONITORING.md) | Prometheus, Grafana, SNMP exporter, gnmic — what's collected and how to add devices |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Container map, network flows, port assignments, security model |
+| [docs/CONNECTORS.md](docs/CONNECTORS.md) | Connector framework reference + Proxmox VE setup (API token, PVEAuditor role) |
+| [docs/API.md](docs/API.md) | Controller REST API reference with curl examples |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common issues drawn from real deployment experience |
 
 ## Supported Vendors
 
-MNM uses NAPALM for multi-vendor device communication. Tested platforms:
+MNM uses NAPALM for multi-vendor device communication. Tested:
 
 | Vendor | Status | Notes |
 |--------|--------|-------|
-| Juniper (Junos) | Primary test target | Excellent NAPALM support |
-| Cisco (IOS/IOS-XE) | Tested | Strong NAPALM support |
-| Fortinet (FortiOS) | In progress | Community NAPALM driver + direct API |
+| Juniper (Junos) | Primary test target | Excellent NAPALM support via NETCONF/PyEZ. Requires `view configuration` permission for full onboarding |
+| Cisco (IOS / IOS-XE) | Supported | Strong NAPALM SSH support, well-tested upstream |
+| Fortinet (FortiOS) | Driver available | Community NAPALM driver — coverage is thinner than Juniper/Cisco |
 
-NAPALM supports [many additional platforms](https://napalm.readthedocs.io/en/latest/support/). If a device responds to SNMP or SSH, MNM can likely discover it.
+NAPALM supports [many additional platforms](https://napalm.readthedocs.io/en/latest/support/). For SNMP-only monitoring, MNM works with anything that speaks SNMPv2c or SNMPv3.
 
 ## Project Status
 
-MNM is in active early development. See [CLAUDE.md](CLAUDE.md) for architectural decisions, phasing plan, and development context.
-
 | Phase | Status | Scope |
 |-------|--------|-------|
-| Phase 1 — Discovery | **In progress** | Nautobot, device onboarding, bootstrap |
-| Phase 2 — Monitoring | Planned | Prometheus, Grafana, SNMP exporter |
-| Phase 3 — AI Layer | Planned | Ollama, tool layer, MCP server, chat UI |
-| Phase 4 — Connectors & Ops | Planned | Mist, Oxidized, Loki |
+| Phase 1 — Discovery foundation | ✅ Complete | Nautobot, device onboarding, bootstrap, idempotent setup, 5,200+ device types |
+| Phase 2 — Monitoring stack | ✅ Complete | Prometheus, Grafana, snmp_exporter, gnmic, dynamic SNMP target discovery |
+| Phase 2.5 — Controller + intelligence | ✅ Complete | Controller UI, seed-and-sweep, fingerprinting, IPAM integration, password-gated UI |
+| Phase 2.7 — Endpoint correlation engine | ✅ Complete | PostgreSQL endpoint store, MAC-keyed movement tracking, anomaly detection, watchlist, advisories |
+| Phase 2.7+ — Proxmox connector | ✅ Complete | Read-only Proxmox VE API client with ZFS, VM/CT, and SMART monitoring |
+| Phase 3 — AI layer | 🔜 Planned | Embedded Ollama assistant, tool layer, MCP server, chat UI |
+| Phase 4 — Connectors + ops | 🔜 Planned | Mist cloud connector, Oxidized config backup, Loki log aggregation |
+| Phase 5 — Testing + CI | 🔜 Planned | Unit tests, integration tests, GitHub Actions pipeline |
 
-## Predecessor
+## Roadmap
 
-MNM is a ground-up rewrite of [nts-server](https://github.com/commitconfirm/nts-server), a bash-driven Docker deployment of network monitoring tools (Netdisco, LibreNMS, Oxidized). MNM reimagines the concept with a modern stack, AI-native querying, and a self-contained architecture.
+The following are designed and documented but **not yet built**:
+
+- **Embedded AI assistant (Phase 3).** A local LLM via [Ollama](https://ollama.com), scoped exclusively to MNM's data via a tool layer. The assistant will answer natural-language questions like *"Which Juniper devices are on the network?"*, *"What changed on switch port ge-0/0/12 last week?"*, *"Show me endpoints that moved between switches today."* It will not be able to answer general questions, and it will not have any write capabilities.
+- **MCP server (Phase 3).** A [Model Context Protocol](https://modelcontextprotocol.io/) server exposing the same tool layer as the embedded assistant, so external AI tools (Claude Desktop, Claude Code) can query MNM's data directly. This is the optional upgrade path for users who want a more capable model than the local LLM can run.
+- **Cloud connectors (Phase 4).** Mist is the first planned cloud connector — read-only ingestion of inventory and status into Nautobot, following the connector framework pattern established by the Proxmox connector.
+- **Config backup (Phase 4).** Oxidized for read-only configuration archival, with its device list pulled directly from Nautobot.
+- **Log aggregation (Phase 4).** Loki for centralized device syslog and search.
+- **Testing + CI (Phase 5).** pytest unit + integration test suite, mocked Nautobot/SNMP/SSH responses, GitHub Actions pipeline with lint + type-check + test on every push.
+
+These will be built and shipped in subsequent releases. The phasing exists so each release stays small enough to test thoroughly on real hardware before moving on.
 
 ## Security
 
-MNM collects sensitive network intelligence including device inventories, IP ranges, service fingerprints, SNMP data, LLDP topology, and credentials. This data, if compromised, could be used to map and attack the monitored network. Deploy MNM on trusted infrastructure with appropriate access controls. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#security-model) for the full security model.
+MNM collects sensitive network intelligence: device inventories, IP ranges, service fingerprints, TLS certificates, SNMP data, LLDP topology, MAC addresses, and operator credentials (stored in Nautobot Secrets and the host's `.env`). If compromised, this data is a roadmap for attacking the monitored network.
+
+Deploy MNM on trusted infrastructure with appropriate access controls. The controller UI is password-gated; Nautobot has its own auth; Grafana defaults to anonymous read-only viewing because dashboards are intended to be shared. The Docker socket is mounted into the controller container so it can manage the stack, which is functionally root-equivalent — operators should treat the MNM host the same way they would any management/jump host.
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the threat model, hardening recommendations, and data retention details.
+
+## Predecessor
+
+MNM is a ground-up rewrite of [nts-server](https://github.com/commitconfirm/nts-server), a bash-driven Docker deployment of network monitoring tools (Netdisco, LibreNMS, Oxidized, NGINX). MNM reimagines the same problem space with a modern stack, structured persistence, an operator UI built around the discovery and endpoint workflows, and a connector framework for hypervisor and cloud integrations.
 
 ## Contributing
 
-Contributions welcome once the project reaches public release. For now, issues and ideas can be discussed via GitHub Issues.
+Issues and ideas are welcome via GitHub Issues. Pull requests will be accepted once the project reaches a more stable feature set; for now, expect rapid iteration and occasional schema changes between releases.
 
 ## License
 
-MIT License. See [LICENSE](LICENSE) for details.
-
-## Built With
-
-This project is developed with [Claude Code](https://claude.ai) following documented architectural decisions in [CLAUDE.md](CLAUDE.md).
+MIT. See [LICENSE](LICENSE).
