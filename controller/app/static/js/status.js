@@ -397,13 +397,14 @@ async function loadIncompleteDevices() {
     const nautobotBase = `${window.location.protocol}//${window.location.hostname}:8443`;
     document.getElementById('incomplete-table').innerHTML = devices.map(dev => {
       const deviceUrl = `${nautobotBase}/dcim/devices/${dev.id}/`;
-      return '<tr data-device-id="' + esc(dev.id) + '">' +
+      return '<tr data-device-id="' + esc(dev.id) + '" data-device-name="' + esc(dev.name) + '">' +
         '<td><a href="' + deviceUrl + '" target="_blank" rel="noopener">' + esc(dev.name) + '</a></td>' +
         '<td>' + esc(dev.device_type) + '</td>' +
         '<td>' + esc(dev.platform) + '</td>' +
         '<td>' + esc(dev.location) + '</td>' +
         '<td>' + esc(dev.status) + '</td>' +
         '<td class="sync-status">' + _syncBadge('pending') + '</td>' +
+        '<td><button class="btn exclude-device-btn" data-name="' + esc(dev.name) + '">Exclude</button></td>' +
         '</tr>';
     }).join('');
   } catch (e) { console.error('Incomplete devices load failed:', e); }
@@ -459,6 +460,27 @@ async function pollSyncIncomplete() {
 }
 
 document.addEventListener('click', async (ev) => {
+  if (ev.target && ev.target.classList && ev.target.classList.contains('exclude-device-btn')) {
+    const name = ev.target.getAttribute('data-name');
+    if (!confirm('Exclude device "' + name + '" from MNM advisories?\n\nThe Incomplete Devices card will hide this device. To also stop the sweep from re-onboarding it, add its IP separately on the Discovery page.')) return;
+    const reason = prompt('Reason for excluding this device? (optional)') || '';
+    try {
+      const r = await fetch('/api/discover/excludes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identifier: name, type: 'device_name', reason }),
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        alert('Failed to exclude: ' + (err.detail || r.status));
+        return;
+      }
+      loadIncompleteDevices();
+    } catch (e) {
+      alert('Failed: ' + e);
+    }
+    return;
+  }
   if (ev.target && ev.target.id === 'sync-incomplete-btn') {
     const btn = ev.target;
     btn.disabled = true;

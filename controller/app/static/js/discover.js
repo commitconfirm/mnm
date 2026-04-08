@@ -517,10 +517,80 @@ function setTheme(theme) {
 MNMPreferences.init();
 
 // Init
+// ---------------------------------------------------------------------------
+// Discovery exclusions (Rule 6 — operator-controlled scope)
+// ---------------------------------------------------------------------------
+async function loadExcludes() {
+  try {
+    const r = await fetch('/api/discover/excludes');
+    if (!r.ok) return;
+    const data = await r.json();
+    const tbody = document.getElementById('excludes-tbody');
+    if (!tbody) return;
+    const rows = data.excludes || [];
+    if (!rows.length) {
+      tbody.innerHTML = '<tr><td colspan="6" style="color:var(--text-muted); text-align:center">No exclusions</td></tr>';
+      return;
+    }
+    const esc = (s) => { const d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; };
+    tbody.innerHTML = rows.map(e => {
+      const typeBadge = e.type === 'ip'
+        ? '<span class="badge scanning">IP</span>'
+        : '<span class="badge known">Device</span>';
+      return '<tr>' +
+        '<td><code>' + esc(e.identifier) + '</code></td>' +
+        '<td>' + typeBadge + '</td>' +
+        '<td>' + esc(e.reason) + '</td>' +
+        '<td>' + esc(e.created_by) + '</td>' +
+        '<td>' + esc(e.created_at ? new Date(e.created_at).toLocaleString() : '') + '</td>' +
+        '<td><button class="btn exclude-remove" data-identifier="' + esc(e.identifier) + '">Remove</button></td>' +
+      '</tr>';
+    }).join('');
+    document.querySelectorAll('.exclude-remove').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const ident = btn.getAttribute('data-identifier');
+        if (!confirm('Remove exclusion for ' + ident + '?')) return;
+        await fetch('/api/discover/excludes/' + encodeURIComponent(ident), { method: 'DELETE' });
+        loadExcludes();
+      });
+    });
+  } catch (e) { console.error('Failed to load excludes:', e); }
+}
+
+document.getElementById('exclude-add-btn').addEventListener('click', async () => {
+  const ip = document.getElementById('exclude-ip').value.trim();
+  const name = document.getElementById('exclude-name').value.trim();
+  const reason = document.getElementById('exclude-reason').value.trim();
+  if (!ip && !name) {
+    alert('Enter an IP address OR a device name to exclude.');
+    return;
+  }
+  // If both are provided, the IP wins (sweep skip is the higher-impact action).
+  // To exclude both, the operator submits twice.
+  const body = ip
+    ? { identifier: ip, type: 'ip', reason }
+    : { identifier: name, type: 'device_name', reason };
+  const r = await fetch('/api/discover/excludes', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (r.ok) {
+    document.getElementById('exclude-ip').value = '';
+    document.getElementById('exclude-name').value = '';
+    document.getElementById('exclude-reason').value = '';
+    loadExcludes();
+  } else {
+    const err = await r.json().catch(() => ({}));
+    alert('Failed to add exclusion: ' + (err.detail || r.status));
+  }
+});
+
 checkAuth().then(() => {
   loadOptions();
   loadSchedule();
   loadHistory();
+  loadExcludes();
   // Check if there's an active sweep — resume polling and disable start button
   fetch('/api/discover/status').then(r => r.json()).then(data => {
     if (data.running || Object.keys(data.hosts || {}).length > 0) {

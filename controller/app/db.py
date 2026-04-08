@@ -264,6 +264,38 @@ class EndpointWatch(Base):
         }
 
 
+class DiscoveryExclude(Base):
+    """Operator-defined exclusion list for sweep + collection.
+
+    One row per excluded thing. The ``identifier`` is either an IP address
+    or a device name; the ``type`` discriminator says which:
+
+      - ``type='ip'``        — sweep skips before probing, collector skips
+                                ARP/MAC correlation for this IP.
+      - ``type='device_name'`` — Incomplete Devices advisory hides any
+                                Nautobot device with this exact name.
+
+    Two types, one table, no overloading. Inviolable Rule 6 — operator
+    owns scope.
+    """
+    __tablename__ = "discovery_excludes"
+
+    identifier = Column(Text, primary_key=True)
+    type = Column(Text, nullable=False)  # 'ip' or 'device_name'
+    reason = Column(Text)
+    created_by = Column(Text)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    def to_dict(self) -> dict:
+        return {
+            "identifier": self.identifier,
+            "type": self.type,
+            "reason": self.reason or "",
+            "created_by": self.created_by or "",
+            "created_at": self.created_at.isoformat() if self.created_at else "",
+        }
+
+
 class KVConfig(Base):
     """Simple key/value store that replaces config.json."""
     __tablename__ = "kv_config"

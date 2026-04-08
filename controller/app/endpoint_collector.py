@@ -640,6 +640,18 @@ async def collect_all() -> dict:
         log.warning("uplinks_fetch_failed", "Failed to fetch uplinks from Nautobot",
                     context={"error": str(e)})
 
+    # --- Pre-fetch operator-defined IP exclusions (Rule 6) ---
+    excluded_ips: set[str] = set()
+    if db.is_ready():
+        try:
+            excluded_ips = await endpoint_store.get_excluded_ips()
+            if excluded_ips:
+                log.info("excludes_loaded", "Discovery exclusion list loaded",
+                         context={"count": len(excluded_ips)})
+        except Exception as e:
+            log.warning("excludes_fetch_failed", "Could not load exclusion list",
+                        context={"error": str(e)})
+
     # --- Persist to controller DB + Nautobot IPAM ---
     _collection_state["progress"]["phase"] = "recording"
     recorded = 0
@@ -649,6 +661,11 @@ async def collect_all() -> dict:
     moved_count = 0
 
     for ip, endpoint in all_endpoints.items():
+        # Operator exclusion (Rule 6): skip ARP/MAC entries for IPs the
+        # operator has marked as excluded. Neither the controller DB nor
+        # Nautobot IPAM gets updated for them.
+        if ip in excluded_ips:
+            continue
         # Persist to controller DB (with diff/event detection)
         if db.is_ready():
             # Always propagate the (mac, ip) binding to any existing rows for

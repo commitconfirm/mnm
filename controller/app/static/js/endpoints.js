@@ -2,6 +2,18 @@
 
 let allEndpoints = [];
 let refreshTimer = null;
+let excludedIpSet = new Set();
+
+async function loadExcludedIps() {
+  try {
+    const r = await fetch('/api/discover/excludes');
+    if (!r.ok) return;
+    const data = await r.json();
+    excludedIpSet = new Set((data.excludes || [])
+      .filter(e => e.type === 'ip')
+      .map(e => e.identifier));
+  } catch (e) { /* non-fatal — table renders without strikethrough */ }
+}
 
 async function checkAuth() {
   const resp = await fetch('/api/auth/check');
@@ -41,7 +53,13 @@ function sourceBadge(source) {
 const endpointsDT = new DataTable({
   containerId: 'endpoints-dt',
   columns: [
-    { key: 'ip', label: 'IP', sortable: true },
+    { key: 'ip', label: 'IP', sortable: true, render: function(v) {
+      if (!v) return '-';
+      if (excludedIpSet.has(v)) {
+        return '<span title="Excluded from discovery" style="text-decoration: line-through; opacity: 0.6">' + escHtml(v) + '</span>';
+      }
+      return escHtml(v);
+    } },
     { key: 'mac', label: 'MAC', sortable: true, render: function(v) { return '<a href="/endpoints/' + encodeURIComponent(v) + '"><code>' + escHtml(v) + '</code></a>'; } },
     { key: 'mac_vendor', label: 'Vendor', sortable: true, render: function(v) { return escHtml(v || '-'); } },
     { key: 'hostname', label: 'Hostname', sortable: true, render: function(v, row) { return escHtml(v || row.dhcp_hostname || '-'); } },
@@ -323,7 +341,8 @@ document.getElementById('watch-add-btn').addEventListener('click', async () => {
   }
 });
 
-checkAuth().then(() => {
+checkAuth().then(async () => {
+  await loadExcludedIps();  // populate set before first table render
   loadSummary();
   loadEndpoints();
   loadHistory();

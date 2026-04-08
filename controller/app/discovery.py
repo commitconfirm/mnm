@@ -1399,6 +1399,7 @@ async def sweep(
 
     # Load endpoint data for MAC/vendor enrichment (from infrastructure collection)
     _endpoint_macs: dict[str, tuple[str, str]] = {}  # ip -> (mac, vendor)
+    _excluded_ips: set[str] = set()
     try:
         from app import db as _db
         from app import endpoint_store as _es
@@ -1411,6 +1412,10 @@ async def sweep(
                     _endpoint_macs[ep_ip] = (mac, vendor)
             if _endpoint_macs:
                 _log(f"Loaded {len(_endpoint_macs)} MAC addresses from endpoint store")
+            # Operator-defined exclusion list (Rule 6)
+            _excluded_ips = await _es.get_excluded_ips()
+            if _excluded_ips:
+                _log(f"Skipping {len(_excluded_ips)} excluded IP(s) per discovery exclusion list")
     except Exception:
         pass
 
@@ -1432,6 +1437,16 @@ async def sweep(
             return
 
         host = _sweep_state["hosts"][ip]
+
+        # Operator exclusion list — skip before any probing happens.
+        # The host stays in the table marked DEAD so the count is honest:
+        # the operator told us to ignore it, we ignored it.
+        if ip in _excluded_ips:
+            host["status"] = SweepStatus.DEAD
+            host["classification"] = "excluded"
+            _completed["count"] += 1
+            return
+
         host["status"] = SweepStatus.SCANNING
         t0 = datetime.now(timezone.utc)
 

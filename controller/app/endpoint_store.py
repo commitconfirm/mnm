@@ -639,6 +639,131 @@ async def is_watched(mac: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Discovery exclusions (operator-controlled scope, Rule 6)
+# ---------------------------------------------------------------------------
+#
+# When the operator marks an IP as excluded:
+#   - the sweep skips it before probing
+#   - the infrastructure collector skips ARP/MAC correlation for it
+#   - the Incomplete Devices advisory hides any Nautobot device whose
+#     primary IP (or interface IP) is in this list
+#
+# All three call sites pull the full set into memory once at the start of
+# their run rather than hitting the DB per IP. The set is small (typically
+# a handful of entries) so we just keep an in-process cache and rely on the
+# CRUD helpers to invalidate it on writes.
+
+EXCLUDE_TYPE_IP = "ip"
+EXCLUDE_TYPE_DEVICE_NAME = "device_name"
+_VALID_EXCLUDE_TYPES = {EXCLUDE_TYPE_IP, EXCLUDE_TYPE_DEVICE_NAME}
+
+_exclude_cache_ip: set[str] | None = None
+_exclude_cache_device: set[str] | None = None
+
+
+def _invalidate_exclude_cache() -> None:
+    global _exclude_cache_ip, _exclude_cache_device
+    _exclude_cache_ip = None
+    _exclude_cache_device = None
+
+
+async def list_excludes() -> list[dict]:
+    async with db.SessionLocal() as session:
+        rows = (await session.execute(
+            select(db.DiscoveryExclude).order_by(db.DiscoveryExclude.created_at.desc())
+        )).scalars().all()
+        return [r.to_dict() for r in rows]
+
+
+async def get_excluded_ips() -> set[str]:
+    """Return the full set of excluded IP identifiers.
+
+    Cached in-process; the cache is invalidated on add/remove. Callers
+    should refresh once at the start of a run, not per IP.
+    """
+    global _exclude_cache_ip
+    if _exclude_cache_ip is not None:
+        return _exclude_cache_ip
+    async with db.SessionLocal() as session:
+        rows = (await session.execute(
+            select(db.DiscoveryExclude.identifier)
+            .where(db.DiscoveryExclude.type == EXCLUDE_TYPE_IP)
+        )).scalars().all()
+    _exclude_cache_ip = {r for r in rows if r}
+    return _exclude_cache_ip
+
+
+async def get_excluded_device_names() -> set[str]:
+    """Return the full set of excluded device-name identifiers."""
+    global _exclude_cache_device
+    if _exclude_cache_device is not None:
+        return _exclude_cache_device
+    async with db.SessionLocal() as session:
+        rows = (await session.execute(
+            select(db.DiscoveryExclude.identifier)
+            .where(db.DiscoveryExclude.type == EXCLUDE_TYPE_DEVICE_NAME)
+        )).scalars().all()
+    _exclude_cache_device = {r for r in rows if r}
+    return _exclude_cache_device
+
+
+async def add_exclude(identifier: str, type: str,
+                       reason: str = "", created_by: str = "") -> dict:
+    if not identifier:
+        raise ValueError("identifier is required")
+    if type not in _VALID_EXCLUDE_TYPES:
+        raise ValueError(f"type must be one of {sorted(_VALID_EXCLUDE_TYPES)}")
+    async with db.SessionLocal() as session:
+        existing = (await session.execute(
+            select(db.DiscoveryExclude).where(db.DiscoveryExclude.identifier == identifier)
+        )).scalar_one_or_none()
+        if existing:
+            existing.type = type
+            existing.reason = reason or existing.reason
+            existing.created_by = created_by or existing.created_by
+            await session.commit()
+            _invalidate_exclude_cache()
+            return existing.to_dict()
+        row = db.DiscoveryExclude(
+            identifier=identifier,
+            type=type,
+            reason=reason,
+            created_by=created_by,
+        )
+        session.add(row)
+        await session.commit()
+        _invalidate_exclude_cache()
+        return row.to_dict()
+
+
+async def remove_exclude(identifier: str) -> bool:
+    async with db.SessionLocal() as session:
+        existing = (await session.execute(
+            select(db.DiscoveryExclude).where(db.DiscoveryExclude.identifier == identifier)
+        )).scalar_one_or_none()
+        if not existing:
+            return False
+        await session.delete(existing)
+        await session.commit()
+        _invalidate_exclude_cache()
+        return True
+
+
+async def is_excluded_ip(ip: str) -> bool:
+    """Single-IP check. For hot loops, prefer get_excluded_ips() once and
+    test set membership locally."""
+    if not ip:
+        return False
+    return ip in (await get_excluded_ips())
+
+
+async def is_excluded_device(name: str) -> bool:
+    if not name:
+        return False
+    return name in (await get_excluded_device_names())
+
+
+# ---------------------------------------------------------------------------
 # Run records
 # ---------------------------------------------------------------------------
 

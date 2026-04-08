@@ -375,6 +375,53 @@ async def sync_incomplete_status():
     return dict(_sync_incomplete_state)
 
 
+# -------------------------------------------------------------------------
+# Discovery exclusion list (Rule 6 — operator-controlled scope)
+# -------------------------------------------------------------------------
+class ExcludeRequest(BaseModel):
+    identifier: str
+    type: str  # "ip" or "device_name"
+    reason: str = ""
+
+
+@app.get("/api/discover/excludes", dependencies=[Depends(require_auth)])
+async def list_discover_excludes():
+    if not db.is_ready():
+        return {"excludes": []}
+    return {"excludes": await endpoint_store.list_excludes()}
+
+
+@app.post("/api/discover/excludes", dependencies=[Depends(require_auth)])
+async def add_discover_exclude(body: ExcludeRequest):
+    if not db.is_ready():
+        raise HTTPException(status_code=503, detail="Controller DB not available")
+    ident = body.identifier.strip()
+    if not ident:
+        raise HTTPException(status_code=400, detail="identifier is required")
+    if body.type not in ("ip", "device_name"):
+        raise HTTPException(status_code=400, detail="type must be 'ip' or 'device_name'")
+    user = os.environ.get("MNM_ADMIN_USER", "admin")
+    try:
+        return await endpoint_store.add_exclude(
+            identifier=ident,
+            type=body.type,
+            reason=body.reason,
+            created_by=user,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/api/discover/excludes/{identifier}", dependencies=[Depends(require_auth)])
+async def delete_discover_exclude(identifier: str):
+    if not db.is_ready():
+        raise HTTPException(status_code=503, detail="Controller DB not available")
+    removed = await endpoint_store.remove_exclude(identifier)
+    if not removed:
+        raise HTTPException(status_code=404, detail="Exclusion not found")
+    return {"status": "removed"}
+
+
 @app.get("/api/discover/incomplete-devices", dependencies=[Depends(require_auth)])
 async def discover_incomplete_devices():
     """Surface onboarded devices whose record exists in Nautobot but has no
@@ -395,14 +442,52 @@ async def discover_incomplete_devices():
     except Exception as e:
         return {"devices": [], "error": str(e)}
 
-    # Map device IDs to any IP records that reference them via interface
-    # assignment (a fallback when primary_ip4 isn't set).
+    # Operator exclusion list — devices whose primary IP, any interface IP,
+    # OR device name is in this set are filtered out of the advisory.
+    # Device-name filtering is the primary path for this advisory because
+    # the devices it surfaces by definition have no IPs to match against.
+    excluded_ips: set[str] = set()
+    excluded_names: set[str] = set()
+    if db.is_ready():
+        try:
+            excluded_ips = await endpoint_store.get_excluded_ips()
+            excluded_names = await endpoint_store.get_excluded_device_names()
+        except Exception:
+            pass
+
+    # Build a per-device set of IP strings (primary + interface) so we can
+    # cheaply check device-vs-exclusion membership below.
     dev_has_iface_ip: set[str] = set()
+    dev_ips: dict[str, set[str]] = {}
+    ip_by_id: dict[str, dict] = {}
     for rec in ip_records:
+        ip_by_id[rec.get("id")] = rec
         ao = rec.get("assigned_object") or {}
         dev_ref = ao.get("device") if isinstance(ao, dict) else None
         if isinstance(dev_ref, dict) and dev_ref.get("id"):
-            dev_has_iface_ip.add(dev_ref["id"])
+            dev_id_ref = dev_ref["id"]
+            dev_has_iface_ip.add(dev_id_ref)
+            disp = (rec.get("display") or rec.get("address") or "").split("/")[0]
+            if disp:
+                dev_ips.setdefault(dev_id_ref, set()).add(disp)
+
+    def _device_has_excluded_ip(dev: dict) -> bool:
+        if not excluded_ips:
+            return False
+        dev_id = dev.get("id")
+        # Primary IP
+        primary = dev.get("primary_ip4") or dev.get("primary_ip6")
+        if isinstance(primary, dict):
+            disp = (primary.get("display") or primary.get("address") or "").split("/")[0]
+            if disp and disp in excluded_ips:
+                return True
+            pid = primary.get("id")
+            if pid and pid in ip_by_id:
+                disp = (ip_by_id[pid].get("display") or ip_by_id[pid].get("address") or "").split("/")[0]
+                if disp and disp in excluded_ips:
+                    return True
+        # Any interface IP
+        return bool(dev_ips.get(dev_id, set()) & excluded_ips)
 
     for dev in devices:
         dev_id = dev.get("id")
@@ -410,6 +495,10 @@ async def discover_incomplete_devices():
         has_primary = bool(primary)
         has_iface_ip = dev_id in dev_has_iface_ip
         if has_primary or has_iface_ip:
+            continue
+        if _device_has_excluded_ip(dev):
+            continue
+        if dev.get("name") in excluded_names:
             continue
         platform = dev.get("platform") or {}
         location = dev.get("location") or {}
