@@ -140,9 +140,12 @@ async def on_startup():
     asyncio.create_task(discovery.scheduled_sweep_loop())
     asyncio.create_task(endpoint_collector.scheduled_collection_loop())
     asyncio.create_task(proxmox_connector.scheduled_loop())
+    asyncio.create_task(_scheduled_prune_loop())
     log.info("background_tasks",
-             "Background tasks launched: sweep scheduler, endpoint collector, proxmox connector",
-             context={"proxmox_configured": proxmox_connector.is_configured()})
+             "Background tasks launched: sweep scheduler, endpoint collector, proxmox connector, prune loop",
+             context={"proxmox_configured": proxmox_connector.is_configured(),
+                      "retention_days": _retention_days(),
+                      "prune_interval_hours": _prune_interval_hours()})
 
 
 # -------------------------------------------------------------------------
@@ -1096,6 +1099,119 @@ async def proxmox_metrics():
         content=proxmox_connector.render_metrics(),
         media_type="text/plain; version=0.0.4; charset=utf-8",
     )
+
+
+# -------------------------------------------------------------------------
+# Database maintenance / pruning
+# -------------------------------------------------------------------------
+#
+# A daily background task evicts old endpoint events, IP observations,
+# orphaned watches, and stale sentinel rows. Operators can also preview or
+# trigger a prune on demand from the dashboard.
+
+_prune_state: dict = {
+    "running": False,
+    "last_run": None,
+    "last_summary": None,
+    "last_error": None,
+}
+
+
+def _retention_days() -> int:
+    try:
+        return max(1, int(os.environ.get("MNM_RETENTION_DAYS", "365")))
+    except (TypeError, ValueError):
+        return 365
+
+
+def _prune_interval_hours() -> int:
+    try:
+        return max(1, int(os.environ.get("MNM_PRUNE_INTERVAL_HOURS", "24")))
+    except (TypeError, ValueError):
+        return 24
+
+
+async def _scheduled_prune_loop() -> None:
+    """Background loop: run prune_all() once per MNM_PRUNE_INTERVAL_HOURS."""
+    log.info("prune_loop_started", "Prune loop started",
+             context={"interval_hours": _prune_interval_hours(),
+                      "retention_days": _retention_days()})
+    # Wait for the rest of the system to settle before the first prune
+    await asyncio.sleep(120)
+    while True:
+        try:
+            if db.is_ready():
+                _prune_state["running"] = True
+                summary = await endpoint_store.prune_all(_retention_days())
+                _prune_state["last_run"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                _prune_state["last_summary"] = summary
+                _prune_state["last_error"] = None
+                _prune_state["running"] = False
+        except asyncio.CancelledError:
+            log.info("prune_loop_cancelled", "Prune loop cancelled")
+            break
+        except Exception as e:
+            _prune_state["running"] = False
+            _prune_state["last_error"] = str(e)
+            log.error("prune_loop_error", "Prune loop error",
+                      context={"error": str(e)}, exc_info=True)
+        await asyncio.sleep(_prune_interval_hours() * 3600)
+
+
+@app.get("/api/admin/maintenance", dependencies=[Depends(require_auth)])
+async def admin_maintenance_status():
+    """Return DB row counts, oldest timestamps, retention setting, and the
+    last prune run summary. Powers the Database Maintenance dashboard card."""
+    if not db.is_ready():
+        return {"db_ready": False}
+    stats = await endpoint_store.maintenance_stats()
+    return {
+        "db_ready": True,
+        "retention_days": _retention_days(),
+        "prune_interval_hours": _prune_interval_hours(),
+        "stats": stats,
+        "last_run": _prune_state["last_run"],
+        "last_summary": _prune_state["last_summary"],
+        "last_error": _prune_state["last_error"],
+        "running": _prune_state["running"],
+    }
+
+
+@app.get("/api/admin/prune/preview", dependencies=[Depends(require_auth)])
+async def admin_prune_preview():
+    """Preview what would be pruned at the current retention setting,
+    without actually deleting anything."""
+    if not db.is_ready():
+        raise HTTPException(status_code=503, detail="Controller DB not available")
+    return {
+        "retention_days": _retention_days(),
+        "would_prune": await endpoint_store.prune_preview(_retention_days()),
+    }
+
+
+@app.post("/api/admin/prune", dependencies=[Depends(require_auth)])
+async def admin_prune_now():
+    """Trigger an immediate prune cycle. Returns the row counts that were
+    deleted. Same operation the daily background task runs."""
+    if not db.is_ready():
+        raise HTTPException(status_code=503, detail="Controller DB not available")
+    if _prune_state["running"]:
+        raise HTTPException(status_code=409, detail="Prune already running")
+    _prune_state["running"] = True
+    try:
+        summary = await endpoint_store.prune_all(_retention_days())
+        _prune_state["last_run"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        _prune_state["last_summary"] = summary
+        _prune_state["last_error"] = None
+    except Exception as e:
+        _prune_state["last_error"] = str(e)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        _prune_state["running"] = False
+    return {
+        "pruned": _prune_state["last_summary"],
+        "retention_days": _retention_days(),
+    }
 
 
 # -------------------------------------------------------------------------

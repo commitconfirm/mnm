@@ -22,6 +22,26 @@ RUN find /opt/nautobot -path "*/nautobot_device_onboarding/nornir_plays/command_
     find /opt/nautobot -path "*/nautobot_device_onboarding/nornir_plays/__pycache__" \
         -exec rm -rf {} + 2>/dev/null || true
 
+# Patch 3: Tolerate missing chassis serial in Sync Network Data.
+# Some devices (factory-reset, virtual chassis members, mid-RMA, certain
+# EX2300 states) return command-getter results without a usable 'serial'
+# key. Upstream's diffsync_utils.generate_device_queryset_from_command_getter_result
+# (a) raises KeyError 'serial' on the dict access, killing the entire job,
+# and (b) AND-joins the queryset on (name, serial) so even with the dict
+# access softened, an empty serial would silently fail to match the
+# existing Device record's real serial in Nautobot.
+#
+# The full patch is a Python script (multi-line replacement is awkward in
+# sed); see patches/patch_diffsync_utils.py for the rationale and the exact
+# replacement text.
+#
+# Tracking: https://github.com/nautobot/nautobot-app-device-onboarding/issues
+COPY patches/patch_diffsync_utils.py /tmp/patch_diffsync_utils.py
+RUN python3 /tmp/patch_diffsync_utils.py && \
+    rm /tmp/patch_diffsync_utils.py && \
+    find /opt/nautobot -path "*/nautobot_device_onboarding/utils/__pycache__" \
+        -exec rm -rf {} + 2>/dev/null || true
+
 # Copy custom Nautobot configuration
 COPY --chown=nautobot:nautobot nautobot_config.py /opt/nautobot/nautobot_config.py
 

@@ -43,6 +43,64 @@ All MNM configuration is via the `.env` file. Copy `.env.example` to `.env` and 
 | `GRAFANA_ADMIN_PASSWORD` | `mnm-admin` | Grafana admin password |
 | `PROMETHEUS_RETENTION_DAYS` | `365` | Prometheus metric retention in days |
 | `ANOMALY_STALE_DAYS` | `7` | Endpoints not seen in this many days are flagged as `stale` by `/api/endpoints/anomalies`. Can be overridden at runtime by writing the `anomaly_stale_days` key to `kv_config` via `POST /api/config`. |
+| `MNM_RETENTION_DAYS` | `365` | Daily prune deletes endpoint events, IP observations, and stale sentinel rows older than this. Set this to match (or exceed) `PROMETHEUS_RETENTION_DAYS` so cross-referencing time ranges between Prometheus and the endpoint store always works. |
+| `MNM_PRUNE_INTERVAL_HOURS` | `24` | How often the background prune task runs. The first run happens 2 minutes after controller startup; subsequent runs are spaced by this interval. Operators can also trigger a prune on demand from the **Database Maintenance** card on the dashboard. |
+
+## Database Maintenance
+
+MNM's controller database (`mnm_controller`) accumulates rows over time as
+endpoints move, IPs are observed, and events fire. A daily background task
+(`_scheduled_prune_loop`) evicts old data based on `MNM_RETENTION_DAYS`:
+
+- **`endpoint_events`** — movement, IP-change, hostname-change events older
+  than the retention window
+- **`ip_observations`** — per-sweep IP snapshots older than the retention
+  window
+- **`endpoint_watches`** — watchlist entries whose target MAC no longer
+  appears in any endpoint row (orphaned)
+- **`endpoints`** — sentinel rows (`current_switch = '(none)'`,
+  `current_port = '(none)'`) older than the retention window. Sentinels
+  are sweep-only endpoints that never got correlated with infrastructure
+  ARP/MAC table data, and they accumulate forever without this cleanup.
+
+Operators can preview or trigger a prune on demand from the **Database
+Maintenance** card on the dashboard, or via the REST API:
+
+```bash
+# Preview what a prune would remove without committing
+curl -b cookies.txt http://localhost:9090/api/admin/prune/preview
+
+# Run an immediate prune
+curl -b cookies.txt -X POST http://localhost:9090/api/admin/prune
+```
+
+Both endpoints require authentication and use the current value of
+`MNM_RETENTION_DAYS`.
+
+## Nautobot Retention
+
+Nautobot has its own retention controls for the data it stores. These are
+separate from MNM's controller-database pruning and need to be set in
+`nautobot/nautobot_config.py` (or via the `NAUTOBOT_*` environment variables
+the base image accepts). For busy MNM deployments with frequent onboarding /
+sync runs, the defaults can consume significant database space inside the
+shared `mnm-postgres` instance:
+
+| Setting | Default | What it controls |
+|---------|---------|------------------|
+| `JOB_RESULT_RETENTION` | 90 days | How long Nautobot keeps `JobResult` records (every onboarding run, sync run, custom job execution). MNM submits these on every Sync All button press, every periodic sync, and every endpoint collection cycle that touches Nautobot. |
+| `CHANGELOG_RETENTION` | 90 days | How long Nautobot keeps `ObjectChange` records — the audit trail of every IPAM/DCIM mutation. |
+
+For typical MNM deployments the 90-day defaults are reasonable. If you have
+a high job-execution rate (sub-hourly syncs against many devices) consider
+lowering `JOB_RESULT_RETENTION` to 30 days to keep the database compact.
+See the [Nautobot configuration documentation](https://docs.nautobot.com/projects/core/en/stable/user-guide/administration/configuration/optional-settings/)
+for the full set of retention knobs.
+
+> **Note:** Nautobot's retention is enforced by Celery beat tasks running
+> in the `nautobot-scheduler` container — they're independent of MNM's
+> prune loop. If the scheduler container is unhealthy, neither retention
+> system runs.
 
 ## Connectors
 

@@ -716,6 +716,188 @@ async def record_ip_observation(ip: str, host: dict) -> None:
 # JSON migration (one-shot, on first startup with empty DB)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Database hygiene / pruning
+# ---------------------------------------------------------------------------
+#
+# All four prune helpers below take a single ``retention_days`` argument and
+# delete rows older than that threshold. They are designed to be safe to run
+# concurrently with collection — each operates inside its own short
+# transaction and never touches active in-flight rows.
+#
+# Counts are returned for logging and the admin UI. Structured logging uses
+# the dedicated "prune" module so the events are easy to filter in the log
+# viewer.
+
+_prune_log = StructuredLogger(__name__ + ".prune", module="prune")
+
+
+async def prune_old_events(retention_days: int) -> int:
+    """Delete endpoint_events older than retention_days. Returns row count."""
+    cutoff = _now() - timedelta(days=retention_days)
+    async with db.SessionLocal() as session:
+        result = await session.execute(
+            db.EndpointEvent.__table__.delete().where(
+                db.EndpointEvent.timestamp < cutoff
+            )
+        )
+        await session.commit()
+        n = result.rowcount or 0
+    _prune_log.info("prune_events", "Pruned old endpoint events",
+                    context={"deleted": n, "retention_days": retention_days})
+    return n
+
+
+async def prune_old_observations(retention_days: int) -> int:
+    """Delete ip_observations older than retention_days. Returns row count."""
+    cutoff = _now() - timedelta(days=retention_days)
+    async with db.SessionLocal() as session:
+        result = await session.execute(
+            db.IPObservation.__table__.delete().where(
+                db.IPObservation.observed_at < cutoff
+            )
+        )
+        await session.commit()
+        n = result.rowcount or 0
+    _prune_log.info("prune_observations", "Pruned old IP observations",
+                    context={"deleted": n, "retention_days": retention_days})
+    return n
+
+
+async def prune_orphaned_watches() -> int:
+    """Delete endpoint_watches whose MAC no longer appears in endpoints.
+
+    A watchlist entry is orphaned when its target MAC has been purged from
+    the endpoint store entirely (e.g. after a manual cleanup or because the
+    device was decommissioned and its sentinel rows aged out).
+    """
+    async with db.SessionLocal() as session:
+        # Subquery: every distinct MAC currently in endpoints
+        active_macs = select(db.Endpoint.mac_address.distinct())
+        result = await session.execute(
+            db.EndpointWatch.__table__.delete().where(
+                db.EndpointWatch.mac_address.notin_(active_macs)
+            )
+        )
+        await session.commit()
+        n = result.rowcount or 0
+    _prune_log.info("prune_watches", "Pruned orphaned watches",
+                    context={"deleted": n})
+    return n
+
+
+async def prune_stale_sentinels(retention_days: int) -> int:
+    """Delete sweep-only sentinel endpoint rows older than retention_days.
+
+    Sentinel rows are created for endpoints that have a MAC but no
+    infrastructure context (no switch/port). They use ``(none)/(none)/0``
+    placeholders so the composite PK is satisfied. After the retention
+    window the sentinel is no longer useful and can be reaped.
+    """
+    cutoff = _now() - timedelta(days=retention_days)
+    async with db.SessionLocal() as session:
+        result = await session.execute(
+            db.Endpoint.__table__.delete().where(
+                db.Endpoint.current_switch == "(none)",
+                db.Endpoint.current_port == "(none)",
+                db.Endpoint.last_seen < cutoff,
+            )
+        )
+        await session.commit()
+        n = result.rowcount or 0
+    _prune_log.info("prune_sentinels", "Pruned stale sentinel endpoints",
+                    context={"deleted": n, "retention_days": retention_days})
+    return n
+
+
+async def prune_all(retention_days: int) -> dict:
+    """Run every prune helper and return a summary dict."""
+    events = await prune_old_events(retention_days)
+    observations = await prune_old_observations(retention_days)
+    watches = await prune_orphaned_watches()
+    sentinels = await prune_stale_sentinels(retention_days)
+    summary = {
+        "events": events,
+        "observations": observations,
+        "watches": watches,
+        "sentinels": sentinels,
+    }
+    _prune_log.info("prune_complete",
+                    f"Daily prune: {events} events, {observations} observations, "
+                    f"{watches} watches, {sentinels} sentinels removed",
+                    context=summary)
+    return summary
+
+
+async def prune_preview(retention_days: int) -> dict:
+    """Return what *would* be pruned without deleting anything.
+
+    Mirrors prune_all() but uses SELECT COUNT(*) instead of DELETE so the
+    operator can preview the impact before committing to a real prune.
+    """
+    cutoff = _now() - timedelta(days=retention_days)
+    async with db.SessionLocal() as session:
+        events = (await session.execute(
+            select(func.count()).select_from(db.EndpointEvent)
+            .where(db.EndpointEvent.timestamp < cutoff)
+        )).scalar_one()
+        observations = (await session.execute(
+            select(func.count()).select_from(db.IPObservation)
+            .where(db.IPObservation.observed_at < cutoff)
+        )).scalar_one()
+        active_macs = select(db.Endpoint.mac_address.distinct())
+        watches = (await session.execute(
+            select(func.count()).select_from(db.EndpointWatch)
+            .where(db.EndpointWatch.mac_address.notin_(active_macs))
+        )).scalar_one()
+        sentinels = (await session.execute(
+            select(func.count()).select_from(db.Endpoint)
+            .where(
+                db.Endpoint.current_switch == "(none)",
+                db.Endpoint.current_port == "(none)",
+                db.Endpoint.last_seen < cutoff,
+            )
+        )).scalar_one()
+    return {
+        "events": int(events),
+        "observations": int(observations),
+        "watches": int(watches),
+        "sentinels": int(sentinels),
+    }
+
+
+async def maintenance_stats() -> dict:
+    """Return current row counts and the oldest event/observation timestamps
+    for the Database Maintenance dashboard card."""
+    async with db.SessionLocal() as session:
+        endpoint_count = (await session.execute(
+            select(func.count()).select_from(db.Endpoint)
+        )).scalar_one()
+        event_count = (await session.execute(
+            select(func.count()).select_from(db.EndpointEvent)
+        )).scalar_one()
+        observation_count = (await session.execute(
+            select(func.count()).select_from(db.IPObservation)
+        )).scalar_one()
+        oldest_event = (await session.execute(
+            select(func.min(db.EndpointEvent.timestamp))
+        )).scalar_one()
+        oldest_observation = (await session.execute(
+            select(func.min(db.IPObservation.observed_at))
+        )).scalar_one()
+        watch_count = (await session.execute(
+            select(func.count()).select_from(db.EndpointWatch)
+        )).scalar_one()
+    return {
+        "endpoint_rows": int(endpoint_count),
+        "event_rows": int(event_count),
+        "observation_rows": int(observation_count),
+        "watch_rows": int(watch_count),
+        "oldest_event": oldest_event.isoformat() if oldest_event else None,
+        "oldest_observation": oldest_observation.isoformat() if oldest_observation else None,
+    }
+
+
 async def migrate_from_json(data_dir: Path) -> dict:
     """If endpoints.json/config.json exist and DB tables are empty, copy them in.
 

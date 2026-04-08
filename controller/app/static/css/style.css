@@ -97,8 +97,10 @@ header .logo {
   font-weight: 700;
   color: var(--text);
   letter-spacing: -0.5px;
+  text-decoration: none;
 }
 
+header a.logo:hover { color: var(--text); text-decoration: none; opacity: 0.85; }
 header .logo span { color: var(--accent); }
 
 header nav { display: flex; gap: 16px; align-items: center; }
@@ -347,6 +349,7 @@ label {
 }
 .alert.info { background: rgba(88, 166, 255, 0.1); border: 1px solid rgba(88, 166, 255, 0.3); color: var(--accent); }
 .alert.warning { background: rgba(210, 153, 34, 0.1); border: 1px solid rgba(210, 153, 34, 0.3); color: var(--yellow); }
+.alert.success { background: rgba(63, 185, 80, 0.1); border: 1px solid rgba(63, 185, 80, 0.3); color: var(--green); }
 
 /* Sweep status badges */
 .badge {

@@ -498,6 +498,83 @@ async function loadSubnets() {
   } catch (e) { console.error('Subnet advisory load failed:', e); }
 }
 
+async function loadMaintenance() {
+  try {
+    const r = await fetch('/api/admin/maintenance');
+    if (!r.ok) return;
+    const d = await r.json();
+    if (!d.db_ready) return;
+    const stats = d.stats || {};
+    document.getElementById('maint-endpoint-rows').textContent = stats.endpoint_rows ?? '-';
+    document.getElementById('maint-event-rows').textContent = stats.event_rows ?? '-';
+    document.getElementById('maint-observation-rows').textContent = stats.observation_rows ?? '-';
+    document.getElementById('maint-watch-rows').textContent = stats.watch_rows ?? '-';
+    document.getElementById('maintenance-retention').textContent =
+      'retention: ' + d.retention_days + ' days · prune every ' + d.prune_interval_hours + 'h';
+    const lastRunEl = document.getElementById('maint-last-run');
+    if (d.last_run) {
+      const sum = d.last_summary || {};
+      lastRunEl.textContent = 'Last prune ' + timeAgo(d.last_run) + ' — ' +
+        (sum.events || 0) + ' events, ' + (sum.observations || 0) + ' obs, ' +
+        (sum.watches || 0) + ' watches, ' + (sum.sentinels || 0) + ' sentinels';
+    } else {
+      lastRunEl.textContent = 'Last prune: never';
+    }
+    const meta = [];
+    if (stats.oldest_event) meta.push('Oldest event: ' + new Date(stats.oldest_event).toLocaleString());
+    if (stats.oldest_observation) meta.push('Oldest observation: ' + new Date(stats.oldest_observation).toLocaleString());
+    document.getElementById('maint-meta').textContent = meta.join(' · ');
+  } catch (e) { console.error('Maintenance load failed:', e); }
+}
+
+document.addEventListener('click', async (ev) => {
+  const t = ev.target;
+  if (t.id === 'maint-preview-btn') {
+    t.disabled = true; t.textContent = 'Previewing...';
+    try {
+      const r = await fetch('/api/admin/prune/preview');
+      const d = await r.json();
+      const wp = d.would_prune || {};
+      const el = document.getElementById('maint-preview-result');
+      el.className = 'alert';
+      el.style.display = 'block';
+      el.textContent = 'Would delete: ' + (wp.events || 0) + ' events, ' +
+        (wp.observations || 0) + ' observations, ' + (wp.watches || 0) +
+        ' orphaned watches, ' + (wp.sentinels || 0) + ' stale sentinels' +
+        ' (retention ' + d.retention_days + ' days)';
+    } catch (e) {
+      console.error('Preview failed:', e);
+    } finally {
+      t.disabled = false; t.textContent = 'Preview Prune';
+    }
+  }
+  if (t.id === 'maint-prune-btn') {
+    if (!confirm('Run database prune now? This deletes events, IP observations, orphaned watches, and stale sentinel rows older than the retention threshold. Cannot be undone.')) return;
+    t.disabled = true; t.textContent = 'Pruning...';
+    try {
+      const r = await fetch('/api/admin/prune', { method: 'POST' });
+      if (!r.ok) {
+        const err = await r.json();
+        alert('Prune failed: ' + (err.detail || r.status));
+        return;
+      }
+      const d = await r.json();
+      const p = d.pruned || {};
+      const el = document.getElementById('maint-preview-result');
+      el.className = 'alert success';
+      el.style.display = 'block';
+      el.textContent = 'Pruned: ' + (p.events || 0) + ' events, ' +
+        (p.observations || 0) + ' observations, ' + (p.watches || 0) +
+        ' watches, ' + (p.sentinels || 0) + ' sentinels';
+      loadMaintenance();
+    } catch (e) {
+      alert('Prune failed: ' + e);
+    } finally {
+      t.disabled = false; t.textContent = 'Run Prune Now';
+    }
+  }
+});
+
 async function loadProxmox() {
   try {
     const r = await fetch('/api/proxmox/status');
@@ -585,5 +662,6 @@ checkAuth().then(() => {
   loadIncompleteDevices();
   loadSubnets();
   loadProxmox();
+  loadMaintenance();
   startAutoRefresh();
 });

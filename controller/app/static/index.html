@@ -8,7 +8,7 @@
 </head>
 <body>
   <header>
-    <div class="logo"><span>MNM</span> Controller</div>
+    <a href="/" class="logo"><span>MNM</span> Controller</a>
     <nav>
       <a href="/" class="active">Dashboard</a>
       <a href="/discover">Discovery</a>
@@ -132,6 +132,26 @@
           <tr><td colspan="4" style="text-align:center;color:var(--text-muted)">Loading...</td></tr>
         </tbody>
       </table>
+    </div>
+
+    <!-- Database Maintenance -->
+    <div class="card" id="maintenance-card">
+      <h2>Database Maintenance
+        <span style="font-size:0.8rem;font-weight:normal;color:var(--text-muted);float:right" id="maintenance-retention"></span>
+      </h2>
+      <div class="grid-4" style="margin-bottom:12px">
+        <div class="stat"><div class="value" id="maint-endpoint-rows">-</div><div class="label">Endpoint Rows</div></div>
+        <div class="stat"><div class="value" id="maint-event-rows">-</div><div class="label">Event Rows</div></div>
+        <div class="stat"><div class="value" id="maint-observation-rows">-</div><div class="label">IP Observations</div></div>
+        <div class="stat"><div class="value" id="maint-watch-rows">-</div><div class="label">Watches</div></div>
+      </div>
+      <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-top:8px">
+        <button id="maint-preview-btn" class="btn">Preview Prune</button>
+        <button id="maint-prune-btn" class="btn">Run Prune Now</button>
+        <span class="schedule-info" id="maint-last-run"></span>
+      </div>
+      <div id="maint-preview-result" style="display:none; margin-top:12px" class="alert"></div>
+      <div id="maint-meta" style="margin-top:8px; font-size:0.8rem; color:var(--text-muted)"></div>
     </div>
 
     <!-- Container status -->

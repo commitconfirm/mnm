@@ -5,6 +5,16 @@ All notable changes to MNM are documented in this file. Format follows [Keep a C
 ## [Unreleased]
 
 ### Added
+- **Database maintenance — daily prune + on-demand admin endpoints**
+  - New helpers in `controller/app/endpoint_store.py`: `prune_old_events`, `prune_old_observations`, `prune_orphaned_watches`, `prune_stale_sentinels`, `prune_all`, `prune_preview`, `maintenance_stats`. Each operation is structured-logged under the dedicated `prune` module.
+  - Background scheduled prune task in the controller, configurable via `MNM_RETENTION_DAYS` (default 365) and `MNM_PRUNE_INTERVAL_HOURS` (default 24). First run is delayed 2 minutes after startup to let the system settle.
+  - New API endpoints: `GET /api/admin/maintenance` (row counts + last prune summary + retention setting), `GET /api/admin/prune/preview` (dry-run row counts), `POST /api/admin/prune` (run prune now)
+  - New "Database Maintenance" card on the dashboard with row counts (endpoints, events, observations, watches), oldest-event/observation timestamps, retention setting, "Preview Prune" + "Run Prune Now" buttons (with confirm dialog per Rule 9), and last-run summary
+  - Sentinel-row reaping: sweep-only endpoints with `current_switch = '(none)'` that age past the retention window are deleted
+  - Orphaned watchlist entries (watches whose target MAC has been purged) are cleaned up
+- **Docker log rotation on every service** — added `x-default-logging` YAML anchor and applied `logging: *default-logging` (json-file driver, 10MB × 3 files = 30MB cap per container) to all 11 services in `docker-compose.yml`. Caps unbounded container log growth.
+- **Nautobot retention documentation** — new section in `docs/CONFIGURATION.md` covering `JOB_RESULT_RETENTION` and `CHANGELOG_RETENTION`, where to set them, and how they interact with MNM's own prune loop.
+- **Patch 3 in `nautobot/Dockerfile`** — tolerate missing chassis serials in Sync Network Data. Some devices (factory-reset, virtual chassis members, mid-RMA, certain EX2300 states) return command-getter results without a usable `serial` key, which crashed the entire upstream sync run with `KeyError 'serial'`. The patch defaults to `""` and falls back to hostname-only matching when no non-empty serials were collected. Implemented as a small Python script (`nautobot/patches/patch_diffsync_utils.py`) since the multi-line replacement isn't sed-friendly. Tracking upstream.
 - **Connector framework — Proxmox VE (read-only)**
   - New `controller/app/connectors/` package establishing the connector pattern (read-only client + scheduler + state + Prometheus exposition + endpoint store integration)
   - `controller/app/connectors/proxmox.py` — Proxmox VE API client. Collects nodes, VMs, LXC containers, host status, storage pools, ZFS pools, and physical disks/SMART

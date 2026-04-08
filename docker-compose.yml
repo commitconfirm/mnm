@@ -3,6 +3,15 @@
 # Phase 1: Nautobot + PostgreSQL + Redis + Celery
 # Phase 2: Traefik + Prometheus + SNMP Exporter + gnmic + Grafana
 
+# Default Docker logging cap for every MNM service. Without this, container
+# stdout/stderr grows unbounded on the host filesystem. 10MB × 3 files =
+# at most 30MB per container of rotated json-file logs.
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
 
   # ---------------------------------------------------------------------------
@@ -12,6 +21,7 @@ services:
     image: traefik:v2.11
     container_name: mnm-traefik
     restart: unless-stopped
+    logging: *default-logging
     ports:
       - "8080:8080"
     environment:
@@ -29,6 +39,7 @@ services:
     image: postgres:15
     container_name: mnm-postgres
     restart: unless-stopped
+    logging: *default-logging
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-nautobot}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -47,6 +58,7 @@ services:
     image: redis:7-alpine
     container_name: mnm-redis
     restart: unless-stopped
+    logging: *default-logging
     command: redis-server --requirepass ${REDIS_PASSWORD}
     volumes:
       - mnm_redis_data:/data
@@ -68,6 +80,7 @@ services:
     image: mnm-nautobot:latest
     container_name: mnm-nautobot
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       postgres:
         condition: service_healthy
@@ -113,6 +126,7 @@ services:
     image: mnm-nautobot:latest
     container_name: mnm-nautobot-worker
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       nautobot:
         condition: service_healthy
@@ -150,6 +164,7 @@ services:
     image: mnm-nautobot:latest
     container_name: mnm-nautobot-scheduler
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       nautobot:
         condition: service_healthy
@@ -190,6 +205,7 @@ services:
     image: prom/prometheus:v3.4.0
     container_name: mnm-prometheus
     restart: unless-stopped
+    logging: *default-logging
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.retention.time=${PROMETHEUS_RETENTION_DAYS:-365}d"
@@ -215,6 +231,7 @@ services:
     image: prom/snmp-exporter:v0.29.0
     container_name: mnm-snmp-exporter
     restart: unless-stopped
+    logging: *default-logging
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:9116"]
       interval: 15s
@@ -227,6 +244,7 @@ services:
     image: ghcr.io/openconfig/gnmic:latest
     container_name: mnm-gnmic
     restart: unless-stopped
+    logging: *default-logging
     volumes:
       - ./config/gnmic/gnmic.yml:/app/gnmic.yml:ro
     command: subscribe --config /app/gnmic.yml
@@ -240,6 +258,7 @@ services:
     image: grafana/grafana-oss:12.0.1
     container_name: mnm-grafana
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       prometheus:
         condition: service_healthy
@@ -278,6 +297,7 @@ services:
     image: mnm-controller:latest
     container_name: mnm-controller
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       nautobot:
         condition: service_healthy
@@ -301,6 +321,8 @@ services:
       PROXMOX_VERIFY_SSL: ${PROXMOX_VERIFY_SSL:-false}
       PROXMOX_INTERVAL_SECONDS: ${PROXMOX_INTERVAL_SECONDS:-300}
       ANOMALY_STALE_DAYS: ${ANOMALY_STALE_DAYS:-7}
+      MNM_RETENTION_DAYS: ${MNM_RETENTION_DAYS:-365}
+      MNM_PRUNE_INTERVAL_HOURS: ${MNM_PRUNE_INTERVAL_HOURS:-24}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - mnm_controller_data:/data
