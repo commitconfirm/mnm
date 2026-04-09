@@ -296,6 +296,43 @@ class DiscoveryExclude(Base):
         }
 
 
+class DevicePoll(Base):
+    """Per-device, per-job-type poll tracking.
+
+    Tracks when each collection job type (arp, mac, dhcp, lldp) last ran
+    against each device, whether it succeeded, when it's next due, and
+    the operator's per-device interval override.
+    """
+    __tablename__ = "device_polls"
+
+    device_name = Column(Text, primary_key=True)
+    job_type = Column(Text, primary_key=True)  # 'arp', 'mac', 'dhcp', 'lldp'
+    last_success = Column(DateTime(timezone=True))
+    last_attempt = Column(DateTime(timezone=True))
+    last_error = Column(Text)
+    last_duration = Column(Float)
+    next_due = Column(DateTime(timezone=True))
+    interval_sec = Column(Integer, nullable=False)
+    enabled = Column(Boolean, nullable=False, default=True)
+
+    __table_args__ = (
+        PrimaryKeyConstraint("device_name", "job_type", name="pk_device_polls"),
+    )
+
+    def to_dict(self) -> dict:
+        return {
+            "device_name": self.device_name,
+            "job_type": self.job_type,
+            "last_success": self.last_success.isoformat() if self.last_success else None,
+            "last_attempt": self.last_attempt.isoformat() if self.last_attempt else None,
+            "last_error": self.last_error,
+            "last_duration": self.last_duration,
+            "next_due": self.next_due.isoformat() if self.next_due else None,
+            "interval_sec": self.interval_sec,
+            "enabled": self.enabled,
+        }
+
+
 class KVConfig(Base):
     """Simple key/value store that replaces config.json."""
     __tablename__ = "kv_config"

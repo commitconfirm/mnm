@@ -326,7 +326,10 @@ function startAutoRefresh() {
   if (containerRefreshTimer) { clearInterval(containerRefreshTimer); containerRefreshTimer = null; }
   const interval = MNMPreferences.get('autoRefreshInterval');
   if (interval && interval > 0) {
-    containerRefreshTimer = setInterval(loadContainers, interval * 1000);
+    containerRefreshTimer = setInterval(function() {
+      loadContainers();
+      loadPolling();
+    }, interval * 1000);
   }
 }
 
@@ -673,6 +676,53 @@ async function loadProxmox() {
   } catch (e) { console.error('Proxmox load failed:', e); }
 }
 
+// ---------------------------------------------------------------------------
+// Polling Status
+// ---------------------------------------------------------------------------
+
+function pollStatusDot(job, intervalSec) {
+  if (!job) return '<span style="color:var(--text-muted)">-</span>';
+  if (!job.enabled) return '<span title="disabled" style="color:var(--text-muted)">&#9679; off</span>';
+  if (job.last_error) return '<span title="' + escHtml(job.last_error) + '" style="color:var(--red, #b71c1c)">&#9679; err</span>';
+  if (!job.last_success) return '<span style="color:var(--text-muted)">&#9679; -</span>';
+  var ago = Date.now() - new Date(job.last_success).getTime();
+  var threshold = (job.interval_sec || intervalSec || 300) * 2 * 1000;
+  var color = ago < threshold ? 'var(--green, #1c8a3a)' : '#e6a800';
+  var label = timeAgo(job.last_success);
+  return '<span title="' + (job.last_duration ? job.last_duration.toFixed(1) + 's' : '') + '" style="color:' + color + '">&#9679; ' + label + '</span>';
+}
+
+async function loadPolling() {
+  try {
+    var resp = await fetch('/api/polling/status');
+    if (!resp.ok) return;
+    var data = await resp.json();
+    var devices = data.devices || [];
+    var card = document.getElementById('polling-card');
+    var tbody = document.getElementById('polling-table');
+    if (!devices.length) { card.style.display = 'none'; return; }
+    card.style.display = 'block';
+    tbody.innerHTML = devices.map(function(d) {
+      var j = d.jobs || {};
+      return '<tr>'
+        + '<td><strong>' + escHtml(d.device_name) + '</strong></td>'
+        + '<td>' + pollStatusDot(j.arp) + '</td>'
+        + '<td>' + pollStatusDot(j.mac) + '</td>'
+        + '<td>' + pollStatusDot(j.dhcp) + '</td>'
+        + '<td>' + pollStatusDot(j.lldp) + '</td>'
+        + '<td><button class="btn small" onclick="triggerPoll(\'' + escHtml(d.device_name) + '\')">Poll Now</button></td>'
+        + '</tr>';
+    }).join('');
+  } catch (e) { console.error('Failed to load polling:', e); }
+}
+
+async function triggerPoll(deviceName) {
+  try {
+    await fetch('/api/polling/trigger/' + encodeURIComponent(deviceName), { method: 'POST' });
+    setTimeout(loadPolling, 1000);
+  } catch (e) { alert('Failed: ' + e.message); }
+}
+
 checkAuth().then(() => {
   loadContainers();
   loadDevices();
@@ -681,6 +731,7 @@ checkAuth().then(() => {
   loadSweepInfo();
   loadEndpointSummary();
   loadRecentEvents();
+  loadPolling();
   loadIncompleteDevices();
   loadSubnets();
   loadProxmox();
