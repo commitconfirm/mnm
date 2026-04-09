@@ -19,6 +19,7 @@
         <button data-theme="dark" title="Dark" class="active">Dark</button>
         <button data-theme="system" title="System">Auto</button>
       </div>
+      <a href="/jobs">Jobs</a>
       <a href="/logs">Logs</a>
       <a href="#" id="prefs-btn" title="Preferences">&#9881;</a>
       <a id="logout-link" href="#">Logout</a>
@@ -29,12 +30,14 @@
     <!-- Sweep config -->
     <div class="card" id="sweep-form-card">
       <h2>Network Discovery</h2>
-      <div class="alert info">
-        Enter CIDR ranges to scan. Each host is fully processed before appearing in results — port scan, SNMP, DNS, MAC lookup, banner grabbing, classification, and Nautobot recording all complete per-host before moving on. Progress shows completed hosts only.
+      <div id="prefill-banner" class="alert" style="display:none; background: var(--accent-light, #e3f2fd); border-left: 4px solid var(--accent, #0a73c0); margin-bottom: 12px;">
+        Subnet <strong id="prefill-cidr"></strong> has been pre-filled from the dashboard advisory.
+        Select a run mode and click <strong>Run Sweep</strong> to add it to your discovery scope,
+        or edit the CIDR ranges below first.
       </div>
 
       <div class="form-row">
-        <label for="cidr-input">CIDR Ranges (one per line)</label>
+        <label for="cidr-input">Enter CIDR ranges to scan (one per line)</label>
         <textarea id="cidr-input" rows="3"
           style="width: 100%; padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); color: var(--text); font-size: 0.9rem; resize: vertical;"
           placeholder="192.0.2.0/24&#10;198.51.100.0/24"></textarea>
@@ -94,12 +97,16 @@
         <span id="progress-count">0 / 0</span>
       </div>
 
+      <p style="color:var(--text-muted); font-size:0.8rem; margin-top:8px;">
+        Each host is fully processed before appearing in results — port scan, SNMP, DNS, MAC lookup,
+        banner grabbing, classification, and Nautobot recording all complete per-host before moving on.
+      </p>
       <div style="margin-top: 12px;">
         <div class="toggle-row">
           <input type="checkbox" id="show-log-toggle" checked>
           <label for="show-log-toggle">Show scan log</label>
         </div>
-        <div id="scan-log" style="max-height: 180px; overflow-y: auto; padding: 10px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); font-size: 0.8rem; color: var(--text-muted); white-space: pre-wrap;"></div>
+        <div id="scan-log" style="min-height: 80px; max-height: 500px; height: 180px; overflow-y: auto; padding: 10px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); font-size: 0.8rem; color: var(--text-muted); white-space: pre-wrap; resize: vertical;"></div>
       </div>
     </div>
 
@@ -126,7 +133,6 @@
         <label for="show-dead-toggle">Show all (including dead)</label>
       </div>
 
-      <div class="full-width-table">
       <table>
         <thead>
           <tr>
@@ -143,7 +149,6 @@
         </thead>
         <tbody id="sweep-table"></tbody>
       </table>
-      </div>
     </div>
 
     <!-- Discovery exclusions (Rule 6 — operator-controlled scope) -->

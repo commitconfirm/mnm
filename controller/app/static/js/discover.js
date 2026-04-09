@@ -625,6 +625,37 @@ checkAuth().then(() => {
   loadSchedule();
   loadHistory();
   loadExcludes();
+
+  // Pre-fill CIDR from ?cidr= query param (used by "Add to sweep" on dashboard)
+  const urlParams = new URLSearchParams(window.location.search);
+  const prefillCidr = urlParams.get('cidr');
+  if (prefillCidr) {
+    const cidrInput = document.getElementById('cidr-input');
+    // Append to existing content (don't overwrite if operator already typed something)
+    const existing = cidrInput.value.trim();
+    if (existing) {
+      // Only add if not already present
+      if (!existing.split('\n').map(s => s.trim()).includes(prefillCidr)) {
+        cidrInput.value = existing + '\n' + prefillCidr;
+      }
+    } else {
+      cidrInput.value = prefillCidr;
+    }
+    // Show the prefill banner
+    const banner = document.getElementById('prefill-banner');
+    const bannerCidr = document.getElementById('prefill-cidr');
+    if (banner && bannerCidr) {
+      bannerCidr.textContent = prefillCidr;
+      banner.style.display = 'block';
+    }
+    // Scroll the form into view and highlight
+    document.getElementById('sweep-form-card').scrollIntoView({ behavior: 'smooth' });
+    cidrInput.focus();
+    // Brief highlight effect
+    cidrInput.style.outline = '2px solid var(--accent)';
+    setTimeout(() => { cidrInput.style.outline = ''; }, 2000);
+  }
+
   // Check if there's an active sweep — resume polling and disable start button
   fetch('/api/discover/status').then(r => r.json()).then(data => {
     if (data.running || Object.keys(data.hosts || {}).length > 0) {

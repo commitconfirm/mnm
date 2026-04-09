@@ -625,20 +625,47 @@ async def _probe_all_ports(ip: str, semaphore: asyncio.Semaphore) -> list[str]:
 
     # ICMP ping
     async def _try_icmp():
+        if _sweep_cancel:
+            return
         if await _icmp_ping(ip):
             open_ports.append("icmp")
 
-    # TCP probes
+    # TCP probes — bail quickly when sweep is cancelled instead of
+    # waiting for a semaphore slot that may never come.
     async def _try_tcp(port: int):
-        async with semaphore:
-            if await _tcp_probe(ip, port):
-                open_ports.append(f"tcp/{port}")
+        if _sweep_cancel:
+            return
+        try:
+            await asyncio.wait_for(semaphore.acquire(), timeout=2.0)
+        except asyncio.TimeoutError:
+            if _sweep_cancel:
+                return
+            # Retry once, then give up on cancel
+            try:
+                await asyncio.wait_for(semaphore.acquire(), timeout=2.0)
+            except asyncio.TimeoutError:
+                return
+        try:
+            if not _sweep_cancel:
+                if await _tcp_probe(ip, port):
+                    open_ports.append(f"tcp/{port}")
+        finally:
+            semaphore.release()
 
     # UDP probes
     async def _try_udp(port: int):
-        async with semaphore:
-            if await _udp_probe(ip, port):
-                open_ports.append(f"udp/{port}")
+        if _sweep_cancel:
+            return
+        try:
+            await asyncio.wait_for(semaphore.acquire(), timeout=2.0)
+        except asyncio.TimeoutError:
+            return
+        try:
+            if not _sweep_cancel:
+                if await _udp_probe(ip, port):
+                    open_ports.append(f"udp/{port}")
+        finally:
+            semaphore.release()
 
     tasks = [_try_icmp()]
     tasks.extend(_try_tcp(p) for p in PROBE_PORTS)
@@ -1334,6 +1361,16 @@ async def _onboard_host(
             await asyncio.sleep(5)
             elapsed = (poll_idx + 1) * 5
 
+            # Check for sweep cancellation — without this, a single
+            # onboarding poll loop (up to 10 min) blocks the entire
+            # asyncio.gather from finishing after the operator clicks Stop.
+            if _sweep_cancel:
+                _onb_set(ip, "failed", "Sweep cancelled by operator during onboarding poll",
+                         error="sweep_cancelled")
+                log.info("onboard_cancelled", "Onboarding cancelled (sweep stop)",
+                         context={"ip": ip, "job_result_id": job_result_id})
+                return False
+
             # 1. Authoritative success: device exists in Nautobot
             try:
                 dev = await nautobot_client.find_device_by_ip(ip)
@@ -1635,6 +1672,7 @@ async def sweep(
 
     async def process_host(ip: str):
         if _sweep_cancel:
+            _completed["count"] += 1
             return
 
         host = _sweep_state["hosts"][ip]
@@ -1727,6 +1765,11 @@ async def sweep(
             return
 
         # Step 8: Onboard or record
+        if _sweep_cancel:
+            host["status"] = SweepStatus.RECORDED
+            _completed["count"] += 1
+            return
+
         if host["onboard_eligible"]:
             host["status"] = SweepStatus.ONBOARDING
             success = await _onboard_host(ip, location_id, secrets_group_id, snmp_data=host.get("snmp"))
@@ -1937,7 +1980,39 @@ async def scheduled_sweep_loop() -> None:
     while True:
         try:
             config = await load_config_async()
-            schedules = config.get("sweep_schedules", [])
+            schedules = config.get("sweep_schedules", []) or []
+
+            # Auto-expand sweep ranges to include subnets from onboarded
+            # device interfaces. If a device has an IP on a subnet not yet
+            # in any schedule's cidr_ranges, add it to the first schedule.
+            # The operator implicitly approved these subnets by onboarding
+            # the devices that live on them.
+            if schedules:
+                try:
+                    device_subnets = await nautobot_client.get_device_interface_subnets()
+                    if device_subnets:
+                        existing_cidrs: set[str] = set()
+                        for s in schedules:
+                            existing_cidrs.update(s.get("cidr_ranges", []))
+                        missing = device_subnets - existing_cidrs
+                        if missing:
+                            schedules[0]["cidr_ranges"] = list(
+                                set(schedules[0].get("cidr_ranges", [])) | missing
+                            )
+                            config["sweep_schedules"] = schedules
+                            await save_config_async(config)
+                            log.info(
+                                "sweep_scope_auto_expanded",
+                                "Added device-interface subnets to sweep schedule",
+                                context={"added": sorted(missing)},
+                            )
+                except Exception as exc:
+                    log.debug(
+                        "sweep_scope_expand_failed",
+                        "Could not auto-expand sweep scope from device interfaces",
+                        context={"error": str(exc)},
+                    )
+
             now = datetime.now(timezone.utc)
 
             for i, schedule in enumerate(schedules):
