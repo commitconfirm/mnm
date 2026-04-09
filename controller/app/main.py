@@ -265,6 +265,25 @@ async def sweep_status():
     return discovery.get_sweep_state()
 
 
+@app.get("/api/discover/onboarding", dependencies=[Depends(require_auth)])
+async def onboarding_states():
+    """All onboarding job states tracked by the controller."""
+    return {"onboarding": discovery.get_onboarding_state()}
+
+
+@app.get("/api/discover/onboarding/{ip}", dependencies=[Depends(require_auth)])
+async def onboarding_state_for(ip: str):
+    """Detailed onboarding progress / error for a single host.
+
+    Used by the host Details panel to surface stage transitions and
+    actionable error messages.
+    """
+    state = discovery.get_onboarding_state(ip)
+    if not state:
+        return {"ip": ip, "stage": "none", "message": "No onboarding job tracked for this IP"}
+    return state
+
+
 @app.get("/api/discover/history", dependencies=[Depends(require_auth)])
 async def sweep_history():
     """Return history of past sweep runs."""

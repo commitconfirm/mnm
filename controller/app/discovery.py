@@ -509,9 +509,38 @@ MAX_HISTORY = 20
 _sweep_cancel = False
 
 
+# ---------------------------------------------------------------------------
+# Onboarding progress tracker
+# ---------------------------------------------------------------------------
+# Per-IP onboarding state, surfaced in the host Details panel and via the
+# /api/discover/onboarding/{ip} endpoint. Each entry has:
+#   stage: one of submitting | queued | running | succeeded | failed | timeout
+#   message: human-readable status text
+#   started_at / updated_at: ISO timestamps
+#   job_result_id: Nautobot JobResult UUID (when known)
+#   error: detailed error string (when stage == failed)
+_onboarding_state: dict[str, dict] = {}
+
+
+def _onb_set(ip: str, stage: str, message: str, **extra) -> None:
+    now_iso = datetime.now(timezone.utc).isoformat()
+    cur = _onboarding_state.get(ip, {})
+    cur.update({"stage": stage, "message": message, "updated_at": now_iso, **extra})
+    cur.setdefault("started_at", now_iso)
+    cur["ip"] = ip
+    _onboarding_state[ip] = cur
+
+
+def get_onboarding_state(ip: str | None = None):
+    if ip:
+        return _onboarding_state.get(ip)
+    return list(_onboarding_state.values())
+
+
 def get_sweep_state() -> dict:
     state = _sweep_state.copy()
     state["history"] = _sweep_history.copy()
+    state["onboarding"] = list(_onboarding_state.values())
     return state
 
 
@@ -1260,6 +1289,16 @@ async def _onboard_host(
     platform_slug = _detect_platform(snmp_data or {})
 
     log.info("onboard_submit", "Submitting onboarding job", context={"ip": ip, "platform": platform_slug})
+    _onb_set(ip, "submitting", f"Detected platform {platform_slug or 'unknown'}; submitting onboarding job", platform=platform_slug)
+
+    # Pre-clean: the controller's sweep records every alive IP into IPAM,
+    # but the onboarding plugin tries to create the same IPAddress and
+    # crashes with a UniqueViolation. Drop any standalone IP record (one
+    # that's not yet attached to a device interface) before submitting.
+    try:
+        await nautobot_client.delete_standalone_ip(ip)
+    except Exception as exc:
+        log.debug("ip_pre_onboard_delete_failed", "Could not pre-clean IP", context={"ip": ip, "error": str(exc)})
 
     try:
         result = await nautobot_client.submit_onboarding_job(
@@ -1271,27 +1310,189 @@ async def _onboard_host(
         job_result_id = result.get("job_result", {}).get("id")
         if not job_result_id:
             log.error("onboard_no_job_id", "Onboarding job returned no result ID", context={"ip": ip})
+            _onb_set(ip, "failed", "Onboarding job submission returned no result ID", error="no job_result_id")
             return False
 
-        # Poll for completion (max 5 minutes)
-        for _ in range(60):
+        _onb_set(ip, "queued", "Onboarding job submitted; waiting for Celery worker to pick it up",
+                 job_result_id=job_result_id)
+
+        # Poll for completion. Three signals are checked in priority order:
+        #   1. Device shows up in Nautobot (authoritative — the goal)
+        #   2. JobResult.status reaches a terminal Celery state
+        #   3. Redis celery-task-meta has a terminal state (fallback for
+        #      the known plugin bug where OnboardException leaves the
+        #      JobResult DB row stuck in PENDING forever)
+        #
+        # Nautobot 3.x JobResult.status uses uppercase Celery names
+        # (PENDING, RECEIVED, STARTED, SUCCESS, FAILURE, REVOKED, RETRY).
+        TERMINAL_OK = {"SUCCESS"}
+        TERMINAL_FAIL = {"FAILURE", "REVOKED"}
+        # 10 minutes total: slow Junos devices regularly need 4-6 min.
+        max_polls = 120
+        last_db_status = ""
+        for poll_idx in range(max_polls):
             await asyncio.sleep(5)
-            jr = await nautobot_client.get_job_result(job_result_id)
-            status = jr.get("status", {})
-            if isinstance(status, dict):
-                status = status.get("value", "")
-            if status in ("completed", "Completed"):
-                log.info("onboard_success", "Device onboarded successfully", context={"ip": ip, "job_result_id": job_result_id})
+            elapsed = (poll_idx + 1) * 5
+
+            # 1. Authoritative success: device exists in Nautobot
+            try:
+                dev = await nautobot_client.find_device_by_ip(ip)
+            except Exception:
+                dev = None
+            if dev:
+                log.info(
+                    "onboard_success",
+                    "Device onboarded successfully (device present in Nautobot)",
+                    context={"ip": ip, "job_result_id": job_result_id, "device_id": dev.get("id")},
+                )
+                _onb_set(ip, "succeeded", f"Device onboarded ({dev.get('name', 'unnamed')})",
+                         device_id=dev.get("id"), device_name=dev.get("name"))
                 return True
-            if status in ("failed", "errored", "Failed", "Errored"):
-                log.error("onboard_failed", "Onboarding job failed", context={"ip": ip, "job_result_id": job_result_id, "status": status})
+
+            # 2. JobResult.status from DB
+            db_status = ""
+            try:
+                jr = await nautobot_client.get_job_result(job_result_id)
+                status = jr.get("status", {})
+                if isinstance(status, dict):
+                    status = status.get("value", "")
+                db_status = (status or "").upper()
+            except Exception:
+                pass
+
+            if db_status and db_status != last_db_status:
+                last_db_status = db_status
+                # Surface stage transitions in the tracker
+                if db_status == "STARTED":
+                    _onb_set(ip, "running", f"Worker is executing the onboarding job ({elapsed}s)")
+                elif db_status == "RECEIVED":
+                    _onb_set(ip, "queued", f"Worker received the job ({elapsed}s)")
+            else:
+                # Lightweight elapsed-time update so the UI keeps moving
+                stage = _onboarding_state.get(ip, {}).get("stage", "queued")
+                if stage in ("queued", "running"):
+                    _onb_set(ip, stage, f"{stage.capitalize()} ({elapsed}s elapsed)")
+
+            if db_status in TERMINAL_OK:
+                await asyncio.sleep(2)
+                dev = await nautobot_client.find_device_by_ip(ip)
+                if dev:
+                    log.info("onboard_success", "Device onboarded successfully", context={"ip": ip, "job_result_id": job_result_id})
+                    _onb_set(ip, "succeeded", f"Device onboarded ({dev.get('name','unnamed')})",
+                             device_id=dev.get("id"), device_name=dev.get("name"))
+                    return True
+                log.error("onboard_success_no_device", "JobResult SUCCESS but no device in Nautobot",
+                          context={"ip": ip, "job_result_id": job_result_id})
+                _onb_set(ip, "failed", "JobResult reports SUCCESS but no device exists in Nautobot",
+                         error="success_no_device")
+                return False
+            if db_status in TERMINAL_FAIL:
+                err = await _fetch_celery_error(job_result_id)
+                log.error("onboard_failed", "Onboarding job failed",
+                          context={"ip": ip, "job_result_id": job_result_id, "status": db_status, "error": err})
+                _onb_set(ip, "failed", err or f"Job failed ({db_status})",
+                         error=err or db_status, job_result_status=db_status)
                 return False
 
+            # 3. Redis fallback: after ~30 s of "PENDING" with no progress,
+            # check celery-task-meta directly. This catches the plugin bug
+            # where the JobResult DB row stays PENDING forever even when
+            # the underlying Celery task has reached a terminal state
+            # (whether SUCCESS or FAILURE).
+            if db_status in ("", "PENDING") and elapsed >= 30 and elapsed % 15 == 0:
+                meta = await _read_celery_meta(job_result_id)
+                if meta:
+                    meta_status = (meta.get("status") or "").upper()
+                    if meta_status in TERMINAL_FAIL:
+                        err = _format_celery_meta_error(meta)
+                        log.error("onboard_failed_redis",
+                                  "Onboarding job failed (recovered from Celery result backend; DB row stuck PENDING)",
+                                  context={"ip": ip, "job_result_id": job_result_id, "error": err})
+                        _onb_set(ip, "failed", err,
+                                 error=err, job_result_status="FAILURE (DB stuck PENDING)")
+                        return False
+                    if meta_status in TERMINAL_OK:
+                        # Celery says success — give Nautobot a moment to
+                        # commit the device row, then look it up.
+                        await asyncio.sleep(2)
+                        dev = await nautobot_client.find_device_by_ip(ip)
+                        if dev:
+                            log.info("onboard_success_redis",
+                                     "Device onboarded successfully (recovered from Celery result backend)",
+                                     context={"ip": ip, "job_result_id": job_result_id, "device_id": dev.get("id")})
+                            _onb_set(ip, "succeeded", f"Device onboarded ({dev.get('name','unnamed')})",
+                                     device_id=dev.get("id"), device_name=dev.get("name"))
+                            return True
+                        # Celery SUCCESS but no device — surface clearly
+                        log.error("onboard_success_no_device_redis",
+                                  "Celery reports SUCCESS but device not found in Nautobot",
+                                  context={"ip": ip, "job_result_id": job_result_id})
+                        _onb_set(ip, "failed",
+                                 "Celery reports SUCCESS but device was not created in Nautobot",
+                                 error="success_no_device", job_result_status="SUCCESS (DB stuck PENDING)")
+                        return False
+
+        _onb_set(ip, "timeout", f"Onboarding did not complete within {max_polls*5}s",
+                 job_result_id=job_result_id)
         log.error("onboard_timeout", "Onboarding job timed out", context={"ip": ip, "job_result_id": job_result_id})
         return False
     except Exception as exc:
         log.error("onboard_error", "Onboarding job raised exception", context={"ip": ip, "error": str(exc)}, exc_info=True)
+        _onb_set(ip, "failed", f"Controller exception: {exc}", error=str(exc))
         return False
+
+
+# ---------------------------------------------------------------------------
+# Celery result backend fallback
+# ---------------------------------------------------------------------------
+# nautobot-device-onboarding 5.x can raise OnboardException without letting
+# Nautobot's run_job wrapper update the JobResult row. The terminal state
+# always lands in the Celery result backend (Redis db 1) though, so we
+# read it directly when the DB row stays PENDING for too long.
+
+async def _read_celery_meta(job_result_id: str) -> dict | None:
+    try:
+        import redis.asyncio as aioredis  # type: ignore
+    except Exception:
+        return None
+    redis_url = os.environ.get("REDIS_URL", "redis://redis:6379/1")
+    # Force db 1 (Celery result backend) regardless of REDIS_URL's db
+    try:
+        client = aioredis.from_url(redis_url, db=1)
+        raw = await client.get(f"celery-task-meta-{job_result_id}")
+        await client.aclose()
+        if not raw:
+            return None
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+def _format_celery_meta_error(meta: dict) -> str:
+    """Turn a Celery result-backend meta dict into a readable one-liner."""
+    result = meta.get("result") or {}
+    if isinstance(result, dict):
+        exc_type = result.get("exc_type") or ""
+        exc_msg = result.get("exc_message") or []
+        if isinstance(exc_msg, list):
+            exc_msg_str = " ".join(str(m) for m in exc_msg).strip()
+        else:
+            exc_msg_str = str(exc_msg)
+        if exc_type and exc_msg_str:
+            return f"{exc_type}: {exc_msg_str}"
+        if exc_msg_str:
+            return exc_msg_str
+        if exc_type:
+            return exc_type
+    return str(result)[:500] if result else "(no error detail)"
+
+
+async def _fetch_celery_error(job_result_id: str) -> str:
+    """Best-effort: pull a useful error string from the Celery result backend."""
+    meta = await _read_celery_meta(job_result_id)
+    if not meta:
+        return ""
+    return _format_celery_meta_error(meta)
 
 
 # ---------------------------------------------------------------------------
@@ -1693,6 +1894,45 @@ async def scheduled_sweep_loop() -> None:
     from app.config import load_config_async, save_config_async
 
     log.info("sweep_loop_started", "Scheduled sweep loop started")
+
+    # One-shot migration: if a saved schedule references a location whose
+    # type cannot accept devices, repoint it at the first valid location.
+    # Without this the onboarding job fails inside Nautobot with
+    # "Devices may not associate to locations of type X" and the JobResult
+    # row gets stuck in PENDING (plugin bug), causing every sweep to time
+    # out on the controller side.
+    try:
+        cfg = await load_config_async()
+        schedules = cfg.get("sweep_schedules", []) or []
+        if schedules:
+            valid_locations = await nautobot_client.get_locations()
+            valid_ids = {loc.get("id") for loc in valid_locations if loc.get("id")}
+            valid_default = next(iter(valid_locations), None)
+            changed = False
+            for i, sched in enumerate(schedules):
+                lid = sched.get("location_id")
+                if lid and lid not in valid_ids and valid_default:
+                    log.warning(
+                        "sweep_schedule_location_fixed",
+                        "Repointed saved schedule from invalid location to a device-capable one",
+                        context={
+                            "schedule_index": i,
+                            "old_location_id": lid,
+                            "new_location_id": valid_default.get("id"),
+                            "new_location_name": valid_default.get("name"),
+                        },
+                    )
+                    schedules[i]["location_id"] = valid_default.get("id")
+                    changed = True
+            if changed:
+                cfg["sweep_schedules"] = schedules
+                await save_config_async(cfg)
+    except Exception as exc:
+        log.warning(
+            "sweep_schedule_migration_failed",
+            "Could not validate saved sweep schedules at startup",
+            context={"error": str(exc)},
+        )
 
     while True:
         try:

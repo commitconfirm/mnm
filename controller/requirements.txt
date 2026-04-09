@@ -8,3 +8,4 @@ dnspython
 mac-vendor-lookup
 sqlalchemy[asyncio]>=2.0
 asyncpg>=0.29
+redis>=5.0

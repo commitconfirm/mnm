@@ -42,6 +42,20 @@ RUN python3 /tmp/patch_diffsync_utils.py && \
     find /opt/nautobot -path "*/nautobot_device_onboarding/utils/__pycache__" \
         -exec rm -rf {} + 2>/dev/null || true
 
+# Patch 4: Always surface schema-validation errors from the Sync jobs.
+# Upstream logs the actual jsonschema ValidationError at DEBUG level only,
+# which means the operator only ever sees the generic
+# "Schema validation failed." message and has no way to know which field
+# is missing without re-running the job in debug mode. Promote those two
+# log calls to WARNING so the actionable detail is always recorded in the
+# JobResult log without operator action. Surgical sed: only the two
+# Schema-validation lines change; other DEBUG logging is untouched.
+COPY patches/patch_processor_schema_logging.py /tmp/patch_processor_schema_logging.py
+RUN python3 /tmp/patch_processor_schema_logging.py && \
+    rm /tmp/patch_processor_schema_logging.py && \
+    find /opt/nautobot -path "*/nautobot_device_onboarding/nornir_plays/__pycache__" \
+        -exec rm -rf {} + 2>/dev/null || true
+
 # Copy custom Nautobot configuration
 COPY --chown=nautobot:nautobot nautobot_config.py /opt/nautobot/nautobot_config.py
 

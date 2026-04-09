@@ -92,10 +92,40 @@ async def get_secrets_groups() -> list[dict]:
 
 
 async def get_locations() -> list[dict]:
+    """Return only locations whose location_type accepts dcim.device.
+
+    Nautobot 3.x rejects device creation against location types that don't
+    list ``dcim | device`` in their content types (e.g. a Region). The
+    onboarding job fails with a ValidationError that the plugin then
+    swallows into a generic OnboardException, leaving JobResult stuck in
+    PENDING. Filtering here means the UI/API only ever surfaces locations
+    that can actually hold a device.
+    """
     async with httpx.AsyncClient(base_url=NAUTOBOT_URL, timeout=15) as client:
         resp = await client.get("/api/dcim/locations/?limit=100", headers=_headers())
         resp.raise_for_status()
-        return resp.json().get("results", [])
+        locations = resp.json().get("results", [])
+
+        # Build a map of location-type id -> set of content type strings
+        types_resp = await client.get(
+            "/api/dcim/location-types/?limit=100", headers=_headers()
+        )
+        types_resp.raise_for_status()
+        type_accepts_device: dict[str, bool] = {}
+        for lt in types_resp.json().get("results", []):
+            cts = lt.get("content_types") or []
+            type_accepts_device[lt.get("id")] = any(
+                (isinstance(c, str) and c == "dcim.device")
+                or (isinstance(c, dict) and c.get("app_label") == "dcim" and c.get("model") == "device")
+                for c in cts
+            )
+
+        def _accepts(loc: dict) -> bool:
+            lt = loc.get("location_type") or {}
+            lt_id = lt.get("id") if isinstance(lt, dict) else lt
+            return type_accepts_device.get(lt_id, False)
+
+        return [loc for loc in locations if _accepts(loc)]
 
 
 async def get_cables() -> list[dict]:
@@ -323,6 +353,100 @@ async def get_job_result(job_result_id: str) -> dict:
         )
         resp.raise_for_status()
         return resp.json()
+
+
+async def delete_standalone_ip(ip: str) -> bool:
+    """Delete IPAddress records for ``ip`` that are NOT attached to any
+    device interface.
+
+    The controller's sweep records every alive IP into IPAM with discovery
+    custom fields. When the same IP is later onboarded as a device, the
+    nautobot-device-onboarding plugin tries to ``IPAddress.objects.create``
+    that IP and crashes with a UniqueViolation. Removing the standalone
+    record beforehand lets the plugin own the IPAddress; the discovery CFs
+    will be re-applied to the newly-created (now interface-attached) record
+    on the next sweep.
+
+    Skips deletion when the IP is already attached to an interface (i.e.
+    the device exists), to avoid orphaning a real device.
+    """
+    address = f"{ip}/32"
+    deleted = False
+    async with httpx.AsyncClient(base_url=NAUTOBOT_URL, timeout=15) as client:
+        resp = await client.get(
+            f"/api/ipam/ip-addresses/?address={ip}&limit=10",
+            headers=_headers(),
+        )
+        if resp.status_code != 200:
+            return False
+        for ipo in resp.json().get("results", []):
+            if not (ipo.get("address") or "").startswith(ip):
+                continue
+            interfaces = ipo.get("interfaces") or []
+            if interfaces:
+                # Already on a device interface — leave it alone.
+                continue
+            del_resp = await client.delete(
+                f"/api/ipam/ip-addresses/{ipo['id']}/",
+                headers=_headers(),
+            )
+            if del_resp.status_code in (200, 202, 204):
+                log.info(
+                    "ip_pre_onboard_deleted",
+                    "Deleted standalone IP record before onboarding",
+                    context={"ip": ip, "id": ipo["id"]},
+                )
+                deleted = True
+    return deleted
+
+
+async def find_device_by_ip(ip: str) -> dict | None:
+    """Return the Nautobot device whose primary IP (or any assigned IP) is ``ip``.
+
+    Used as the authoritative success signal for onboarding: the
+    nautobot-device-onboarding plugin can leave its JobResult row stuck in
+    PENDING after raising OnboardException, so polling JobResult.status is
+    unreliable. Device presence is the actual outcome that matters.
+
+    Implementation: looks up the IPAddress record by host address, then
+    finds any interface that lists that IPAddress, and resolves the
+    interface's parent device. The Nautobot 3.x ``primary_ip4__host``
+    filter is rejected (HTTP 400), so we cannot query Devices directly
+    by IP.
+    """
+    async with httpx.AsyncClient(base_url=NAUTOBOT_URL, timeout=15) as client:
+        ip_resp = await client.get(
+            f"/api/ipam/ip-addresses/?address={ip}&limit=5",
+            headers=_headers(),
+        )
+        if ip_resp.status_code != 200:
+            return None
+        ip_results = ip_resp.json().get("results", [])
+        if not ip_results:
+            return None
+
+        for ipo in ip_results:
+            ip_id = ipo.get("id")
+            if not ip_id:
+                continue
+            iface_resp = await client.get(
+                f"/api/dcim/interfaces/?ip_addresses={ip_id}&limit=5",
+                headers=_headers(),
+            )
+            if iface_resp.status_code != 200:
+                continue
+            for iface in iface_resp.json().get("results", []):
+                dev_obj = iface.get("device") or {}
+                dev_id = dev_obj.get("id") if isinstance(dev_obj, dict) else None
+                if not dev_id:
+                    continue
+                dev_resp = await client.get(
+                    f"/api/dcim/devices/{dev_id}/",
+                    headers=_headers(),
+                )
+                if dev_resp.status_code == 200:
+                    return dev_resp.json()
+        return None
 
 
 async def submit_sync_network_data(

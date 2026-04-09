@@ -323,6 +323,10 @@ services:
       ANOMALY_STALE_DAYS: ${ANOMALY_STALE_DAYS:-7}
       MNM_RETENTION_DAYS: ${MNM_RETENTION_DAYS:-365}
       MNM_PRUNE_INTERVAL_HOURS: ${MNM_PRUNE_INTERVAL_HOURS:-24}
+      # Celery result backend (Redis db 1) — used as a fallback when the
+      # nautobot-device-onboarding plugin leaves a JobResult row stuck in
+      # PENDING. Controller reads celery-task-meta-* directly from here.
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/1
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - mnm_controller_data:/data

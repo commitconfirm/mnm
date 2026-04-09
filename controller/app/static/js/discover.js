@@ -194,7 +194,36 @@ function statusBadge(status) {
   return `<span class="badge ${status}">${status}</span>`;
 }
 
-function renderTable(hosts) {
+function onboardingBlockHtml(state) {
+  if (!state) return '';
+  const stage = (state.stage || '').toLowerCase();
+  const stageColor = ({
+    submitting: '#888',
+    queued: '#888',
+    running: '#0a73c0',
+    succeeded: '#1c8a3a',
+    failed: '#b71c1c',
+    timeout: '#b71c1c',
+    none: '#888',
+  })[stage] || '#888';
+  const errBlock = state.error
+    ? `<div class="field"><div class="field-label">Error Detail</div><div class="field-value" style="white-space:pre-wrap;color:#b71c1c;">${escHtml(state.error)}</div></div>`
+    : '';
+  const jrLink = state.job_result_id
+    ? `<div class="field"><div class="field-label">Nautobot Job Result</div><div class="field-value"><a target="_blank" href="/job-results/${escHtml(state.job_result_id)}/">${escHtml(state.job_result_id)}</a></div></div>`
+    : '';
+  return `
+    <div class="field" style="grid-column: 1 / -1; border-left: 4px solid ${stageColor}; padding-left: 8px; background: #f7f7f7;">
+      <div class="field-label">Onboarding Status</div>
+      <div class="field-value"><strong style="color:${stageColor};text-transform:uppercase;">${escHtml(stage)}</strong> &mdash; ${escHtml(state.message || '')}</div>
+    </div>
+    ${jrLink}
+    ${errBlock}
+  `;
+}
+
+function renderTable(hosts, onboardingByIp) {
+  onboardingByIp = onboardingByIp || {};
   const tbody = document.getElementById('sweep-table');
   const entries = Object.entries(hosts);
 
@@ -237,6 +266,7 @@ function renderTable(hosts) {
     rows.push(`<tr class="detail-row" id="detail-${escHtml(ip)}" style="display: ${isExpanded ? 'table-row' : 'none'};">
       <td colspan="9">
         <div class="detail-content">
+          ${onboardingBlockHtml(onboardingByIp[ip])}
           <div class="field">
             <div class="field-label">MAC Address</div>
             <div class="field-value">${escHtml(info.mac_address || '-')}</div>
@@ -413,7 +443,11 @@ async function pollStatus() {
       logEl.scrollTop = logEl.scrollHeight;
     }
 
-    renderTable(hosts);
+    const onboardingByIp = {};
+    for (const o of (data.onboarding || [])) {
+      if (o && o.ip) onboardingByIp[o.ip] = o;
+    }
+    renderTable(hosts, onboardingByIp);
     updateStats(hosts);
 
     // Stop polling when done
