@@ -5,6 +5,34 @@ All notable changes to MNM are documented in this file. Format follows [Keep a C
 ## [Unreleased]
 
 ### Added
+- **Modular per-device polling** — replaces monolithic endpoint collector with independent `collect_arp()`, `collect_mac()`, `collect_dhcp()`, `collect_lldp()` job functions per device. New `device_polls` table tracks per-device/per-job-type state (last success, last error, next due, interval, enabled). Per-device sequential execution avoids overlapping NAPALM sessions; cross-device parallel dispatch with configurable concurrency. 10% random jitter on `next_due` prevents thundering herd. Seeds from Nautobot inventory on first startup. Legacy monolithic collector gated behind `MNM_LEGACY_COLLECTOR=true`. Default intervals: `MNM_POLL_ARP_INTERVAL=300`, `MNM_POLL_MAC_INTERVAL=300`, `MNM_POLL_DHCP_INTERVAL=600`, `MNM_POLL_LLDP_INTERVAL=3600`.
+- **Jobs page** (`/jobs`) — consolidated view of all background tasks: Sweep Scheduler, Modular Poller, Proxmox Collector, Database Prune, and legacy Endpoint Collector. Shows status, schedule interval, last run, next run, duration, result summary, and Run Now button per job. `GET /api/jobs` consolidated endpoint.
+- **Polling API endpoints** — `GET /api/polling/status`, `GET /api/polling/status/{device}`, `POST /api/polling/trigger/{device}`, `POST /api/polling/trigger/{device}/{job_type}`, `PUT /api/polling/config/{device}/{job_type}`. Trigger endpoints return 202 Accepted.
+- **Dashboard Polling Status card** — per-device rows with green/yellow/red/gray status dots for ARP, MAC, DHCP, LLDP collection. "Poll Now" button per device. Auto-refreshes with dashboard interval.
+- **Onboarding progress tracker** — in-memory per-IP state machine (`submitting → queued → running → succeeded | failed | timeout`) surfaced via `GET /api/discover/onboarding` and in the sweep host Details panel.
+- **Sweep-scheduled trigger** — `POST /api/discover/sweep-scheduled` re-runs the first saved sweep schedule without requiring a request body (used by Jobs page Run Now).
+- **Add-to-sweep prefill** — dashboard "Discovered Subnets" → "Add to sweep" now pre-fills the CIDR textarea on the discovery page, shows an instructional banner, and scrolls to the form.
+- **Device interface subnet auto-expansion** — sweep schedule loop auto-adds subnets from onboarded device interface IPs to the sweep scope. Subnet advisory filters them out.
+- **Nautobot Patch 4** — `patches/patch_processor_schema_logging.py` promotes schema validation errors from DEBUG to WARNING so the actual missing field is visible in JobResult logs without enabling debug mode.
+- **Documentation index** — new `docs/INDEX.md` with role-based navigation.
+
+### Changed
+- **Table styling consistency** — removed `full-width-table` edge-bleed wrapper from all pages; all tables now use card-padded style matching Sweep History.
+- **Discovery page UX** — moved CIDR instruction into textarea label, moved pipeline description under progress bar, scan log box vertically resizable (80px–500px).
+- **Container Status** moved to bottom of dashboard page.
+- **Jobs nav link** added to all pages (Dashboard, Discovery, Endpoints, Events, Logs, Jobs).
+
+### Fixed
+- **Sweep stop button** — now cancels within seconds instead of hanging for minutes. Cancel check added inside onboarding poll loop (every iteration) and port probe queue (`semaphore.acquire` with 2s timeout).
+- **Five discovery pipeline bugs** causing every onboarding to fail silently:
+  - Location type: saved schedule pointed at Region (no `dcim.device` content type); startup migration auto-repoints to Site.
+  - JobResult stuck PENDING: controller reads `celery-task-meta-*` from Redis db 1 as fallback when DB row stays PENDING (upstream plugin bug).
+  - Status string case: poll loop checked `"completed"`/`"failed"` but Nautobot 3.x uses `SUCCESS`/`FAILURE`.
+  - IPAM IntegrityError: `delete_standalone_ip()` removes unattached IP records before onboarding to prevent duplicate key crash.
+  - `find_device_by_ip`: rewrote to use `IPAddress → Interface → Device` lookup chain (Nautobot 3.x rejects `?primary_ip4__host=`).
+- **Container Status crash** — `ImageNotFound` when Docker prunes old images after rebuild; falls back to `Config.Image` from container attrs.
+
+### Previous additions
 - **Database maintenance — daily prune + on-demand admin endpoints**
   - New helpers in `controller/app/endpoint_store.py`: `prune_old_events`, `prune_old_observations`, `prune_orphaned_watches`, `prune_stale_sentinels`, `prune_all`, `prune_preview`, `maintenance_stats`. Each operation is structured-logged under the dedicated `prune` module.
   - Background scheduled prune task in the controller, configurable via `MNM_RETENTION_DAYS` (default 365) and `MNM_PRUNE_INTERVAL_HOURS` (default 24). First run is delayed 2 minutes after startup to let the system settle.

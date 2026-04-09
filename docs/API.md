@@ -213,6 +213,100 @@ curl -b cookies.txt -X POST http://localhost:9090/api/discover/sweep \
 curl -b cookies.txt http://localhost:9090/api/discover/status
 ```
 
+## Jobs
+
+### GET /api/jobs
+Consolidated view of all background tasks: sweep scheduler, modular poller, Proxmox collector, database prune, and legacy endpoint collector.
+
+**Response:**
+```json
+{
+  "jobs": [
+    {
+      "id": "sweep",
+      "name": "Sweep Scheduler",
+      "status": "idle",
+      "running": false,
+      "schedule_interval": "1h",
+      "last_run": "2026-04-09T22:10:00Z",
+      "duration_seconds": 285.3,
+      "summary": {"total": 254, "alive": 10, "known": 3},
+      "enabled": true
+    }
+  ]
+}
+```
+
+### POST /api/discover/sweep-scheduled
+Re-run the first saved sweep schedule. Used by the Jobs page "Run Now" button.
+
+**Response:** `200 OK`
+```json
+{"status": "started", "cidr_ranges": ["198.51.100.0/24"]}
+```
+
+## Modular Polling
+
+Per-device, per-job-type collection tracking. Replaces the monolithic endpoint collector.
+
+### GET /api/polling/status
+All devices, all job types, grouped by device.
+
+**Response:**
+```json
+{
+  "devices": [
+    {
+      "device_name": "core-switch-01",
+      "jobs": {
+        "arp": {"last_success": "2026-04-09T22:05:00Z", "interval_sec": 300, "enabled": true},
+        "mac": {"last_success": "2026-04-09T22:05:06Z", "interval_sec": 300, "enabled": true},
+        "dhcp": {"last_success": null, "interval_sec": 600, "enabled": true},
+        "lldp": {"last_success": "2026-04-09T21:30:00Z", "interval_sec": 3600, "enabled": true}
+      }
+    }
+  ]
+}
+```
+
+### GET /api/polling/status/{device_name}
+Single device, all job types.
+
+### POST /api/polling/trigger/{device_name}
+Trigger immediate poll of all enabled job types for a device. Returns `202 Accepted`.
+
+### POST /api/polling/trigger/{device_name}/{job_type}
+Trigger a single job type (`arp`, `mac`, `dhcp`, or `lldp`). Returns `202 Accepted`.
+
+### PUT /api/polling/config/{device_name}/{job_type}
+Update interval or enabled flag for a specific device/job type.
+
+**Request:**
+```json
+{"interval_sec": 600, "enabled": false}
+```
+
+**Response:** Updated poll row.
+
+## Onboarding Progress
+
+### GET /api/discover/onboarding
+All tracked onboarding job states.
+
+### GET /api/discover/onboarding/{ip}
+Detailed onboarding progress for a single host. Stages: `submitting`, `queued`, `running`, `succeeded`, `failed`, `timeout`.
+
+**Response:**
+```json
+{
+  "ip": "198.51.100.7",
+  "stage": "succeeded",
+  "message": "Device onboarded (core-switch-02)",
+  "job_result_id": "uuid",
+  "device_id": "uuid"
+}
+```
+
 ## Phase 2.7 — Endpoint correlation endpoints
 
 These endpoints expose the MAC-keyed endpoint store backed by the

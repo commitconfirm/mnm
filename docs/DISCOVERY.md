@@ -25,9 +25,13 @@ Classify: network_device | server | web_service | printer | access_point | endpo
 
 ## Discovery Modes
 
-**Manual sweep** — triggered via the Controller UI at `:9090/discover`. Enter CIDR ranges, select a location and credential set, optionally provide an SNMP community string, and click Start Sweep.
+**Manual sweep** — triggered via the Controller UI at `:9090/discover`. Enter CIDR ranges, select a location and credential set, optionally provide an SNMP community string, and click Start Sweep. The Stop button cancels a running sweep within seconds.
 
 **Scheduled re-sweep** — configure automatic re-sweeps at intervals (1h to 7d) via the Controller UI. The controller runs sweeps in the background and updates all records.
+
+**Add-to-sweep from dashboard** — the Discovered Subnets advisory on the dashboard includes "Add to sweep" buttons. Clicking one navigates to the discovery page with the CIDR pre-filled in the textarea.
+
+**Automatic subnet expansion** — when onboarded devices have interface IPs on subnets not yet in the sweep schedule, those subnets are automatically added to the first schedule. The sweep loop checks for new device-interface subnets every 5 minutes. This follows the principle that the operator implicitly approved those subnets by onboarding the devices that live on them.
 
 ## Enriched Collection
 
@@ -55,6 +59,9 @@ Each host is classified based on available data:
 | `web_service` | Ports 80 or 443 open |
 | `printer` | Port 9100 open |
 | `access_point` | Known AP vendor MAC (Aruba, Ubiquiti, Ruckus, Meraki) |
+| `virtual_machine` | Proxmox VM (from Proxmox connector) |
+| `container` | Proxmox LXC container (from Proxmox connector) |
+| `hypervisor` | Proxmox host node (from Proxmox connector) |
 | `endpoint` | Responds to probe but no interesting ports |
 | `unknown` | Responsive but doesn't match any classification |
 
@@ -114,9 +121,33 @@ IPs found by both sweep and infrastructure collection are merged:
 - Sweep custom fields (`discovery_*`) and infrastructure fields (`endpoint_*`) coexist on the same IP Address record
 - `discovery_first_seen` is never overwritten
 
-### Collection Schedule
+### Modular Polling (replaces monolithic collector)
 
-Default: every 15 minutes (configurable in controller config). Runs independently from sweep schedules. Each run collects from all onboarded devices and updates Nautobot IPAM incrementally.
+The monolithic collection task has been replaced by independent per-device, per-job-type polling. Each job type (ARP, MAC, DHCP, LLDP) runs on its own schedule per device, tracked in the `device_polls` table.
+
+**Default intervals (configurable via environment variables):**
+
+| Job Type | Env Var | Default |
+|----------|---------|---------|
+| ARP | `MNM_POLL_ARP_INTERVAL` | 300s (5 min) |
+| MAC | `MNM_POLL_MAC_INTERVAL` | 300s (5 min) |
+| DHCP | `MNM_POLL_DHCP_INTERVAL` | 600s (10 min) |
+| LLDP | `MNM_POLL_LLDP_INTERVAL` | 3600s (1 hour) |
+
+Per-device overrides are stored in the `device_polls` table and can be changed via `PUT /api/polling/config/{device}/{job_type}`. The poll loop checks for due jobs every 30 seconds (`MNM_POLL_CHECK_INTERVAL`).
+
+**Key behaviors:**
+- Jobs for the same device run sequentially to avoid overlapping NAPALM sessions
+- Cross-device jobs run in parallel, bounded by `MNM_COLLECTION_CONCURRENCY`
+- 10% random jitter on `next_due` prevents thundering herd after restarts
+- On failure, retry after half the interval
+- New devices are automatically seeded when first discovered in Nautobot
+
+**Dashboard:** The Polling Status card on the dashboard shows per-device rows with green/yellow/red/gray status indicators and a "Poll Now" button. The Jobs page (`/jobs`) shows the Modular Poller as a background task.
+
+**API:** See [API.md](API.md#modular-polling) for the 5 polling endpoints.
+
+**Migration:** The legacy monolithic collector is disabled by default. Set `MNM_LEGACY_COLLECTOR=true` to re-enable it during transition.
 
 ### Platform Support
 

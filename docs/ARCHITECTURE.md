@@ -150,12 +150,17 @@ Tables:
 - `endpoint_events` — append-only log of changes: `appeared`, `moved_port`,
   `moved_switch`, `ip_changed`, `hostname_changed`. Each row has old/new
   values plus a JSONB `details` blob.
+- `device_polls` — per-device, per-job-type poll tracking. Composite PK
+  `(device_name, job_type)`. Tracks `last_success`, `last_attempt`,
+  `last_error`, `last_duration`, `next_due`, `interval_sec`, `enabled`.
+  Seeded from Nautobot inventory on first startup.
 - `sweep_runs` — per-sweep summary (CIDR, duration, totals).
 - `collection_runs` — per-collection-run summary (devices queried, endpoints
   found/new/updated/moved, duration).
 - `ip_observations` — append-only sweep snapshot for an IP (open ports,
   banners, SNMP, HTTP headers, TLS data, classification).
 - `kv_config` — replaces the legacy `config.json` file.
+- `discovery_excludes` — operator-defined exclusion list (IP or device_name).
 
 **Migration:** on first startup, if `endpoints` is empty and a
 `/data/endpoints.json` (or `/data/config.json`) file exists, the controller
@@ -166,3 +171,41 @@ endpoint queries return empty until the database comes back.
 The ORM layer uses SQLAlchemy 2.x async with the asyncpg driver. See
 [../controller/app/db.py](../controller/app/db.py) and
 [../controller/app/endpoint_store.py](../controller/app/endpoint_store.py).
+
+## Controller UI Pages
+
+The controller serves a vanilla JS frontend (no frameworks) at `:9090`.
+
+| Route | Page | Purpose |
+|-------|------|---------|
+| `/` | Dashboard | Container health, device count, sweep/collection stats, polling status, advisories |
+| `/discover` | Discovery | Sweep configuration, CIDR ranges, schedule, results table, exclusion list |
+| `/endpoints` | Endpoints | Sortable/filterable table of all collected endpoints |
+| `/endpoints/{mac}` | Endpoint Detail | Full timeline and identity dossier for a single MAC |
+| `/events` | Events | Network activity feed filtered by event type and time window |
+| `/jobs` | Jobs | Consolidated view of all background tasks with status, schedules, and Run Now |
+| `/logs` | Logs | Structured log viewer with level/module filtering |
+
+## Background Tasks
+
+The controller runs these background tasks launched at startup:
+
+| Task | Module | Schedule | Purpose |
+|------|--------|----------|---------|
+| Sweep Scheduler | `discovery.py` | Per-schedule interval (default 1h) | Network discovery sweeps |
+| Modular Poller | `polling.py` | Per-device/per-job-type (ARP 5m, MAC 5m, DHCP 10m, LLDP 1h) | Independent device data collection |
+| Proxmox Collector | `connectors/proxmox.py` | `PROXMOX_INTERVAL_SECONDS` (default 5m) | VM/container/storage inventory |
+| Database Prune | `main.py` | `MNM_PRUNE_INTERVAL_HOURS` (default 24h) | Evict data past retention window |
+
+The legacy monolithic Endpoint Collector (`endpoint_collector.py`) is disabled by default. Set `MNM_LEGACY_COLLECTOR=true` to re-enable during transition.
+
+## Nautobot Dockerfile Patches
+
+Four in-place patches are applied in `nautobot/Dockerfile` to work around upstream plugin issues. Check on plugin upgrades — these may become unnecessary.
+
+| Patch | File | Issue |
+|-------|------|-------|
+| 1. Netmiko read_timeout | `command_getter.py` | Hardcoded 60s too short for large Junos configs; patched to 120s |
+| 2. tcp_ping null port | `command_getter.py` | `NautobotORMInventory` never sets `Host.port`; patched to default 22 |
+| 3. Missing serial KeyError | `diffsync_utils.py` | Devices without serial crash sync job; patched via `patches/patch_diffsync_utils.py` |
+| 4. Schema validation logging | `processor.py` | Upstream gates ValidationError at DEBUG; patched to WARNING via `patches/patch_processor_schema_logging.py` |

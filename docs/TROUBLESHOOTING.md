@@ -33,11 +33,32 @@ Issues organized by symptom.
 **Fix:** MNM sets `conn_timeout: 30` in nornir connection_options.
 
 ### Jobs stuck in "Pending" state
-**Symptom:** Nautobot Jobs page shows jobs as "Pending" indefinitely.
+**Symptom:** Nautobot Jobs page shows onboarding or sync jobs as "Pending" indefinitely, even though the Celery worker ran them.
 
-**Cause:** The Celery worker was down or restarting when the job was submitted.
+**Cause:** `nautobot-device-onboarding` 5.x raises `OnboardException` (or other DB-level exceptions like `IntegrityError`) before Nautobot's `run_job` wrapper updates the `JobResult` row in PostgreSQL. The terminal state (SUCCESS or FAILURE) only lands in the Celery result backend (Redis db 1), never in the DB.
 
-**Fix:** Delete stuck job results via API or Nautobot admin UI, then restart the worker: `docker compose restart nautobot-worker`.
+**Fix:** The MNM controller reads `celery-task-meta-*` from Redis db 1 as a fallback when the DB row stays PENDING for ≥30 seconds. The authoritative success signal is device presence in Nautobot (via `find_device_by_ip`), not `JobResult.status`. The controller also surfaces the actual error from Redis in the onboarding progress tracker (`GET /api/discover/onboarding/{ip}`).
+
+### Onboarding fails with "Devices may not associate to locations of type Region"
+**Symptom:** Onboarding job fails (visible in Redis, not in Nautobot JobResult). Error: `ValidationError: Devices may not associate to locations of type "Region"`.
+
+**Cause:** The sweep schedule's `location_id` points at a Nautobot Location whose LocationType doesn't include `dcim.device` in its content types. The bootstrap creates both a "Region" type (parent grouping, no device content type) and a "Site" type (with `dcim.device`). If the schedule accidentally references the Region, every onboarding fails.
+
+**Fix:** The controller's `get_locations()` API now only returns locations whose type accepts `dcim.device`. On startup, the sweep loop auto-repoints any saved schedule from an invalid location to the first valid one. Check the controller logs for `sweep_schedule_location_fixed`.
+
+### Onboarding fails with "duplicate key value violates unique constraint"
+**Symptom:** Onboarding fails with `IntegrityError: duplicate key value violates unique constraint "ipam_ipaddress_parent_id_host_..."`.
+
+**Cause:** The sweep engine records every alive IP into Nautobot IPAM before attempting onboarding. The onboarding plugin then tries to `IPAddress.objects.create()` for the same IP.
+
+**Fix:** The controller calls `delete_standalone_ip(ip)` immediately before submitting the onboarding job. Only deletes IPAddress records that have no interface attachment (won't orphan existing devices). Discovery custom fields are re-applied on the next sweep.
+
+### Schema validation failed (no detail visible)
+**Symptom:** Nautobot sync job logs show "Schema validation failed." for a device but no indication of which field is missing.
+
+**Cause:** Upstream `processor.py` logs the actual `ValidationError` at DEBUG level, gated behind `if self.job.debug:`. Operators only see the generic message without enabling debug mode.
+
+**Fix:** MNM Patch 4 (`patches/patch_processor_schema_logging.py`) promotes both schema-validation log calls to WARNING. The missing field detail is now always visible in the JobResult log.
 
 ## Grafana
 

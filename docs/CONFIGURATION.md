@@ -132,12 +132,25 @@ The default 365-day retention with 10 GB size cap accommodates most deployments.
 
 Configured via the Controller UI at `:9090/discover` and persisted in `/data/config.json` inside the controller container.
 
+## Modular Polling
+
+Per-device, per-job-type collection intervals. These are defaults for new devices — per-device overrides are stored in the `device_polls` table and changeable via `PUT /api/polling/config/{device}/{job_type}`.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MNM_POLL_ARP_INTERVAL` | `300` | ARP table collection interval in seconds |
+| `MNM_POLL_MAC_INTERVAL` | `300` | MAC address table collection interval in seconds |
+| `MNM_POLL_DHCP_INTERVAL` | `600` | DHCP bindings collection interval in seconds |
+| `MNM_POLL_LLDP_INTERVAL` | `3600` | LLDP neighbor collection interval in seconds |
+| `MNM_POLL_CHECK_INTERVAL` | `30` | How often the poll loop checks for due jobs (seconds) |
+| `MNM_LEGACY_COLLECTOR` | `false` | Set to `true` to re-enable the old monolithic endpoint collector during transition |
+
 ## Performance Tuning
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MNM_SWEEP_CONCURRENCY` | `50` | Max concurrent TCP probes during network sweep |
-| `MNM_COLLECTION_CONCURRENCY` | `20` | Max concurrent SNMP walks during endpoint collection |
+| `MNM_COLLECTION_CONCURRENCY` | `20` | Max concurrent device polls (shared by modular poller and legacy collector) |
 | `MNM_API_CONCURRENCY` | `10` | Max concurrent Nautobot API calls |
 
 These control how aggressively MNM probes the network. Higher values complete faster but generate more concurrent connections. On constrained networks or slow devices, reduce these values.
