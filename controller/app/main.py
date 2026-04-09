@@ -19,7 +19,7 @@ from app.logging_config import StructuredLogger, setup_logging, get_recent_logs
 # Initialize structured logging before anything else
 setup_logging()
 
-from app import db, discovery, docker_manager, endpoint_collector, endpoint_store, nautobot_client
+from app import db, discovery, docker_manager, endpoint_collector, endpoint_store, nautobot_client, polling
 from app.connectors import proxmox as proxmox_connector
 from app.config import (
     DATA_DIR, load_config, load_config_async, save_config, save_config_async,
@@ -138,12 +138,17 @@ async def on_startup():
 
     # Launch background tasks
     asyncio.create_task(discovery.scheduled_sweep_loop())
-    asyncio.create_task(endpoint_collector.scheduled_collection_loop())
+    if os.getenv("MNM_LEGACY_COLLECTOR", "false").lower() == "true":
+        # Legacy monolithic endpoint collector — replaced by modular polling (polling.py).
+        # Enable with MNM_LEGACY_COLLECTOR=true if needed during transition.
+        asyncio.create_task(endpoint_collector.scheduled_collection_loop())
+    asyncio.create_task(polling.poll_loop())
     asyncio.create_task(proxmox_connector.scheduled_loop())
     asyncio.create_task(_scheduled_prune_loop())
     log.info("background_tasks",
-             "Background tasks launched: sweep scheduler, endpoint collector, proxmox connector, prune loop",
+             "Background tasks launched: sweep scheduler, modular poller, proxmox connector, prune loop",
              context={"proxmox_configured": proxmox_connector.is_configured(),
+                      "legacy_collector": os.getenv("MNM_LEGACY_COLLECTOR", "false"),
                       "retention_days": _retention_days(),
                       "prune_interval_hours": _prune_interval_hours()})
 
@@ -559,6 +564,19 @@ async def discover_subnets():
                 in_scope.add(_ipaddress.ip_network(cidr, strict=False))
             except ValueError:
                 continue
+
+    # Also exclude subnets that contain IPs on onboarded device interfaces
+    # — those are auto-expanded into the sweep schedule and shouldn't
+    # clutter the advisory.
+    try:
+        device_subnets = await nautobot_client.get_device_interface_subnets()
+        for ds in device_subnets:
+            try:
+                in_scope.add(_ipaddress.ip_network(ds, strict=False))
+            except ValueError:
+                pass
+    except Exception:
+        pass
 
     candidates: dict[str, dict] = {}
     try:
@@ -1358,6 +1376,226 @@ async def events_page():
 @app.get("/logs")
 async def logs_page():
     return FileResponse("app/static/logs.html")
+
+
+@app.get("/jobs")
+async def jobs_page():
+    return FileResponse("app/static/jobs.html")
+
+
+# -------------------------------------------------------------------------
+# Polling — per-device, per-job-type collection tracking
+# -------------------------------------------------------------------------
+
+@app.get("/api/polling/status", dependencies=[Depends(require_auth)])
+async def polling_status():
+    """All devices, all job types, last poll times and status."""
+    rows = await polling.get_all_poll_status()
+    # Group by device for the dashboard
+    by_device: dict[str, dict] = {}
+    for r in rows:
+        dn = r["device_name"]
+        if dn not in by_device:
+            by_device[dn] = {"device_name": dn, "jobs": {}}
+        by_device[dn]["jobs"][r["job_type"]] = r
+    return {"devices": list(by_device.values()), "poll_state": polling.get_poll_state()}
+
+
+@app.get("/api/polling/status/{device_name}", dependencies=[Depends(require_auth)])
+async def polling_status_device(device_name: str):
+    """Single device, all job types."""
+    rows = await polling.get_device_poll_status(device_name)
+    if not rows:
+        raise HTTPException(status_code=404, detail="Device not found in poll tracking")
+    return {"device_name": device_name, "jobs": {r["job_type"]: r for r in rows}}
+
+
+@app.post("/api/polling/trigger/{device_name}", dependencies=[Depends(require_auth)],
+          status_code=202)
+async def polling_trigger_device(device_name: str):
+    """Trigger immediate poll of all job types for a device."""
+    count = await polling.trigger_device(device_name)
+    if count == 0:
+        raise HTTPException(status_code=404, detail="No enabled poll rows found for this device")
+    return {"status": "accepted", "device_name": device_name, "jobs_triggered": count}
+
+
+@app.post("/api/polling/trigger/{device_name}/{job_type}",
+          dependencies=[Depends(require_auth)], status_code=202)
+async def polling_trigger_job(device_name: str, job_type: str):
+    """Trigger a single job type for a device."""
+    if job_type not in polling.JOB_TYPES:
+        raise HTTPException(status_code=400, detail=f"Invalid job type. Must be one of: {polling.JOB_TYPES}")
+    count = await polling.trigger_device(device_name, job_type)
+    if count == 0:
+        raise HTTPException(status_code=404, detail="No enabled poll row found")
+    return {"status": "accepted", "device_name": device_name, "job_type": job_type}
+
+
+class PollConfigUpdate(BaseModel):
+    interval_sec: int | None = None
+    enabled: bool | None = None
+
+
+@app.put("/api/polling/config/{device_name}/{job_type}",
+         dependencies=[Depends(require_auth)])
+async def polling_config_update(device_name: str, job_type: str, body: PollConfigUpdate):
+    """Update interval_sec or enabled flag for a specific device/job_type."""
+    if job_type not in polling.JOB_TYPES:
+        raise HTTPException(status_code=400, detail=f"Invalid job type. Must be one of: {polling.JOB_TYPES}")
+    result = await polling.update_poll_config(
+        device_name, job_type,
+        interval_sec=body.interval_sec,
+        enabled=body.enabled,
+    )
+    if not result:
+        raise HTTPException(status_code=404, detail="Device/job_type not found")
+    return result
+
+
+# -------------------------------------------------------------------------
+# Jobs — consolidated background task view
+# -------------------------------------------------------------------------
+
+@app.get("/api/jobs", dependencies=[Depends(require_auth)])
+async def list_jobs():
+    """Consolidated view of all background tasks for the Jobs page."""
+    from datetime import datetime, timezone
+    config = await load_config_async()
+
+    # --- Sweep Scheduler ---
+    sweep = discovery.get_sweep_state()
+    schedules = config.get("sweep_schedules", [])
+    sweep_interval_hours = (
+        min((s.get("interval_hours", 24) for s in schedules), default=24)
+        if schedules else None
+    )
+    sweep_last_run = sweep.get("finished_at") or (
+        max((s.get("last_run", "") for s in schedules), default=None)
+        if schedules else None
+    )
+
+    # --- Endpoint Collector ---
+    ep = endpoint_collector.get_collection_state()
+    ep_interval = config.get("endpoint_collection_interval_minutes", 15)
+
+    # --- Proxmox Collector ---
+    px = proxmox_connector.get_state()
+    px_interval = proxmox_connector.PROXMOX_INTERVAL_SECONDS
+
+    # --- Database Prune ---
+    prune_interval = _prune_interval_hours()
+
+    jobs = [
+        {
+            "id": "sweep",
+            "name": "Sweep Scheduler",
+            "description": "Network discovery sweep across configured CIDR ranges",
+            "status": "running" if sweep.get("running") else "idle",
+            "running": sweep.get("running", False),
+            "schedule_interval": f"{sweep_interval_hours}h" if sweep_interval_hours else None,
+            "schedule_seconds": sweep_interval_hours * 3600 if sweep_interval_hours else None,
+            "last_run": sweep_last_run,
+            "duration_seconds": sweep.get("duration_seconds"),
+            "summary": sweep.get("summary"),
+            "error": None,
+            "trigger_url": "/api/discover/sweep-scheduled",
+            "schedule_count": len(schedules),
+            "enabled": len(schedules) > 0,
+        },
+        {
+            "id": "endpoint_collector",
+            "name": "Endpoint Collector (legacy)",
+            "description": "Monolithic ARP/MAC collection — replaced by Modular Poller",
+            "status": "running" if ep.get("running") else "idle",
+            "running": ep.get("running", False),
+            "schedule_interval": f"{ep_interval}m",
+            "schedule_seconds": ep_interval * 60,
+            "last_run": ep.get("last_run"),
+            "duration_seconds": (ep.get("summary") or {}).get("duration_seconds"),
+            "summary": ep.get("summary"),
+            "error": (ep.get("errors") or [None])[-1],
+            "trigger_url": "/api/endpoints/collect",
+            "enabled": os.getenv("MNM_LEGACY_COLLECTOR", "false").lower() == "true",
+        },
+        {
+            "id": "proxmox_collector",
+            "name": "Proxmox Collector",
+            "description": "Collect VM/container inventory from Proxmox VE",
+            "status": "running" if px.get("running") else (
+                "error" if px.get("last_error") else "idle"
+            ),
+            "running": px.get("running", False),
+            "schedule_interval": f"{px_interval // 60}m",
+            "schedule_seconds": px_interval,
+            "last_run": px.get("last_run"),
+            "duration_seconds": px.get("duration_seconds"),
+            "summary": {
+                "nodes": px.get("node_count", 0),
+                "vms": px.get("vm_count", 0),
+                "containers": px.get("container_count", 0),
+            },
+            "error": px.get("last_error"),
+            "trigger_url": "/api/proxmox/collect",
+            "enabled": px.get("configured", False),
+        },
+        {
+            "id": "modular_poller",
+            "name": "Modular Poller",
+            "description": "Per-device ARP/MAC/DHCP/LLDP collection on independent schedules",
+            "status": "running" if polling.get_poll_state().get("running") else "idle",
+            "running": polling.get_poll_state().get("running", False),
+            "schedule_interval": f"{polling.POLL_CHECK_INTERVAL}s check",
+            "schedule_seconds": polling.POLL_CHECK_INTERVAL,
+            "last_run": polling.get_poll_state().get("last_check"),
+            "duration_seconds": None,
+            "summary": {"dispatched": polling.get_poll_state().get("polls_dispatched", 0)},
+            "error": None,
+            "trigger_url": None,
+            "enabled": True,
+        },
+        {
+            "id": "db_prune",
+            "name": "Database Prune",
+            "description": f"Evict data older than {_retention_days()} days",
+            "status": "running" if _prune_state["running"] else (
+                "error" if _prune_state["last_error"] else "idle"
+            ),
+            "running": _prune_state["running"],
+            "schedule_interval": f"{prune_interval}h",
+            "schedule_seconds": prune_interval * 3600,
+            "last_run": _prune_state["last_run"],
+            "duration_seconds": None,
+            "summary": _prune_state["last_summary"],
+            "error": _prune_state["last_error"],
+            "trigger_url": "/api/admin/prune",
+            "enabled": True,
+        },
+    ]
+    return {"jobs": jobs}
+
+
+@app.post("/api/discover/sweep-scheduled", dependencies=[Depends(require_auth)])
+async def trigger_scheduled_sweep():
+    """Re-run the first saved sweep schedule. Used by the Jobs page Run Now."""
+    state = discovery.get_sweep_state()
+    if state["running"]:
+        raise HTTPException(status_code=409, detail="Sweep already running")
+    config = await load_config_async()
+    schedules = config.get("sweep_schedules", [])
+    if not schedules:
+        raise HTTPException(
+            status_code=404,
+            detail="No sweep schedules configured. Set one up on the Discovery page first.",
+        )
+    s = schedules[0]
+    asyncio.create_task(discovery.sweep(
+        s["cidr_ranges"],
+        s["location_id"],
+        s["secrets_group_id"],
+        snmp_community=s.get("snmp_community", ""),
+    ))
+    return {"status": "started", "cidr_ranges": s["cidr_ranges"]}
 
 
 app.mount("/static", StaticFiles(directory="app/static"), name="static")

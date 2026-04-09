@@ -84,6 +84,47 @@ async def get_interfaces(device_id: str) -> list[dict]:
         return resp.json().get("results", [])
 
 
+async def get_device_interface_subnets() -> set[str]:
+    """Return the set of /24 (v4) or /64 (v6) subnets that contain IPs
+    assigned to onboarded device interfaces.
+
+    These are subnets the operator has implicitly approved by onboarding
+    the devices — they should be included in periodic sweeps automatically.
+    """
+    import ipaddress as _ipaddress
+    subnets: set[str] = set()
+    devices = await get_devices()
+    async with httpx.AsyncClient(base_url=NAUTOBOT_URL, timeout=30) as client:
+        for dev in devices:
+            dev_id = dev.get("id")
+            if not dev_id:
+                continue
+            ifaces = await get_interfaces(dev_id)
+            for ifc in ifaces:
+                ifc_id = ifc.get("id")
+                if not ifc_id:
+                    continue
+                resp = await client.get(
+                    f"/api/ipam/ip-addresses/?interfaces={ifc_id}&limit=50",
+                    headers=_headers(),
+                )
+                if resp.status_code != 200:
+                    continue
+                for ip_obj in resp.json().get("results", []):
+                    display = ip_obj.get("display") or ip_obj.get("address") or ""
+                    host = display.split("/")[0] if "/" in display else display
+                    if not host:
+                        continue
+                    try:
+                        addr = _ipaddress.ip_address(host)
+                        prefix_len = 24 if addr.version == 4 else 64
+                        net = _ipaddress.ip_network(f"{host}/{prefix_len}", strict=False)
+                        subnets.add(str(net))
+                    except ValueError:
+                        continue
+    return subnets
+
+
 async def get_secrets_groups() -> list[dict]:
     async with httpx.AsyncClient(base_url=NAUTOBOT_URL, timeout=15) as client:
         resp = await client.get("/api/extras/secrets-groups/", headers=_headers())

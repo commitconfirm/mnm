@@ -38,11 +38,19 @@ def get_containers() -> list[dict]:
             else:
                 ports.append(container_port)
 
+        try:
+            img = c.image
+            image_name = img.tags[0] if img.tags else img.short_id
+        except Exception:
+            # After a rebuild the old image may be pruned; c.image raises
+            # ImageNotFound. Fall back to the image ID from container attrs.
+            image_name = (c.attrs.get("Config") or {}).get("Image", "unknown")
+
         results.append({
             "name": c.name,
             "status": c.status,
             "health": health,
-            "image": c.image.tags[0] if c.image.tags else c.image.short_id,
+            "image": image_name,
             "ports": ports,
         })
 

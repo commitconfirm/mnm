@@ -19,6 +19,7 @@
         <button data-theme="dark" title="Dark" class="active">Dark</button>
         <button data-theme="system" title="System">Auto</button>
       </div>
+      <a href="/jobs">Jobs</a>
       <a href="/logs">Logs</a>
       <a href="#" id="prefs-btn" title="Preferences">&#9881;</a>
       <a id="logout-link" href="#">Logout</a>
@@ -154,21 +155,22 @@
       <div id="maint-meta" style="margin-top:8px; font-size:0.8rem; color:var(--text-muted)"></div>
     </div>
 
-    <!-- Container status -->
-    <div class="card">
-      <h2>Container Status</h2>
-      <div class="full-width-table"><table>
+    <!-- Polling Status: per-device collection health -->
+    <div class="card" id="polling-card" style="display:none">
+      <h2>Polling Status</h2>
+      <table>
         <thead>
           <tr>
-            <th class="center">Status</th>
-            <th>Container</th>
-            <th>Image</th>
-            <th>Health</th>
-            <th>Ports</th>
+            <th>Device</th>
+            <th>ARP</th>
+            <th>MAC</th>
+            <th>DHCP</th>
+            <th>LLDP</th>
+            <th></th>
           </tr>
         </thead>
-        <tbody id="container-table"></tbody>
-      </table></div>
+        <tbody id="polling-table"></tbody>
+      </table>
     </div>
 
     <!-- Incomplete onboarding advisory: devices in Nautobot with no IPs -->
@@ -224,6 +226,23 @@
           </tr>
         </thead>
         <tbody id="neighbor-table"></tbody>
+      </table>
+    </div>
+
+    <!-- Container status -->
+    <div class="card">
+      <h2>Container Status</h2>
+      <table>
+        <thead>
+          <tr>
+            <th class="center">Status</th>
+            <th>Container</th>
+            <th>Image</th>
+            <th>Health</th>
+            <th>Ports</th>
+          </tr>
+        </thead>
+        <tbody id="container-table"></tbody>
       </table>
     </div>
   </div>

@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MNM - Jobs</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <style>
+    .job-status { display:inline-flex; align-items:center; gap:6px; font-size:0.85rem; }
+    .job-dot { width:8px; height:8px; border-radius:50%; display:inline-block; flex-shrink:0; }
+    .job-dot.running { background:var(--accent); animation: pulse 1.5s infinite; }
+    .job-dot.idle { background:var(--green, #1c8a3a); }
+    .job-dot.error { background:var(--red, #b71c1c); }
+    .job-dot.disabled { background:var(--text-muted); }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+    .job-summary { font-size:0.82rem; color:var(--text-muted); max-width:320px; }
+    .job-name-sub { font-size:0.78rem; color:var(--text-muted); margin-top:2px; }
+    .job-error { color:var(--red, #b71c1c); font-size:0.82rem; max-width:320px; word-break:break-word; }
+    #jobs-tbody td { vertical-align:top; padding-top:12px; padding-bottom:12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <a href="/" class="logo"><span>MNM</span> Controller</a>
+    <nav>
+      <a href="/">Dashboard</a>
+      <a href="/discover">Discovery</a>
+      <a href="/endpoints">Endpoints</a>
+      <a href="/events">Events</a>
+      <div class="theme-switcher">
+        <button data-theme="light" title="Light">Light</button>
+        <button data-theme="dark" title="Dark" class="active">Dark</button>
+        <button data-theme="system" title="System">Auto</button>
+      </div>
+      <a href="/jobs" class="active">Jobs</a>
+      <a href="/logs">Logs</a>
+      <a href="#" id="prefs-btn" title="Preferences">&#9881;</a>
+      <a id="logout-link" href="#">Logout</a>
+    </nav>
+  </header>
+
+  <div class="container">
+    <div class="card">
+      <h2>Background Jobs
+        <span style="font-size:0.8rem;font-weight:normal;color:var(--text-muted);float:right" id="last-refresh"></span>
+      </h2>
+      <p style="color:var(--text-muted); font-size:0.85rem; margin-top:-8px">
+        All automated background tasks. Use Run Now to trigger an immediate execution.
+        Schedules are configured on each task's dedicated page.
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>Status</th>
+            <th>Job</th>
+            <th>Schedule</th>
+            <th>Last Run</th>
+            <th>Next Run</th>
+            <th>Duration</th>
+            <th>Result</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="jobs-tbody">
+          <tr><td colspan="8" style="text-align:center;color:var(--text-muted)">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <script src="/static/js/preferences.js"></script>
+  <script src="/static/js/jobs.js"></script>
+</body>
+</html>
