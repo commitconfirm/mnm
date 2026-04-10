@@ -693,6 +693,27 @@ async def get_excluded_ips() -> set[str]:
     return _exclude_cache_ip
 
 
+async def get_mac_ip_map_from_observations() -> dict[str, set[str]]:
+    """Build MAC→IPs map from ip_observations table (sweep data).
+
+    This supplements ARP-derived IPs with IPs discovered during sweeps,
+    enabling multi-IP endpoint correlation for devices like the SRX320
+    that have IPs only visible through sweep, not through any node's ARP table.
+    """
+    if not db.is_ready():
+        return {}
+    async with db.SessionLocal() as session:
+        rows = (await session.execute(
+            select(db.IPObservation.mac_address, db.IPObservation.ip_address)
+            .where(db.IPObservation.mac_address.isnot(None))
+        )).all()
+    result: dict[str, set[str]] = {}
+    for mac, ip in rows:
+        if mac and ip:
+            result.setdefault(mac.upper(), set()).add(ip)
+    return result
+
+
 async def get_excluded_device_names() -> set[str]:
     """Return the full set of excluded device-name identifiers."""
     global _exclude_cache_device

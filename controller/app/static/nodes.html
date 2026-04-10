@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MNM - Nodes</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <header>
+    <a href="/" class="logo"><span>MNM</span> Controller</a>
+    <nav>
+      <a href="/">Dashboard</a>
+      <span class="nav-separator"></span>
+      <span class="nav-group-label">Intelligence</span>
+      <a href="/nodes" class="active">Nodes</a>
+      <a href="/endpoints">Endpoints</a>
+      <a href="/events">Events</a>
+      <span class="nav-separator"></span>
+      <span class="nav-group-label">Operations</span>
+      <a href="/discover">Discovery</a>
+      <a href="/jobs">Jobs</a>
+      <a href="/logs">Logs</a>
+      <span class="nav-separator"></span>
+      <div class="theme-switcher">
+        <button data-theme="light" title="Light">Light</button>
+        <button data-theme="dark" title="Dark" class="active">Dark</button>
+        <button data-theme="system" title="System">Auto</button>
+      </div>
+      <a href="#" id="prefs-btn" title="Preferences">&#9881;</a>
+      <a id="logout-link" href="#">Logout</a>
+    </nav>
+  </header>
+
+  <div class="container">
+    <!-- Summary stats -->
+    <div class="grid-4" style="margin-bottom: 16px;">
+      <div class="card">
+        <div class="stat">
+          <div class="value" id="total-nodes">-</div>
+          <div class="label">Total Nodes</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stat">
+          <div class="value" id="healthy-nodes">-</div>
+          <div class="label">Healthy</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stat">
+          <div class="value" id="failing-nodes">-</div>
+          <div class="label">Failing</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stat">
+          <div class="value" id="platforms-count">-</div>
+          <div class="label">Platforms</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Nodes table -->
+    <div class="card">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+        <h2 style="margin-bottom: 0;">Nodes</h2>
+      </div>
+
+      <div class="filter-bar">
+        <input type="text" id="filter-search" placeholder="Search by name, IP, or platform...">
+        <select id="filter-health">
+          <option value="">All Health</option>
+          <option value="green">Healthy</option>
+          <option value="yellow">Degraded</option>
+          <option value="red">Failing</option>
+          <option value="gray">No Data</option>
+        </select>
+        <select id="filter-platform">
+          <option value="">All Platforms</option>
+        </select>
+        <select id="filter-location">
+          <option value="">All Locations</option>
+        </select>
+      </div>
+
+      <div id="nodes-dt"></div>
+    </div>
+  </div>
+
+  <script src="/static/js/datatable.js"></script>
+  <script src="/static/js/preferences.js"></script>
+  <script src="/static/js/nodes.js"></script>
+</body>
+</html>

@@ -3,6 +3,7 @@
 let allEndpoints = [];
 let refreshTimer = null;
 let excludedIpSet = new Set();
+let nodeMacSet = new Set();
 
 async function loadExcludedIps() {
   try {
@@ -13,6 +14,15 @@ async function loadExcludedIps() {
       .filter(e => e.type === 'ip')
       .map(e => e.identifier));
   } catch (e) { /* non-fatal — table renders without strikethrough */ }
+}
+
+async function loadNodeMacs() {
+  try {
+    const r = await fetch('/api/nodes/macs');
+    if (!r.ok) return;
+    const data = await r.json();
+    nodeMacSet = new Set((data.macs || []).map(m => m.toUpperCase()));
+  } catch (e) { /* non-fatal — endpoints render unfiltered */ }
 }
 
 async function checkAuth() {
@@ -93,7 +103,11 @@ async function loadEndpoints() {
     const resp = await fetch('/api/endpoints');
     if (resp.status === 401) { window.location.href = '/login'; return; }
     const data = await resp.json();
-    allEndpoints = data.endpoints || [];
+    // Filter out onboarded node MACs — endpoints page shows passively-discovered only
+    const raw = data.endpoints || [];
+    allEndpoints = nodeMacSet.size > 0
+      ? raw.filter(ep => !nodeMacSet.has((ep.mac || '').toUpperCase()))
+      : raw;
     populateFilters();
     applyFiltersAndRender();
   } catch (e) {
@@ -343,6 +357,7 @@ document.getElementById('watch-add-btn').addEventListener('click', async () => {
 
 checkAuth().then(async () => {
   await loadExcludedIps();  // populate set before first table render
+  await loadNodeMacs();     // filter out infrastructure node MACs
   loadSummary();
   loadEndpoints();
   loadHistory();

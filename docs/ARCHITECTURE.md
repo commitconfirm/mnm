@@ -176,15 +176,37 @@ The ORM layer uses SQLAlchemy 2.x async with the asyncpg driver. See
 
 The controller serves a vanilla JS frontend (no frameworks) at `:9090`.
 
-| Route | Page | Purpose |
-|-------|------|---------|
-| `/` | Dashboard | Container health, device count, sweep/collection stats, polling status, advisories |
-| `/discover` | Discovery | Sweep configuration, CIDR ranges, schedule, results table, exclusion list |
-| `/endpoints` | Endpoints | Sortable/filterable table of all collected endpoints |
-| `/endpoints/{mac}` | Endpoint Detail | Full timeline and identity dossier for a single MAC |
-| `/events` | Events | Network activity feed filtered by event type and time window |
-| `/jobs` | Jobs | Consolidated view of all background tasks with status, schedules, and Run Now |
-| `/logs` | Logs | Structured log viewer with level/module filtering |
+### Navigation Structure
+
+The UI nav bar is organized into grouped sections:
+
+- **Intelligence:** Nodes, Endpoints, Events — primary data views
+- **Operations:** Discovery, Jobs, Logs — operational tools
+- **Monitoring:** Grafana, Prometheus, Proxmox — external service links (from dashboard)
+
+The Dashboard is the landing page, accessible via the MNM logo.
+
+### Terminology: Nodes vs Endpoints
+
+MNM distinguishes between two categories:
+
+- **Nodes** — onboarded infrastructure devices that are *sources of data* for MNM. They have credentials, poll schedules, and active NAPALM sessions. Listed on `/nodes`.
+- **Endpoints** — everything else discovered passively through data collected *from* nodes and sweeps. Listed on `/endpoints`.
+
+The `/endpoints` page filters out MACs belonging to onboarded nodes so only passively-discovered endpoints are shown.
+
+### Page Routes
+
+| Route | Page | Nav Section | Purpose |
+|-------|------|-------------|---------|
+| `/` | Dashboard | — | Container health, node count, sweep/collection stats, polling status, advisories |
+| `/nodes` | Nodes | Intelligence | Onboarded infrastructure with poll health, platform, role, Poll Now |
+| `/endpoints` | Endpoints | Intelligence | Passively-discovered endpoints (excludes node MACs) |
+| `/endpoints/{mac}` | Endpoint Detail | Intelligence | Full timeline and identity dossier for a single MAC |
+| `/events` | Events | Intelligence | Network activity feed filtered by event type and time window |
+| `/discover` | Discovery | Operations | Sweep configuration, CIDR ranges, schedule, results table, exclusion list |
+| `/jobs` | Jobs | Operations | Consolidated view of all background tasks with status, schedules, and Run Now |
+| `/logs` | Logs | Operations | Structured log viewer with level/module filtering |
 
 ## Background Tasks
 

@@ -1358,6 +1358,11 @@ async def discover_page():
     return FileResponse("app/static/discover.html")
 
 
+@app.get("/nodes")
+async def nodes_page():
+    return FileResponse("app/static/nodes.html")
+
+
 @app.get("/endpoints")
 async def endpoints_page():
     return FileResponse("app/static/endpoints.html")
@@ -1451,6 +1456,167 @@ async def polling_config_update(device_name: str, job_type: str, body: PollConfi
     if not result:
         raise HTTPException(status_code=404, detail="Device/job_type not found")
     return result
+
+
+# -------------------------------------------------------------------------
+# Nodes — onboarded infrastructure devices with poll health
+# -------------------------------------------------------------------------
+
+@app.get("/api/nodes", dependencies=[Depends(require_auth)])
+async def list_nodes():
+    """List all onboarded infrastructure nodes with poll health status.
+
+    Nodes are infrastructure devices that MNM authenticates to and actively
+    polls (switches, routers, firewalls). This is the union of Nautobot
+    devices that have entries in the device_polls table.
+    """
+    # Get Nautobot devices and poll status
+    try:
+        devices = await nautobot_client.get_devices()
+    except Exception as exc:
+        log.warning("nodes_fetch_failed", "Could not fetch devices from Nautobot",
+                    context={"error": str(exc)})
+        devices = []
+
+    poll_rows = await polling.get_all_poll_status()
+
+    # Build poll lookup: device_name -> {job_type: row}
+    poll_by_device: dict[str, dict[str, dict]] = {}
+    for r in poll_rows:
+        dn = r["device_name"]
+        poll_by_device.setdefault(dn, {})[r["job_type"]] = r
+
+    # Determine which device names are nodes (have poll entries)
+    node_names = set(poll_by_device.keys())
+
+    nodes = []
+    for dev in devices:
+        name = dev.get("name", "")
+        if name not in node_names:
+            continue
+
+        jobs = poll_by_device.get(name, {})
+
+        # Compute poll health: green/yellow/red/gray
+        if not jobs:
+            health = "gray"
+            health_label = "No polls configured"
+        else:
+            successes = sum(1 for j in jobs.values() if j.get("last_success"))
+            failures = sum(1 for j in jobs.values() if j.get("last_error") and not j.get("last_success"))
+            stale = sum(1 for j in jobs.values() if not j.get("last_success") and not j.get("last_error"))
+            total = len(jobs)
+            if successes == total:
+                health = "green"
+                health_label = "All polls healthy"
+            elif failures == total or (failures > 0 and successes == 0):
+                health = "red"
+                health_label = f"{failures}/{total} job types failing"
+            elif failures > 0 or stale > 0:
+                health = "yellow"
+                health_label = f"{successes}/{total} healthy, {failures} failing, {stale} pending"
+            else:
+                health = "gray"
+                health_label = "No poll data yet"
+
+        # Find latest poll timestamp across all job types
+        last_polled = None
+        for j in jobs.values():
+            ts = j.get("last_success") or j.get("last_attempt")
+            if ts and (last_polled is None or ts > last_polled):
+                last_polled = ts
+
+        # Extract platform and location info from Nautobot device
+        platform = dev.get("platform") or {}
+        platform_name = platform.get("display", "") if isinstance(platform, dict) else ""
+        location = dev.get("location") or {}
+        location_name = location.get("display", "") if isinstance(location, dict) else ""
+        role = dev.get("role") or dev.get("device_role") or {}
+        role_name = role.get("display", "") if isinstance(role, dict) else ""
+        primary_ip = dev.get("primary_ip4") or dev.get("primary_ip") or {}
+        ip_display = primary_ip.get("display", "") if isinstance(primary_ip, dict) else ""
+
+        nodes.append({
+            "name": name,
+            "id": dev.get("id", ""),
+            "platform": platform_name,
+            "primary_ip": ip_display,
+            "role": role_name,
+            "location": location_name,
+            "health": health,
+            "health_label": health_label,
+            "last_polled": last_polled,
+            "jobs": jobs,
+            "interface_count": dev.get("interface_count"),
+            "nautobot_url": dev.get("url", ""),
+        })
+
+    return {"nodes": nodes}
+
+
+@app.get("/api/nodes/macs", dependencies=[Depends(require_auth)])
+async def node_macs():
+    """Return set of MAC addresses belonging to onboarded nodes.
+
+    Used by the endpoints page to filter out infrastructure devices
+    so that only passively-discovered endpoints are shown.
+    """
+    poll_rows = await polling.get_all_poll_status()
+    node_names = {r["device_name"] for r in poll_rows}
+    if not node_names:
+        return {"macs": []}
+
+    # Get interfaces for each node from Nautobot to find their MACs
+    macs = set()
+    try:
+        devices = await nautobot_client.get_devices()
+        for dev in devices:
+            if dev.get("name") not in node_names:
+                continue
+            dev_id = dev.get("id")
+            if not dev_id:
+                continue
+            try:
+                interfaces = await nautobot_client.get_interfaces(dev_id)
+                for iface in interfaces:
+                    mac = (iface.get("mac_address") or "").upper()
+                    if mac and mac not in ("", "00:00:00:00:00:00", "FF:FF:FF:FF:FF:FF"):
+                        macs.add(mac)
+            except Exception:
+                pass
+    except Exception as exc:
+        log.warning("node_macs_failed", "Could not fetch node MACs",
+                    context={"error": str(exc)})
+
+    return {"macs": sorted(macs)}
+
+
+@app.get("/api/nodes/{node_name}", dependencies=[Depends(require_auth)])
+async def get_node(node_name: str):
+    """Get details for a single node including poll status."""
+    poll_rows = await polling.get_device_poll_status(node_name)
+    if not poll_rows:
+        raise HTTPException(status_code=404, detail="Node not found in poll tracking")
+
+    # Try to find the device in Nautobot
+    try:
+        devices = await nautobot_client.get_devices()
+        device = next((d for d in devices if d.get("name") == node_name), None)
+    except Exception:
+        device = None
+
+    return {
+        "node_name": node_name,
+        "jobs": {r["job_type"]: r for r in poll_rows},
+        "device": device,
+    }
+
+
+# Deprecation redirect: /api/devices/ → /api/nodes/
+@app.get("/api/devices", include_in_schema=False)
+async def deprecated_devices_redirect():
+    """Deprecated: use /api/nodes/ instead."""
+    return RedirectResponse(url="/api/nodes", status_code=301)
 
 
 # -------------------------------------------------------------------------

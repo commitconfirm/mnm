@@ -11,16 +11,23 @@
     <a href="/" class="logo"><span>MNM</span> Controller</a>
     <nav>
       <a href="/">Dashboard</a>
-      <a href="/discover">Discovery</a>
+      <span class="nav-separator"></span>
+      <span class="nav-group-label">Intelligence</span>
+      <a href="/nodes">Nodes</a>
       <a href="/endpoints">Endpoints</a>
       <a href="/events" class="active">Events</a>
+      <span class="nav-separator"></span>
+      <span class="nav-group-label">Operations</span>
+      <a href="/discover">Discovery</a>
+      <a href="/jobs">Jobs</a>
+      <a href="/logs">Logs</a>
+      <span class="nav-separator"></span>
       <div class="theme-switcher">
         <button data-theme="light">Light</button>
         <button data-theme="dark" class="active">Dark</button>
         <button data-theme="system">Auto</button>
       </div>
-      <a href="/jobs">Jobs</a>
-      <a href="/logs">Logs</a>
+      <a href="#" id="prefs-btn" title="Preferences">&#9881;</a>
       <a id="logout-link" href="#">Logout</a>
     </nav>
   </header>

@@ -11,16 +11,22 @@
     <a href="/" class="logo"><span>MNM</span> Controller</a>
     <nav>
       <a href="/" class="active">Dashboard</a>
-      <a href="/discover">Discovery</a>
+      <span class="nav-separator"></span>
+      <span class="nav-group-label">Intelligence</span>
+      <a href="/nodes">Nodes</a>
       <a href="/endpoints">Endpoints</a>
       <a href="/events">Events</a>
+      <span class="nav-separator"></span>
+      <span class="nav-group-label">Operations</span>
+      <a href="/discover">Discovery</a>
+      <a href="/jobs">Jobs</a>
+      <a href="/logs">Logs</a>
+      <span class="nav-separator"></span>
       <div class="theme-switcher">
         <button data-theme="light" title="Light">Light</button>
         <button data-theme="dark" title="Dark" class="active">Dark</button>
         <button data-theme="system" title="System">Auto</button>
       </div>
-      <a href="/jobs">Jobs</a>
-      <a href="/logs">Logs</a>
       <a href="#" id="prefs-btn" title="Preferences">&#9881;</a>
       <a id="logout-link" href="#">Logout</a>
     </nav>
@@ -32,7 +38,7 @@
       <div class="card">
         <div class="stat">
           <div class="value" id="device-count">-</div>
-          <div class="label">Devices</div>
+          <div class="label">Nodes</div>
         </div>
       </div>
       <div class="card">
@@ -155,13 +161,13 @@
       <div id="maint-meta" style="margin-top:8px; font-size:0.8rem; color:var(--text-muted)"></div>
     </div>
 
-    <!-- Polling Status: per-device collection health -->
+    <!-- Polling Status: per-node collection health -->
     <div class="card" id="polling-card" style="display:none">
-      <h2>Polling Status</h2>
+      <h2>Polling Status <a href="/nodes" style="font-size:0.8rem;font-weight:normal;float:right">View all &rarr;</a></h2>
       <table>
         <thead>
           <tr>
-            <th>Device</th>
+            <th>Node</th>
             <th>ARP</th>
             <th>MAC</th>
             <th>DHCP</th>
@@ -173,9 +179,9 @@
       </table>
     </div>
 
-    <!-- Incomplete onboarding advisory: devices in Nautobot with no IPs -->
+    <!-- Incomplete onboarding advisory: nodes in Nautobot with no IPs -->
     <div class="card" id="incomplete-card" style="display:none">
-      <h2>Incomplete Devices
+      <h2>Incomplete Nodes
         <button id="sync-incomplete-btn" class="btn" style="float:right">Sync All</button>
       </h2>
       <div id="incomplete-summary" class="alert warning"></div>

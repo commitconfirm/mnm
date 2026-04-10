@@ -108,6 +108,29 @@ header nav a { font-size: 0.9rem; color: var(--text-muted); }
 header nav a:hover { color: var(--text); text-decoration: none; }
 header nav a.active { color: var(--accent); }
 
+/* Nav group labels */
+.nav-group-label {
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  opacity: 0.6;
+  padding: 0 2px;
+  user-select: none;
+}
+.nav-separator {
+  width: 1px;
+  height: 16px;
+  background: var(--border);
+  margin: 0 4px;
+}
+header nav a.external::after {
+  content: '\2197';
+  font-size: 0.7rem;
+  margin-left: 2px;
+  opacity: 0.6;
+}
+
 /* Theme switcher */
 .theme-switcher {
   display: flex;

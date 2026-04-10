@@ -402,6 +402,10 @@ async def _correlate_and_record(all_results: list[dict]) -> dict:
     Groups ARP + MAC + DHCP results by device, runs the correlator, then
     records endpoints to the controller DB and Nautobot IPAM — same pipeline
     as the monolithic collector but driven by per-device poll results.
+
+    Multi-IP fix: builds a cross-device MAC→IPs map from ALL nodes' ARP tables
+    before upserting, so that a MAC with IPs learned from different nodes (e.g.
+    SRX320 with multiple interfaces) gets all its IPs merged into additional_ips.
     """
     from app.endpoint_collector import (
         _correlate_endpoints, _record_endpoint, _normalize_mac, _mac_vendor,
@@ -416,6 +420,30 @@ async def _correlate_and_record(all_results: list[dict]) -> dict:
             by_device[dn] = {"arp": [], "mac": [], "dhcp": [], "lldp": []}
         if r.get("success") and r.get("entries"):
             by_device[dn][jt] = r["entries"]
+
+    # --- Build cross-device MAC→IPs map from all ARP + DHCP data ---
+    # This is the key fix for multi-IP endpoints: a MAC seen in ARP tables
+    # of multiple nodes now gets all its IPs unioned before upsert.
+    mac_all_ips: dict[str, set[str]] = {}
+    for data in by_device.values():
+        for arp_entry in data.get("arp", []):
+            mac = _normalize_mac(arp_entry.get("mac", ""))
+            ip = arp_entry.get("ip", "")
+            if mac and ip:
+                mac_all_ips.setdefault(mac, set()).add(ip)
+        for dhcp_entry in data.get("dhcp", []):
+            mac = _normalize_mac(dhcp_entry.get("mac", ""))
+            ip = dhcp_entry.get("ip", "")
+            if mac and ip:
+                mac_all_ips.setdefault(mac, set()).add(ip)
+
+    # Also include IPs from sweep observations (ip_observations table)
+    try:
+        sweep_mac_ips = await endpoint_store.get_mac_ip_map_from_observations()
+        for mac, ips in sweep_mac_ips.items():
+            mac_all_ips.setdefault(mac, set()).update(ips)
+    except Exception:
+        pass  # non-fatal: sweep data is supplementary
 
     # Pre-fetch uplinks and excludes once
     try:
@@ -452,6 +480,17 @@ async def _correlate_and_record(all_results: list[dict]) -> dict:
             ip = ep.get("ip", "")
             if ip in excluded_ips:
                 continue
+
+            # Inject cross-device IPs for this MAC into additional_ips
+            mac = _normalize_mac(ep.get("mac", ""))
+            cross_ips = mac_all_ips.get(mac, set())
+            if cross_ips:
+                existing_additional = list(ep.get("additional_ips") or [])
+                for cip in cross_ips:
+                    if cip and cip not in existing_additional:
+                        existing_additional.append(cip)
+                ep["additional_ips"] = existing_additional
+
             try:
                 await endpoint_store.upsert_endpoint(ep, source="infrastructure", uplinks=uplinks)
                 total_recorded += 1

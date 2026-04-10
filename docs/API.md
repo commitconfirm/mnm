@@ -171,13 +171,59 @@ Returns summary stats: total endpoints, VLANs active, vendors seen, last collect
 ### POST /api/endpoints/collect
 Manually trigger an endpoint collection run.
 
+## Nodes
+
+Nodes are onboarded infrastructure devices that MNM authenticates to and actively polls.
+
+### GET /api/nodes
+List all onboarded nodes with poll health status.
+
+**Response:**
+```json
+{
+  "nodes": [
+    {
+      "name": "core-switch-01",
+      "id": "uuid",
+      "platform": "junos",
+      "primary_ip": "198.51.100.1/32",
+      "role": "Network Device",
+      "location": "Main Site",
+      "health": "green",
+      "health_label": "All polls healthy",
+      "last_polled": "2026-04-09T22:05:00Z",
+      "jobs": {
+        "arp": {"last_success": "...", "interval_sec": 300, "enabled": true},
+        "mac": {"last_success": "...", "interval_sec": 300, "enabled": true}
+      },
+      "interface_count": null,
+      "nautobot_url": "..."
+    }
+  ]
+}
+```
+
+### GET /api/nodes/{node_name}
+Returns details for a single node including poll status and Nautobot device data.
+
+### GET /api/nodes/macs
+Returns MAC addresses belonging to onboarded nodes (used to filter endpoints page).
+
+**Response:**
+```json
+{"macs": ["AA:BB:CC:DD:EE:FF", "11:22:33:44:55:66"]}
+```
+
+### GET /api/devices *(deprecated)*
+Returns `301 Moved Permanently` redirect to `/api/nodes`. Use `/api/nodes` instead.
+
 ## Nautobot Proxy
 
 ### GET /api/nautobot/devices
-Returns all devices from Nautobot.
+Returns all devices from Nautobot (raw Nautobot API proxy, unfiltered).
 
 ### GET /api/nautobot/devices/{id}
-Returns a single device.
+Returns a single device from Nautobot.
 
 ### GET /api/nautobot/secrets-groups
 Returns available credential sets.
