@@ -1620,6 +1620,97 @@ async def deprecated_devices_redirect():
 
 
 # -------------------------------------------------------------------------
+# Routes — routing table data collected from nodes
+# -------------------------------------------------------------------------
+
+@app.get("/api/routes", dependencies=[Depends(require_auth)])
+async def get_routes(
+    node_name: str | None = None,
+    vrf: str | None = None,
+    protocol: str | None = None,
+    prefix: str | None = None,
+):
+    """Query collected routing table entries.
+
+    Routes are stored in the controller database (Nautobot has no native
+    routing model). Collected by the modular polling engine via NAPALM.
+    """
+    routes = await endpoint_store.list_routes(
+        node_name=node_name, vrf=vrf, protocol=protocol, prefix_search=prefix,
+    )
+    return {"routes": routes, "count": len(routes)}
+
+
+@app.get("/api/routes/advisories", dependencies=[Depends(require_auth)])
+async def route_advisories():
+    """Routes with next-hops that don't match any known IP.
+
+    These are discovery candidates — the node knows about a next-hop
+    gateway that MNM hasn't seen in endpoint data or Nautobot IPAM.
+    """
+    # Build known IP set from endpoints + Nautobot IPAM
+    known_ips: set[str] = set()
+    try:
+        endpoints = await endpoint_store.list_endpoints()
+        for ep in endpoints:
+            ip = ep.get("ip") or ep.get("current_ip")
+            if ip:
+                known_ips.add(ip)
+            for aip in (ep.get("additional_ips") or []):
+                if aip:
+                    known_ips.add(aip)
+    except Exception:
+        pass
+    try:
+        ips = await nautobot_client.get_ip_addresses()
+        for ipo in ips:
+            addr = ipo.get("address") or ipo.get("display") or ""
+            host = addr.split("/")[0] if "/" in addr else addr
+            if host:
+                known_ips.add(host)
+    except Exception:
+        pass
+
+    advisories = await endpoint_store.route_advisories(known_ips)
+    return {"advisories": advisories, "count": len(advisories)}
+
+
+@app.get("/api/routes/{node_name}", dependencies=[Depends(require_auth)])
+async def get_routes_for_node(
+    node_name: str,
+    vrf: str | None = None,
+    protocol: str | None = None,
+):
+    """All routes for a specific node."""
+    routes = await endpoint_store.list_routes(node_name=node_name, vrf=vrf, protocol=protocol)
+    return {"routes": routes, "count": len(routes), "node_name": node_name}
+
+
+# -------------------------------------------------------------------------
+# BGP — BGP neighbor state collected from nodes
+# -------------------------------------------------------------------------
+
+@app.get("/api/bgp", dependencies=[Depends(require_auth)])
+async def get_bgp_neighbors(
+    node_name: str | None = None,
+    state: str | None = None,
+    vrf: str | None = None,
+):
+    """Query collected BGP neighbor entries."""
+    neighbors = await endpoint_store.list_bgp_neighbors(
+        node_name=node_name, state=state, vrf=vrf,
+    )
+    return {"neighbors": neighbors, "count": len(neighbors)}
+
+
+@app.get("/api/bgp/{node_name}", dependencies=[Depends(require_auth)])
+async def get_bgp_for_node(node_name: str, vrf: str | None = None):
+    """All BGP neighbors for a specific node."""
+    neighbors = await endpoint_store.list_bgp_neighbors(node_name=node_name, vrf=vrf)
+    return {"neighbors": neighbors, "count": len(neighbors), "node_name": node_name}
+
+
+# -------------------------------------------------------------------------
 # Jobs — consolidated background task view
 # -------------------------------------------------------------------------
 

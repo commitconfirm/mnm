@@ -523,6 +523,36 @@ async function loadSubnets() {
   } catch (e) { console.error('Subnet advisory load failed:', e); }
 }
 
+async function loadRouteAdvisories() {
+  try {
+    var r = await fetch('/api/routes/advisories');
+    if (!r.ok) return;
+    var d = await r.json();
+    var advisories = d.advisories || [];
+    var card = document.getElementById('route-advisories-card');
+    if (!advisories.length) { card.style.display = 'none'; return; }
+    card.style.display = '';
+    document.getElementById('route-advisory-count').textContent = advisories.length + ' unknown next-hop(s)';
+    var esc = function(s) { var x = document.createElement('div'); x.textContent = s == null ? '' : String(s); return x.innerHTML; };
+    // Infer a /24 from the next-hop for the sweep suggestion
+    function inferCidr(ip) {
+      var parts = ip.split('.');
+      if (parts.length === 4) return parts[0] + '.' + parts[1] + '.' + parts[2] + '.0/24';
+      return ip + '/32';
+    }
+    document.getElementById('route-advisories-table').innerHTML = advisories.slice(0, 50).map(function(a) {
+      return '<tr>'
+        + '<td>' + esc(a.node_name) + '</td>'
+        + '<td><code>' + esc(a.prefix) + '</code></td>'
+        + '<td><code>' + esc(a.next_hop) + '</code></td>'
+        + '<td>' + esc(a.protocol) + '</td>'
+        + '<td>' + esc(a.vrf) + '</td>'
+        + '<td><a href="/discover?cidr=' + encodeURIComponent(inferCidr(a.next_hop)) + '" class="btn small">Add to sweep</a></td>'
+        + '</tr>';
+    }).join('');
+  } catch (e) { console.error('Route advisory load failed:', e); }
+}
+
 async function loadMaintenance() {
   try {
     const r = await fetch('/api/admin/maintenance');
@@ -534,6 +564,8 @@ async function loadMaintenance() {
     document.getElementById('maint-event-rows').textContent = stats.event_rows ?? '-';
     document.getElementById('maint-observation-rows').textContent = stats.observation_rows ?? '-';
     document.getElementById('maint-watch-rows').textContent = stats.watch_rows ?? '-';
+    document.getElementById('maint-route-rows').textContent = stats.route_rows ?? '-';
+    document.getElementById('maint-bgp-rows').textContent = stats.bgp_neighbor_rows ?? '-';
     document.getElementById('maintenance-retention').textContent =
       'retention: ' + d.retention_days + ' days · prune every ' + d.prune_interval_hours + 'h';
     const lastRunEl = document.getElementById('maint-last-run');
@@ -710,6 +742,8 @@ async function loadPolling() {
         + '<td>' + pollStatusDot(j.mac) + '</td>'
         + '<td>' + pollStatusDot(j.dhcp) + '</td>'
         + '<td>' + pollStatusDot(j.lldp) + '</td>'
+        + '<td>' + pollStatusDot(j.routes) + '</td>'
+        + '<td>' + pollStatusDot(j.bgp) + '</td>'
         + '<td><button class="btn small" onclick="triggerPoll(\'' + escHtml(d.device_name) + '\')">Poll Now</button></td>'
         + '</tr>';
     }).join('');
@@ -734,6 +768,7 @@ checkAuth().then(() => {
   loadPolling();
   loadIncompleteDevices();
   loadSubnets();
+  loadRouteAdvisories();
   loadProxmox();
   loadMaintenance();
   startAutoRefresh();

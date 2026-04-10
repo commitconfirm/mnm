@@ -142,6 +142,8 @@ Per-device, per-job-type collection intervals. These are defaults for new device
 | `MNM_POLL_MAC_INTERVAL` | `300` | MAC address table collection interval in seconds |
 | `MNM_POLL_DHCP_INTERVAL` | `600` | DHCP bindings collection interval in seconds |
 | `MNM_POLL_LLDP_INTERVAL` | `3600` | LLDP neighbor collection interval in seconds |
+| `MNM_POLL_ROUTES_INTERVAL` | `3600` | Routing table collection interval in seconds |
+| `MNM_POLL_BGP_INTERVAL` | `3600` | BGP neighbor collection interval in seconds |
 | `MNM_POLL_CHECK_INTERVAL` | `30` | How often the poll loop checks for due jobs (seconds) |
 | `MNM_LEGACY_COLLECTOR` | `false` | Set to `true` to re-enable the old monolithic endpoint collector during transition |
 

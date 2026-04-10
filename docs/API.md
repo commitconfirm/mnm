@@ -322,7 +322,7 @@ Single device, all job types.
 Trigger immediate poll of all enabled job types for a device. Returns `202 Accepted`.
 
 ### POST /api/polling/trigger/{device_name}/{job_type}
-Trigger a single job type (`arp`, `mac`, `dhcp`, or `lldp`). Returns `202 Accepted`.
+Trigger a single job type (`arp`, `mac`, `dhcp`, `lldp`, `routes`, or `bgp`). Returns `202 Accepted`.
 
 ### PUT /api/polling/config/{device_name}/{job_type}
 Update interval or enabled flag for a specific device/job type.
@@ -333,6 +333,94 @@ Update interval or enabled flag for a specific device/job type.
 ```
 
 **Response:** Updated poll row.
+
+## Routes
+
+Routing table data collected from onboarded nodes via NAPALM. Stored in the controller database (Nautobot has no native routing model).
+
+### GET /api/routes
+Query collected routes with optional filters.
+
+**Query params:** `node_name`, `vrf`, `protocol`, `prefix` (substring search)
+
+**Response:**
+```json
+{
+  "routes": [
+    {
+      "id": 1,
+      "node_name": "core-switch-01",
+      "prefix": "198.51.100.0/24",
+      "next_hop": "198.51.100.1",
+      "protocol": "ospf",
+      "vrf": "default",
+      "metric": 10,
+      "preference": 110,
+      "outgoing_interface": "ge-0/0/0",
+      "active": true,
+      "collected_at": "2026-04-10T12:00:00Z"
+    }
+  ],
+  "count": 1
+}
+```
+
+### GET /api/routes/{node_name}
+All routes for a specific node. Query params: `vrf`, `protocol`.
+
+### GET /api/routes/advisories
+Routes with next-hops that don't match any known IP in endpoint data or Nautobot IPAM. These are discovery candidates.
+
+**Response:**
+```json
+{
+  "advisories": [
+    {
+      "node_name": "core-switch-01",
+      "prefix": "203.0.113.0/24",
+      "next_hop": "198.51.100.254",
+      "protocol": "static",
+      "vrf": "default"
+    }
+  ],
+  "count": 1
+}
+```
+
+## BGP
+
+BGP neighbor state collected from onboarded nodes via NAPALM.
+
+### GET /api/bgp
+Query collected BGP neighbors with optional filters.
+
+**Query params:** `node_name`, `state`, `vrf`
+
+**Response:**
+```json
+{
+  "neighbors": [
+    {
+      "id": 1,
+      "node_name": "core-router-01",
+      "neighbor_ip": "198.51.100.2",
+      "remote_asn": 65001,
+      "local_asn": 65000,
+      "state": "Established",
+      "prefixes_received": 150,
+      "prefixes_sent": 75,
+      "uptime_seconds": 86400,
+      "vrf": "default",
+      "address_family": "ipv4 unicast",
+      "collected_at": "2026-04-10T12:00:00Z"
+    }
+  ],
+  "count": 1
+}
+```
+
+### GET /api/bgp/{node_name}
+All BGP neighbors for a specific node. Query params: `vrf`.
 
 ## Onboarding Progress
 

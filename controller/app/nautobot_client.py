@@ -768,11 +768,17 @@ async def upsert_discovered_ip(ip: str, data: dict) -> dict:
             return resp.json()
 
 
-async def napalm_get(device_id: str, method: str) -> dict:
-    """Call a NAPALM getter via Nautobot's proxy endpoint."""
+async def napalm_get(device_id: str, method: str, **kwargs) -> dict:
+    """Call a NAPALM getter via Nautobot's proxy endpoint.
+
+    Extra kwargs are passed as query params to the Nautobot proxy, which
+    forwards them to the NAPALM getter as keyword arguments.
+    """
+    params = {"method": method, **kwargs}
     async with httpx.AsyncClient(base_url=NAUTOBOT_URL, timeout=60) as client:
         resp = await client.get(
-            f"/api/dcim/devices/{device_id}/napalm/?method={method}",
+            f"/api/dcim/devices/{device_id}/napalm/",
+            params=params,
             headers=_headers(),
         )
         resp.raise_for_status()

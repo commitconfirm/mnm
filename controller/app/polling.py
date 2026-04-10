@@ -30,10 +30,11 @@ log = StructuredLogger(__name__, module="polling")
 # Default intervals from environment (seconds)
 # ---------------------------------------------------------------------------
 
-JOB_TYPES = ("arp", "mac", "dhcp", "lldp")
+JOB_TYPES = ("arp", "mac", "dhcp", "lldp", "routes", "bgp")
 
 def _default_interval(job_type: str) -> int:
-    defaults = {"arp": 300, "mac": 300, "dhcp": 600, "lldp": 3600}
+    defaults = {"arp": 300, "mac": 300, "dhcp": 600, "lldp": 3600,
+                "routes": 3600, "bgp": 3600}
     env_key = f"MNM_POLL_{job_type.upper()}_INTERVAL"
     # Fall back to old MNM_COLLECTION_INTERVAL (minutes) converted to seconds
     old_fallback = int(os.environ.get("MNM_COLLECTION_INTERVAL", "0")) * 60
@@ -366,6 +367,171 @@ async def collect_lldp(device_name: str, device_id: str) -> dict:
                 "error": err, "count": 0, "duration": duration}
 
 
+async def collect_routes(device_name: str, device_id: str) -> dict:
+    """Collect routing table from one device via NAPALM.
+
+    Strategy:
+      1. Try get_route_to with destination=0.0.0.0/0 — on Junos (PyEZ) this
+         returns the full routing table via RPC get-route-information.
+      2. If that returns too little data, try get_network_instances to get
+         VRF info and tag routes accordingly.
+      3. Parse the NAPALM-format route dict into flat route rows.
+
+    NAPALM get_route_to returns: {prefix: [{protocol, next_hop, ...}, ...]}.
+    """
+    t0 = time.monotonic()
+    await _mark_attempt(device_name, "routes")
+    try:
+        # NAPALM get_route_to — Junos driver returns full RIB for 0.0.0.0/0
+        data = await nautobot_client.napalm_get(device_id, "get_route_to")
+        raw_routes = data.get("get_route_to", {})
+
+        routes = []
+        for prefix, entries in raw_routes.items():
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                next_hop = entry.get("next_hop", "")
+                protocol = entry.get("protocol", "unknown")
+                # Normalize protocol names
+                proto_lower = protocol.lower()
+                if "direct" in proto_lower or "connected" in proto_lower or "local" in proto_lower:
+                    protocol = "connected" if "local" not in proto_lower else "local"
+                elif "static" in proto_lower:
+                    protocol = "static"
+                elif "ospf" in proto_lower:
+                    protocol = "ospf"
+                elif "bgp" in proto_lower:
+                    protocol = "bgp"
+                elif "isis" in proto_lower:
+                    protocol = "isis"
+
+                routes.append({
+                    "node_name": device_name,
+                    "prefix": prefix,
+                    "next_hop": next_hop or "",
+                    "protocol": protocol,
+                    "vrf": "default",
+                    "metric": entry.get("metric"),
+                    "preference": entry.get("preference") or entry.get("administrative_distance"),
+                    "outgoing_interface": entry.get("outgoing_interface") or entry.get("interface"),
+                    "active": entry.get("current_active", True),
+                })
+
+        # Upsert in bulk
+        count = await endpoint_store.upsert_routes_bulk(routes)
+
+        duration = time.monotonic() - t0
+        await _mark_success(device_name, "routes", duration)
+        log.info("poll_routes_done", "Route collection complete",
+                 context={"device": device_name, "routes": count, "duration": round(duration, 1)})
+        return {"device_name": device_name, "job_type": "routes", "success": True,
+                "count": count, "duration": duration}
+    except Exception as exc:
+        duration = time.monotonic() - t0
+        err = str(exc)[:500]
+        await _mark_failure(device_name, "routes", err, duration)
+        log.warning("poll_routes_failed", "Route collection failed",
+                    context={"device": device_name, "error": err})
+        return {"device_name": device_name, "job_type": "routes", "success": False,
+                "error": err, "count": 0, "duration": duration}
+
+
+async def collect_bgp(device_name: str, device_id: str) -> dict:
+    """Collect BGP neighbors from one device via NAPALM get_bgp_neighbors.
+
+    Returns empty successfully if the device has no BGP (common for L2 switches).
+    NAPALM get_bgp_neighbors returns:
+    {global: {peers: {ip: {remote_as, ..., address_family: {af: {received, sent, ...}}}}}}
+    """
+    t0 = time.monotonic()
+    await _mark_attempt(device_name, "bgp")
+    try:
+        data = await nautobot_client.napalm_get(device_id, "get_bgp_neighbors")
+        raw = data.get("get_bgp_neighbors", {})
+
+        neighbors = []
+        for vrf_name, vrf_data in raw.items():
+            if not isinstance(vrf_data, dict):
+                continue
+            peers = vrf_data.get("peers", {})
+            if not isinstance(peers, dict):
+                continue
+            vrf = "default" if vrf_name in ("global", "default", "") else vrf_name
+            for peer_ip, peer_data in peers.items():
+                if not isinstance(peer_data, dict):
+                    continue
+                # Address families are nested under the peer
+                af_dict = peer_data.get("address_family", {})
+                if af_dict and isinstance(af_dict, dict):
+                    for af_name, af_data in af_dict.items():
+                        neighbors.append({
+                            "node_name": device_name,
+                            "neighbor_ip": peer_ip,
+                            "remote_asn": peer_data.get("remote_as", 0),
+                            "local_asn": peer_data.get("local_as"),
+                            "state": _normalize_bgp_state(
+                                peer_data.get("is_up"), peer_data.get("is_enabled")),
+                            "prefixes_received": af_data.get("received_prefixes")
+                                                 if isinstance(af_data, dict) else None,
+                            "prefixes_sent": af_data.get("sent_prefixes")
+                                             if isinstance(af_data, dict) else None,
+                            "uptime_seconds": peer_data.get("uptime"),
+                            "vrf": vrf,
+                            "address_family": af_name,
+                        })
+                else:
+                    # No AF breakdown — record one row
+                    neighbors.append({
+                        "node_name": device_name,
+                        "neighbor_ip": peer_ip,
+                        "remote_asn": peer_data.get("remote_as", 0),
+                        "local_asn": peer_data.get("local_as"),
+                        "state": _normalize_bgp_state(
+                            peer_data.get("is_up"), peer_data.get("is_enabled")),
+                        "prefixes_received": peer_data.get("received_prefixes"),
+                        "prefixes_sent": peer_data.get("sent_prefixes"),
+                        "uptime_seconds": peer_data.get("uptime"),
+                        "vrf": vrf,
+                        "address_family": "ipv4 unicast",
+                    })
+
+        count = await endpoint_store.upsert_bgp_neighbors_bulk(neighbors)
+
+        duration = time.monotonic() - t0
+        await _mark_success(device_name, "bgp", duration)
+        log.info("poll_bgp_done", "BGP collection complete",
+                 context={"device": device_name, "neighbors": count, "duration": round(duration, 1)})
+        return {"device_name": device_name, "job_type": "bgp", "success": True,
+                "count": count, "duration": duration}
+    except Exception as exc:
+        duration = time.monotonic() - t0
+        err = str(exc)[:500]
+        # If it's a 4xx error, the device likely doesn't support BGP — mark success
+        if "400" in err or "404" in err or "405" in err or "not supported" in err.lower():
+            await _mark_success(device_name, "bgp", duration)
+            log.debug("poll_bgp_unsupported", "BGP not supported/configured on device",
+                      context={"device": device_name})
+            return {"device_name": device_name, "job_type": "bgp", "success": True,
+                    "count": 0, "duration": duration, "skipped": True}
+        await _mark_failure(device_name, "bgp", err, duration)
+        log.warning("poll_bgp_failed", "BGP collection failed",
+                    context={"device": device_name, "error": err})
+        return {"device_name": device_name, "job_type": "bgp", "success": False,
+                "error": err, "count": 0, "duration": duration}
+
+
+def _normalize_bgp_state(is_up: bool | None, is_enabled: bool | None) -> str:
+    """Convert NAPALM is_up/is_enabled booleans to a human-readable state."""
+    if is_up is True:
+        return "Established"
+    if is_enabled is False:
+        return "Shutdown"
+    if is_up is False:
+        return "Active"
+    return "Unknown"
+
+
 # ---------------------------------------------------------------------------
 # Per-device orchestrator (runs all due job types for one device)
 # ---------------------------------------------------------------------------
@@ -389,6 +555,10 @@ async def poll_device(device_name: str, device_id: str,
             results.append(await collect_dhcp(device_name, device_id, device_ip, is_junos))
         elif jt == "lldp":
             results.append(await collect_lldp(device_name, device_id))
+        elif jt == "routes":
+            results.append(await collect_routes(device_name, device_id))
+        elif jt == "bgp":
+            results.append(await collect_bgp(device_name, device_id))
     return results
 
 

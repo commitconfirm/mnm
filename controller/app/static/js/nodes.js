@@ -42,7 +42,7 @@ function healthDot(health, label) {
 
 function jobDots(jobs) {
   if (!jobs || Object.keys(jobs).length === 0) return '-';
-  const types = ['arp', 'mac', 'dhcp', 'lldp'];
+  const types = ['arp', 'mac', 'dhcp', 'lldp', 'routes', 'bgp'];
   return types.map(function(jt) {
     const j = jobs[jt];
     if (!j) return '';

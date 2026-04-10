@@ -875,6 +875,281 @@ async def record_ip_observation(ip: str, host: dict) -> None:
 # the dedicated "prune" module so the events are easy to filter in the log
 # viewer.
 
+# ---------------------------------------------------------------------------
+# Route and BGP persistence (Phase 2.8)
+# ---------------------------------------------------------------------------
+
+_route_log = StructuredLogger(__name__ + ".routes", module="routes")
+
+
+async def upsert_route(route: dict) -> str:
+    """Upsert a single route into the routes table.
+
+    Unique key: (node_name, prefix, next_hop, vrf).
+    Returns "created" or "updated".
+    """
+    if not db.is_ready():
+        return "skipped"
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    now = _now()
+    row = {
+        "node_name": route.get("node_name", ""),
+        "prefix": route.get("prefix", ""),
+        "next_hop": route.get("next_hop", ""),
+        "protocol": route.get("protocol", "unknown"),
+        "vrf": route.get("vrf", "default"),
+        "metric": route.get("metric"),
+        "preference": route.get("preference"),
+        "outgoing_interface": route.get("outgoing_interface"),
+        "active": route.get("active", True),
+        "collected_at": now,
+    }
+
+    async with db.SessionLocal() as session:
+        stmt = pg_insert(db.Route).values(**row)
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_routes_node_prefix_nh_vrf",
+            set_={
+                "protocol": stmt.excluded.protocol,
+                "metric": stmt.excluded.metric,
+                "preference": stmt.excluded.preference,
+                "outgoing_interface": stmt.excluded.outgoing_interface,
+                "active": stmt.excluded.active,
+                "collected_at": stmt.excluded.collected_at,
+            },
+        )
+        await session.execute(stmt)
+        await session.commit()
+    return "upserted"
+
+
+async def upsert_routes_bulk(routes: list[dict]) -> int:
+    """Upsert many routes in a single transaction. Returns count."""
+    if not db.is_ready() or not routes:
+        return 0
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    now = _now()
+    rows = []
+    for r in routes:
+        rows.append({
+            "node_name": r.get("node_name", ""),
+            "prefix": r.get("prefix", ""),
+            "next_hop": r.get("next_hop", ""),
+            "protocol": r.get("protocol", "unknown"),
+            "vrf": r.get("vrf", "default"),
+            "metric": r.get("metric"),
+            "preference": r.get("preference"),
+            "outgoing_interface": r.get("outgoing_interface"),
+            "active": r.get("active", True),
+            "collected_at": now,
+        })
+
+    async with db.SessionLocal() as session:
+        stmt = pg_insert(db.Route).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_routes_node_prefix_nh_vrf",
+            set_={
+                "protocol": stmt.excluded.protocol,
+                "metric": stmt.excluded.metric,
+                "preference": stmt.excluded.preference,
+                "outgoing_interface": stmt.excluded.outgoing_interface,
+                "active": stmt.excluded.active,
+                "collected_at": stmt.excluded.collected_at,
+            },
+        )
+        await session.execute(stmt)
+        await session.commit()
+    return len(rows)
+
+
+async def upsert_bgp_neighbor(neighbor: dict) -> str:
+    """Upsert a single BGP neighbor row.
+
+    Unique key: (node_name, neighbor_ip, vrf, address_family).
+    """
+    if not db.is_ready():
+        return "skipped"
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    now = _now()
+    row = {
+        "node_name": neighbor.get("node_name", ""),
+        "neighbor_ip": neighbor.get("neighbor_ip", ""),
+        "remote_asn": neighbor.get("remote_asn", 0),
+        "local_asn": neighbor.get("local_asn"),
+        "state": neighbor.get("state", "Unknown"),
+        "prefixes_received": neighbor.get("prefixes_received"),
+        "prefixes_sent": neighbor.get("prefixes_sent"),
+        "uptime_seconds": neighbor.get("uptime_seconds"),
+        "vrf": neighbor.get("vrf", "default"),
+        "address_family": neighbor.get("address_family", "ipv4 unicast"),
+        "collected_at": now,
+    }
+
+    async with db.SessionLocal() as session:
+        stmt = pg_insert(db.BGPNeighbor).values(**row)
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_bgp_node_neighbor_vrf_af",
+            set_={
+                "remote_asn": stmt.excluded.remote_asn,
+                "local_asn": stmt.excluded.local_asn,
+                "state": stmt.excluded.state,
+                "prefixes_received": stmt.excluded.prefixes_received,
+                "prefixes_sent": stmt.excluded.prefixes_sent,
+                "uptime_seconds": stmt.excluded.uptime_seconds,
+                "collected_at": stmt.excluded.collected_at,
+            },
+        )
+        await session.execute(stmt)
+        await session.commit()
+    return "upserted"
+
+
+async def upsert_bgp_neighbors_bulk(neighbors: list[dict]) -> int:
+    """Upsert many BGP neighbors. Returns count."""
+    if not db.is_ready() or not neighbors:
+        return 0
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    now = _now()
+    rows = []
+    for n in neighbors:
+        rows.append({
+            "node_name": n.get("node_name", ""),
+            "neighbor_ip": n.get("neighbor_ip", ""),
+            "remote_asn": n.get("remote_asn", 0),
+            "local_asn": n.get("local_asn"),
+            "state": n.get("state", "Unknown"),
+            "prefixes_received": n.get("prefixes_received"),
+            "prefixes_sent": n.get("prefixes_sent"),
+            "uptime_seconds": n.get("uptime_seconds"),
+            "vrf": n.get("vrf", "default"),
+            "address_family": n.get("address_family", "ipv4 unicast"),
+            "collected_at": now,
+        })
+
+    async with db.SessionLocal() as session:
+        stmt = pg_insert(db.BGPNeighbor).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_bgp_node_neighbor_vrf_af",
+            set_={
+                "remote_asn": stmt.excluded.remote_asn,
+                "local_asn": stmt.excluded.local_asn,
+                "state": stmt.excluded.state,
+                "prefixes_received": stmt.excluded.prefixes_received,
+                "prefixes_sent": stmt.excluded.prefixes_sent,
+                "uptime_seconds": stmt.excluded.uptime_seconds,
+                "collected_at": stmt.excluded.collected_at,
+            },
+        )
+        await session.execute(stmt)
+        await session.commit()
+    return len(rows)
+
+
+async def list_routes(
+    node_name: str | None = None,
+    vrf: str | None = None,
+    protocol: str | None = None,
+    prefix_search: str | None = None,
+) -> list[dict]:
+    """Query routes with optional filters."""
+    if not db.is_ready():
+        return []
+    async with db.SessionLocal() as session:
+        stmt = select(db.Route).order_by(db.Route.prefix)
+        if node_name:
+            stmt = stmt.where(db.Route.node_name == node_name)
+        if vrf:
+            stmt = stmt.where(db.Route.vrf == vrf)
+        if protocol:
+            stmt = stmt.where(db.Route.protocol == protocol)
+        if prefix_search:
+            stmt = stmt.where(db.Route.prefix.contains(prefix_search))
+        rows = (await session.execute(stmt)).scalars().all()
+        return [r.to_dict() for r in rows]
+
+
+async def list_bgp_neighbors(
+    node_name: str | None = None,
+    state: str | None = None,
+    vrf: str | None = None,
+) -> list[dict]:
+    """Query BGP neighbors with optional filters."""
+    if not db.is_ready():
+        return []
+    async with db.SessionLocal() as session:
+        stmt = select(db.BGPNeighbor).order_by(db.BGPNeighbor.node_name, db.BGPNeighbor.neighbor_ip)
+        if node_name:
+            stmt = stmt.where(db.BGPNeighbor.node_name == node_name)
+        if state:
+            stmt = stmt.where(db.BGPNeighbor.state == state)
+        if vrf:
+            stmt = stmt.where(db.BGPNeighbor.vrf == vrf)
+        rows = (await session.execute(stmt)).scalars().all()
+        return [r.to_dict() for r in rows]
+
+
+async def route_advisories(known_ips: set[str] | None = None) -> list[dict]:
+    """Return routes with next-hops that don't match any known IP.
+
+    These are discovery candidates — next-hops the node knows about but
+    MNM hasn't seen. If known_ips is not provided, builds the set from
+    Nautobot IPAM + endpoint records.
+    """
+    if not db.is_ready():
+        return []
+    if known_ips is None:
+        known_ips = set()
+        # Collect IPs from endpoints
+        async with db.SessionLocal() as session:
+            rows = (await session.execute(
+                select(db.Endpoint.current_ip).where(
+                    db.Endpoint.active.is_(True),
+                    db.Endpoint.current_ip.isnot(None),
+                )
+            )).scalars().all()
+            known_ips.update(ip for ip in rows if ip)
+
+    async with db.SessionLocal() as session:
+        routes = (await session.execute(
+            select(db.Route).where(
+                db.Route.active.is_(True),
+                db.Route.next_hop != "",
+                db.Route.protocol != "connected",
+                db.Route.protocol != "local",
+            ).order_by(db.Route.node_name, db.Route.prefix)
+        )).scalars().all()
+
+    advisories = []
+    for r in routes:
+        if r.next_hop and r.next_hop not in known_ips:
+            advisories.append(r.to_dict())
+    return advisories
+
+
+async def route_count() -> int:
+    """Total route rows."""
+    if not db.is_ready():
+        return 0
+    async with db.SessionLocal() as session:
+        return (await session.execute(
+            select(func.count()).select_from(db.Route)
+        )).scalar_one()
+
+
+async def bgp_neighbor_count() -> int:
+    """Total BGP neighbor rows."""
+    if not db.is_ready():
+        return 0
+    async with db.SessionLocal() as session:
+        return (await session.execute(
+            select(func.count()).select_from(db.BGPNeighbor)
+        )).scalar_one()
+
+
 _prune_log = StructuredLogger(__name__ + ".prune", module="prune")
 
 
@@ -956,21 +1231,58 @@ async def prune_stale_sentinels(retention_days: int) -> int:
     return n
 
 
+async def prune_old_routes(retention_days: int) -> int:
+    """Delete routes older than retention_days. Returns row count."""
+    cutoff = _now() - timedelta(days=retention_days)
+    async with db.SessionLocal() as session:
+        result = await session.execute(
+            db.Route.__table__.delete().where(
+                db.Route.collected_at < cutoff
+            )
+        )
+        await session.commit()
+        n = result.rowcount or 0
+    _prune_log.info("prune_routes", "Pruned old routes",
+                    context={"deleted": n, "retention_days": retention_days})
+    return n
+
+
+async def prune_old_bgp_neighbors(retention_days: int) -> int:
+    """Delete bgp_neighbors older than retention_days. Returns row count."""
+    cutoff = _now() - timedelta(days=retention_days)
+    async with db.SessionLocal() as session:
+        result = await session.execute(
+            db.BGPNeighbor.__table__.delete().where(
+                db.BGPNeighbor.collected_at < cutoff
+            )
+        )
+        await session.commit()
+        n = result.rowcount or 0
+    _prune_log.info("prune_bgp", "Pruned old BGP neighbors",
+                    context={"deleted": n, "retention_days": retention_days})
+    return n
+
+
 async def prune_all(retention_days: int) -> dict:
     """Run every prune helper and return a summary dict."""
     events = await prune_old_events(retention_days)
     observations = await prune_old_observations(retention_days)
     watches = await prune_orphaned_watches()
     sentinels = await prune_stale_sentinels(retention_days)
+    routes = await prune_old_routes(retention_days)
+    bgp = await prune_old_bgp_neighbors(retention_days)
     summary = {
         "events": events,
         "observations": observations,
         "watches": watches,
         "sentinels": sentinels,
+        "routes": routes,
+        "bgp_neighbors": bgp,
     }
     _prune_log.info("prune_complete",
                     f"Daily prune: {events} events, {observations} observations, "
-                    f"{watches} watches, {sentinels} sentinels removed",
+                    f"{watches} watches, {sentinels} sentinels, "
+                    f"{routes} routes, {bgp} bgp_neighbors removed",
                     context=summary)
     return summary
 
@@ -1004,11 +1316,21 @@ async def prune_preview(retention_days: int) -> dict:
                 db.Endpoint.last_seen < cutoff,
             )
         )).scalar_one()
+        routes = (await session.execute(
+            select(func.count()).select_from(db.Route)
+            .where(db.Route.collected_at < cutoff)
+        )).scalar_one()
+        bgp = (await session.execute(
+            select(func.count()).select_from(db.BGPNeighbor)
+            .where(db.BGPNeighbor.collected_at < cutoff)
+        )).scalar_one()
     return {
         "events": int(events),
         "observations": int(observations),
         "watches": int(watches),
         "sentinels": int(sentinels),
+        "routes": int(routes),
+        "bgp_neighbors": int(bgp),
     }
 
 
@@ -1034,11 +1356,19 @@ async def maintenance_stats() -> dict:
         watch_count = (await session.execute(
             select(func.count()).select_from(db.EndpointWatch)
         )).scalar_one()
+        route_count_val = (await session.execute(
+            select(func.count()).select_from(db.Route)
+        )).scalar_one()
+        bgp_count_val = (await session.execute(
+            select(func.count()).select_from(db.BGPNeighbor)
+        )).scalar_one()
     return {
         "endpoint_rows": int(endpoint_count),
         "event_rows": int(event_count),
         "observation_rows": int(observation_count),
         "watch_rows": int(watch_count),
+        "route_rows": int(route_count_val),
+        "bgp_neighbor_rows": int(bgp_count_val),
         "oldest_event": oldest_event.isoformat() if oldest_event else None,
         "oldest_observation": oldest_observation.isoformat() if oldest_observation else None,
     }

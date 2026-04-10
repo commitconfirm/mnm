@@ -146,11 +146,17 @@
       <h2>Database Maintenance
         <span style="font-size:0.8rem;font-weight:normal;color:var(--text-muted);float:right" id="maintenance-retention"></span>
       </h2>
-      <div class="grid-4" style="margin-bottom:12px">
+      <div class="grid-4" style="margin-bottom:8px">
         <div class="stat"><div class="value" id="maint-endpoint-rows">-</div><div class="label">Endpoint Rows</div></div>
         <div class="stat"><div class="value" id="maint-event-rows">-</div><div class="label">Event Rows</div></div>
         <div class="stat"><div class="value" id="maint-observation-rows">-</div><div class="label">IP Observations</div></div>
         <div class="stat"><div class="value" id="maint-watch-rows">-</div><div class="label">Watches</div></div>
+      </div>
+      <div class="grid-4" style="margin-bottom:12px">
+        <div class="stat"><div class="value" id="maint-route-rows">-</div><div class="label">Routes</div></div>
+        <div class="stat"><div class="value" id="maint-bgp-rows">-</div><div class="label">BGP Neighbors</div></div>
+        <div class="stat"></div>
+        <div class="stat"></div>
       </div>
       <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-top:8px">
         <button id="maint-preview-btn" class="btn">Preview Prune</button>
@@ -172,6 +178,8 @@
             <th>MAC</th>
             <th>DHCP</th>
             <th>LLDP</th>
+            <th>Routes</th>
+            <th>BGP</th>
             <th></th>
           </tr>
         </thead>
@@ -215,6 +223,19 @@
       <table>
         <thead><tr><th>CIDR</th><th>IPs Seen</th><th>Sample</th><th></th></tr></thead>
         <tbody id="subnets-table"></tbody>
+      </table>
+    </div>
+
+    <!-- Route Advisories: next-hops not in IPAM -->
+    <div class="card" id="route-advisories-card" style="display:none">
+      <h2>Route Advisories <span id="route-advisory-count" style="font-size:0.8rem;font-weight:normal;color:var(--text-muted);float:right">advisory only</span></h2>
+      <p style="color:var(--text-muted); font-size:0.85rem; margin-top:-8px">
+        These routes point to next-hop gateways that MNM hasn't seen in any
+        endpoint data or Nautobot IPAM. They may be discovery candidates.
+      </p>
+      <table>
+        <thead><tr><th>Node</th><th>Prefix</th><th>Next-Hop</th><th>Protocol</th><th>VRF</th><th></th></tr></thead>
+        <tbody id="route-advisories-table"></tbody>
       </table>
     </div>
 

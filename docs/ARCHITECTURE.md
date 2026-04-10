@@ -215,7 +215,7 @@ The controller runs these background tasks launched at startup:
 | Task | Module | Schedule | Purpose |
 |------|--------|----------|---------|
 | Sweep Scheduler | `discovery.py` | Per-schedule interval (default 1h) | Network discovery sweeps |
-| Modular Poller | `polling.py` | Per-device/per-job-type (ARP 5m, MAC 5m, DHCP 10m, LLDP 1h) | Independent device data collection |
+| Modular Poller | `polling.py` | Per-device/per-job-type (ARP 5m, MAC 5m, DHCP 10m, LLDP 1h, Routes 1h, BGP 1h) | Independent device data collection |
 | Proxmox Collector | `connectors/proxmox.py` | `PROXMOX_INTERVAL_SECONDS` (default 5m) | VM/container/storage inventory |
 | Database Prune | `main.py` | `MNM_PRUNE_INTERVAL_HOURS` (default 24h) | Evict data past retention window |
 

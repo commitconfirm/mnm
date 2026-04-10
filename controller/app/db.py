@@ -10,6 +10,8 @@ Tables:
   - sweep_runs          — per-sweep summaries
   - collection_runs     — per-collection-run summaries
   - ip_observations     — sweep-time per-IP snapshots (Shodan-style)
+  - routes              — per-node routing table snapshots
+  - bgp_neighbors       — per-node BGP peer state
   - kv_config           — controller config (replaces config.json)
 
 Nautobot IPAM remains the source of truth for IP records. This database tracks
@@ -25,7 +27,7 @@ from typing import AsyncGenerator
 
 from sqlalchemy import (
     Boolean, Column, DateTime, Float, Integer, PrimaryKeyConstraint, Text,
-    select,
+    UniqueConstraint, select,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.ext.asyncio import (
@@ -330,6 +332,90 @@ class DevicePoll(Base):
             "next_due": self.next_due.isoformat() if self.next_due else None,
             "interval_sec": self.interval_sec,
             "enabled": self.enabled,
+        }
+
+
+class Route(Base):
+    """Per-node routing table entry collected via NAPALM.
+
+    Rows are upserted each collection cycle. Old rows persist with their
+    collected_at timestamp and are cleaned by the daily prune job.
+    """
+    __tablename__ = "routes"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    node_name = Column(Text, nullable=False, index=True)
+    prefix = Column(Text, nullable=False, index=True)
+    next_hop = Column(Text, nullable=False, default="")
+    protocol = Column(Text, nullable=False, default="unknown")
+    vrf = Column(Text, nullable=False, default="default")
+    metric = Column(Integer)
+    preference = Column(Integer)  # administrative distance
+    outgoing_interface = Column(Text)
+    active = Column(Boolean, nullable=False, default=True)
+    collected_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False, index=True)
+
+    __table_args__ = (
+        UniqueConstraint("node_name", "prefix", "next_hop", "vrf",
+                         name="uq_routes_node_prefix_nh_vrf"),
+    )
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "node_name": self.node_name,
+            "prefix": self.prefix,
+            "next_hop": self.next_hop or "",
+            "protocol": self.protocol or "unknown",
+            "vrf": self.vrf or "default",
+            "metric": self.metric,
+            "preference": self.preference,
+            "outgoing_interface": self.outgoing_interface or "",
+            "active": bool(self.active),
+            "collected_at": self.collected_at.isoformat() if self.collected_at else "",
+        }
+
+
+class BGPNeighbor(Base):
+    """Per-node BGP neighbor state collected via NAPALM.
+
+    Rows are upserted each collection cycle. Old rows persist with their
+    collected_at timestamp and are cleaned by the daily prune job.
+    """
+    __tablename__ = "bgp_neighbors"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    node_name = Column(Text, nullable=False, index=True)
+    neighbor_ip = Column(Text, nullable=False)
+    remote_asn = Column(Integer, nullable=False)
+    local_asn = Column(Integer)
+    state = Column(Text, nullable=False, default="Unknown")
+    prefixes_received = Column(Integer)
+    prefixes_sent = Column(Integer)
+    uptime_seconds = Column(Integer)
+    vrf = Column(Text, nullable=False, default="default")
+    address_family = Column(Text, nullable=False, default="ipv4 unicast")
+    collected_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False, index=True)
+
+    __table_args__ = (
+        UniqueConstraint("node_name", "neighbor_ip", "vrf", "address_family",
+                         name="uq_bgp_node_neighbor_vrf_af"),
+    )
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "node_name": self.node_name,
+            "neighbor_ip": self.neighbor_ip,
+            "remote_asn": self.remote_asn,
+            "local_asn": self.local_asn,
+            "state": self.state or "Unknown",
+            "prefixes_received": self.prefixes_received,
+            "prefixes_sent": self.prefixes_sent,
+            "uptime_seconds": self.uptime_seconds,
+            "vrf": self.vrf or "default",
+            "address_family": self.address_family or "ipv4 unicast",
+            "collected_at": self.collected_at.isoformat() if self.collected_at else "",
         }
 
 
