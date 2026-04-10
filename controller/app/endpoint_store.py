@@ -1263,6 +1263,22 @@ async def prune_old_bgp_neighbors(retention_days: int) -> int:
     return n
 
 
+async def prune_old_auto_discovery_runs(retention_days: int) -> int:
+    """Delete auto_discovery_runs older than retention_days. Returns row count."""
+    cutoff = _now() - timedelta(days=retention_days)
+    async with db.SessionLocal() as session:
+        result = await session.execute(
+            db.AutoDiscoveryRun.__table__.delete().where(
+                db.AutoDiscoveryRun.started_at < cutoff
+            )
+        )
+        await session.commit()
+        n = result.rowcount or 0
+    _prune_log.info("prune_auto_discovery", "Pruned old auto-discovery runs",
+                    context={"deleted": n, "retention_days": retention_days})
+    return n
+
+
 async def prune_all(retention_days: int) -> dict:
     """Run every prune helper and return a summary dict."""
     events = await prune_old_events(retention_days)
@@ -1271,6 +1287,7 @@ async def prune_all(retention_days: int) -> dict:
     sentinels = await prune_stale_sentinels(retention_days)
     routes = await prune_old_routes(retention_days)
     bgp = await prune_old_bgp_neighbors(retention_days)
+    auto_disc = await prune_old_auto_discovery_runs(retention_days)
     summary = {
         "events": events,
         "observations": observations,
@@ -1278,11 +1295,13 @@ async def prune_all(retention_days: int) -> dict:
         "sentinels": sentinels,
         "routes": routes,
         "bgp_neighbors": bgp,
+        "auto_discovery_runs": auto_disc,
     }
     _prune_log.info("prune_complete",
                     f"Daily prune: {events} events, {observations} observations, "
                     f"{watches} watches, {sentinels} sentinels, "
-                    f"{routes} routes, {bgp} bgp_neighbors removed",
+                    f"{routes} routes, {bgp} bgp_neighbors, "
+                    f"{auto_disc} auto_discovery_runs removed",
                     context=summary)
     return summary
 
@@ -1324,6 +1343,10 @@ async def prune_preview(retention_days: int) -> dict:
             select(func.count()).select_from(db.BGPNeighbor)
             .where(db.BGPNeighbor.collected_at < cutoff)
         )).scalar_one()
+        auto_disc = (await session.execute(
+            select(func.count()).select_from(db.AutoDiscoveryRun)
+            .where(db.AutoDiscoveryRun.started_at < cutoff)
+        )).scalar_one()
     return {
         "events": int(events),
         "observations": int(observations),
@@ -1331,6 +1354,7 @@ async def prune_preview(retention_days: int) -> dict:
         "sentinels": int(sentinels),
         "routes": int(routes),
         "bgp_neighbors": int(bgp),
+        "auto_discovery_runs": int(auto_disc),
     }
 
 
@@ -1362,6 +1386,9 @@ async def maintenance_stats() -> dict:
         bgp_count_val = (await session.execute(
             select(func.count()).select_from(db.BGPNeighbor)
         )).scalar_one()
+        auto_disc_count = (await session.execute(
+            select(func.count()).select_from(db.AutoDiscoveryRun)
+        )).scalar_one()
     return {
         "endpoint_rows": int(endpoint_count),
         "event_rows": int(event_count),
@@ -1369,6 +1396,7 @@ async def maintenance_stats() -> dict:
         "watch_rows": int(watch_count),
         "route_rows": int(route_count_val),
         "bgp_neighbor_rows": int(bgp_count_val),
+        "auto_discovery_rows": int(auto_disc_count),
         "oldest_event": oldest_event.isoformat() if oldest_event else None,
         "oldest_observation": oldest_observation.isoformat() if oldest_observation else None,
     }

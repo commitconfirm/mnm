@@ -145,6 +145,8 @@ Per-device, per-job-type collection intervals. These are defaults for new device
 | `MNM_POLL_ROUTES_INTERVAL` | `3600` | Routing table collection interval in seconds |
 | `MNM_POLL_BGP_INTERVAL` | `3600` | BGP neighbor collection interval in seconds |
 | `MNM_POLL_CHECK_INTERVAL` | `30` | How often the poll loop checks for due jobs (seconds) |
+| `MNM_AUTO_DISCOVER_HOPS` | `0` | Default hop limit for LLDP auto-discovery (0 = disabled) |
+| `MNM_AUTO_DISCOVER_MAX` | `10` | Hard cap on nodes per auto-discovery run |
 | `MNM_LEGACY_COLLECTOR` | `false` | Set to `true` to re-enable the old monolithic endpoint collector during transition |
 
 ## Performance Tuning

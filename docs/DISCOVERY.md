@@ -81,7 +81,55 @@ Records are never deleted. IPs that stop responding retain their last known data
 
 ## LLDP Neighbor Advisory
 
-After device onboarding, LLDP/CDP neighbor data is surfaced in the Controller dashboard. Neighbors not matching known devices appear as advisories with "Onboard" and "Ignore" buttons. No automatic onboarding — Rule 6 (Human-in-the-Loop).
+After device onboarding, LLDP/CDP neighbor data is surfaced in the Controller dashboard. Neighbors not matching known devices appear as advisories with "Onboard" and "Ignore" buttons.
+
+## Hop-Limited Auto-Discovery
+
+**Default: disabled (hops=0).** Auto-discovery never happens unless the operator explicitly requests it (Rule 6 — Human-in-the-Loop).
+
+When running a sweep or manually onboarding, the operator can set an "Auto-discover hops" value (1–5). After each successful onboarding, MNM reads the new node's LLDP neighbors and attempts to onboard each unseen neighbor, recursing up to the specified depth.
+
+**Example:** Onboarding a core switch with `auto_discover_hops=2`:
+- Hop 1: auto-onboard directly connected IDF switches discovered via LLDP
+- Hop 2: auto-onboard devices connected to those IDF switches
+- Devices already onboarded are skipped (no duplicate onboarding)
+
+### Guard Rails
+
+| Guard | Description |
+|-------|-------------|
+| Default 0 | Auto-discovery disabled unless explicitly enabled per-operation |
+| Hop limit | Maximum depth 5, enforced server-side |
+| Hard cap | `MNM_AUTO_DISCOVER_MAX` (default 10) nodes per auto-discovery run |
+| Loop prevention | Visited set tracks all attempted nodes by name and IP |
+| Exclusion list | Respects both IP and device_name exclusions |
+| Sequential | One onboarding at a time — no parallel attempts |
+| Credential inheritance | Same credentials and location used for all auto-discovered nodes |
+| Visibility | All auto-discovered nodes appear in a dashboard advisory card |
+
+### IP Resolution from LLDP
+
+LLDP neighbor data does not always include a management IP address. MNM extracts an IP using this priority:
+
+1. **Chassis ID** — some devices advertise their management IP as the LLDP chassis ID
+2. **Hostname field** — may contain an IP address directly
+3. **Nautobot lookup** — if the system name matches an existing device, use its primary IP
+4. **DNS resolution** — resolve the LLDP system name via DNS
+
+If no IP can be resolved, the neighbor is skipped with a log entry noting the chassis ID for manual investigation.
+
+### API
+
+- `POST /api/discover/auto` — manually trigger auto-discovery from a specific node
+- `GET /api/discover/auto/history` — past auto-discovery run summaries
+- `GET /api/discover/auto/recent?hours=24` — recently auto-discovered nodes (dashboard advisory)
+
+### Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MNM_AUTO_DISCOVER_HOPS` | `0` | Default hop limit when not specified per-operation |
+| `MNM_AUTO_DISCOVER_MAX` | `10` | Hard cap on nodes per auto-discovery run |
 
 ## Re-sweep and Data Lifecycle
 

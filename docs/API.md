@@ -71,9 +71,12 @@ Start a network sweep.
   "cidr_ranges": ["192.0.2.0/24"],
   "location_id": "uuid",
   "secrets_group_id": "uuid",
-  "snmp_community": "public"
+  "snmp_community": "public",
+  "auto_discover_hops": 0
 }
 ```
+
+`auto_discover_hops` (optional, default 0): after onboarding a network device, walk its LLDP neighbors up to this many hops deep. 0 = disabled.
 
 **Response:** `200 OK`
 ```json
@@ -421,6 +424,45 @@ Query collected BGP neighbors with optional filters.
 
 ### GET /api/bgp/{node_name}
 All BGP neighbors for a specific node. Query params: `vrf`.
+
+## Auto-Discovery
+
+### POST /api/discover/auto
+Manually trigger hop-limited auto-discovery from a specific node.
+
+**Request:**
+```json
+{
+  "node_name": "core-switch-01",
+  "max_hops": 2,
+  "location_id": "uuid",
+  "secrets_group_id": "uuid",
+  "snmp_community": "public"
+}
+```
+
+**Response:**
+```json
+{
+  "seed_node": "core-switch-01",
+  "max_hops": 2,
+  "attempted": 3,
+  "succeeded": 2,
+  "failed": 1,
+  "skipped": 0,
+  "nodes": [
+    {"name": "idf-switch-01", "ip": "198.51.100.10", "status": "succeeded", "hop_depth": 1, "parent": "core-switch-01"},
+    {"name": "idf-switch-02", "ip": "198.51.100.11", "status": "succeeded", "hop_depth": 1, "parent": "core-switch-01"},
+    {"name": "ap-closet-01", "ip": "198.51.100.20", "status": "failed", "hop_depth": 2, "parent": "idf-switch-01"}
+  ]
+}
+```
+
+### GET /api/discover/auto/history
+Past auto-discovery run summaries.
+
+### GET /api/discover/auto/recent
+Nodes auto-discovered in the last N hours. Query param: `hours` (default 24). Used by the dashboard advisory card.
 
 ## Onboarding Progress
 

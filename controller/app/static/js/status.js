@@ -523,6 +523,32 @@ async function loadSubnets() {
   } catch (e) { console.error('Subnet advisory load failed:', e); }
 }
 
+async function loadAutoDiscovered() {
+  try {
+    var r = await fetch('/api/discover/auto/recent?hours=24');
+    if (!r.ok) return;
+    var d = await r.json();
+    var nodes = d.nodes || [];
+    var card = document.getElementById('auto-discover-card');
+    if (!nodes.length) { card.style.display = 'none'; return; }
+    card.style.display = '';
+    document.getElementById('auto-discover-count').textContent = nodes.length + ' node(s) in last 24h';
+    var esc = function(s) { var x = document.createElement('div'); x.textContent = s == null ? '' : String(s); return x.innerHTML; };
+    document.getElementById('auto-discover-table').innerHTML = nodes.map(function(n) {
+      var statusBadge = n.status === 'succeeded'
+        ? '<span class="badge success">onboarded</span>'
+        : '<span class="badge failed">failed</span>';
+      return '<tr>'
+        + '<td><strong>' + esc(n.name) + '</strong></td>'
+        + '<td><code>' + esc(n.ip) + '</code></td>'
+        + '<td>' + esc(n.parent_node) + '</td>'
+        + '<td>' + esc(n.hop_depth) + '</td>'
+        + '<td>' + statusBadge + '</td>'
+        + '</tr>';
+    }).join('');
+  } catch (e) { console.error('Auto-discover load failed:', e); }
+}
+
 async function loadRouteAdvisories() {
   try {
     var r = await fetch('/api/routes/advisories');
@@ -769,6 +795,7 @@ checkAuth().then(() => {
   loadIncompleteDevices();
   loadSubnets();
   loadRouteAdvisories();
+  loadAutoDiscovered();
   loadProxmox();
   loadMaintenance();
   startAutoRefresh();

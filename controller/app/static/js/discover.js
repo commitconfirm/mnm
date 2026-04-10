@@ -113,6 +113,7 @@ async function startSweep() {
   const locationId = document.getElementById('location-select').value;
   const secretsGroupId = document.getElementById('creds-select').value;
   const snmpCommunity = document.getElementById('snmp-community').value.trim() || 'public';
+  const autoDiscoverHops = parseInt(document.getElementById('auto-discover-hops').value) || 0;
   const runMode = document.getElementById('run-mode').value;
 
   if (!cidrRanges.length || !locationId || !secretsGroupId) {
@@ -159,6 +160,7 @@ async function startSweep() {
         location_id: locationId,
         secrets_group_id: secretsGroupId,
         snmp_community: snmpCommunity,
+        auto_discover_hops: autoDiscoverHops,
       }),
     });
 

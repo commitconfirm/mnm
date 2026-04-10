@@ -19,7 +19,7 @@ from app.logging_config import StructuredLogger, setup_logging, get_recent_logs
 # Initialize structured logging before anything else
 setup_logging()
 
-from app import db, discovery, docker_manager, endpoint_collector, endpoint_store, nautobot_client, polling
+from app import auto_discover, db, discovery, docker_manager, endpoint_collector, endpoint_store, nautobot_client, polling
 from app.connectors import proxmox as proxmox_connector
 from app.config import (
     DATA_DIR, load_config, load_config_async, save_config, save_config_async,
@@ -239,6 +239,7 @@ class SweepRequest(BaseModel):
     location_id: str
     secrets_group_id: str
     snmp_community: str = ""
+    auto_discover_hops: int = 0
 
 
 @app.post("/api/discover/sweep", dependencies=[Depends(require_auth)])
@@ -253,6 +254,7 @@ async def start_sweep(body: SweepRequest):
             body.location_id,
             body.secrets_group_id,
             snmp_community=body.snmp_community,
+            auto_discover_hops=body.auto_discover_hops,
         )
     )
     return {"status": "started"}
@@ -667,6 +669,56 @@ async def onboard_single(body: OnboardRequest):
         return {"status": "submitted", "job_result": result.get("job_result", {})}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# -------------------------------------------------------------------------
+# Auto-discovery — hop-limited LLDP neighbor onboarding
+# -------------------------------------------------------------------------
+
+class AutoDiscoverRequest(BaseModel):
+    node_name: str
+    max_hops: int = 1
+    location_id: str
+    secrets_group_id: str
+    snmp_community: str = ""
+
+
+@app.post("/api/discover/auto", dependencies=[Depends(require_auth)])
+async def trigger_auto_discover(body: AutoDiscoverRequest):
+    """Manually trigger hop-limited auto-discovery from a specific node.
+
+    Walks LLDP neighbors outward from the specified node, attempting to
+    auto-onboard each unseen neighbor up to max_hops deep. Sequential
+    onboarding — one device at a time. Respects exclusion lists and the
+    MNM_AUTO_DISCOVER_MAX hard cap.
+    """
+    if body.max_hops < 1 or body.max_hops > 5:
+        raise HTTPException(status_code=400, detail="max_hops must be 1-5")
+
+    result = await auto_discover.auto_discover_from_node(
+        seed_node_name=body.node_name,
+        max_hops=body.max_hops,
+        location_id=body.location_id,
+        secrets_group_id=body.secrets_group_id,
+        snmp_community=body.snmp_community,
+    )
+    return result
+
+
+@app.get("/api/discover/auto/history", dependencies=[Depends(require_auth)])
+async def auto_discover_history():
+    """Return recent auto-discovery run summaries."""
+    return {"history": await auto_discover.get_auto_discover_history()}
+
+
+@app.get("/api/discover/auto/recent", dependencies=[Depends(require_auth)])
+async def auto_discover_recent(hours: int = 24):
+    """Return nodes auto-discovered in the last N hours.
+
+    Used by the dashboard advisory card to show the operator what
+    auto-discovery did recently (Rule 6 compliance).
+    """
+    return {"nodes": await auto_discover.get_recent_auto_discovered(hours)}
 
 
 # -------------------------------------------------------------------------

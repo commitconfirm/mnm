@@ -1541,6 +1541,7 @@ async def sweep(
     location_id: str,
     secrets_group_id: str,
     snmp_community: str = "",
+    auto_discover_hops: int = 0,
 ) -> dict:
     """Run a seed-and-sweep discovery across the given CIDR ranges.
 
@@ -1549,6 +1550,7 @@ async def sweep(
       2. Enrich alive hosts (DNS, ARP/MAC, SNMP, classify)
       3. Check Nautobot for known devices
       4. Onboard eligible network devices, record everything else to IPAM
+      5. (Optional) Auto-discover LLDP neighbors from newly onboarded nodes
     """
     global _sweep_state
 
@@ -1855,6 +1857,38 @@ async def sweep(
         except Exception as exc:
             _log(f"Warning: network data sync failed: {exc}")
             log.warning("sync_after_onboard_failed", "Network data sync failed after onboarding", context={"error": str(exc)})
+
+    # ------------------------------------------------------------------
+    # Auto-discovery: walk LLDP neighbors from newly onboarded nodes
+    # ------------------------------------------------------------------
+    if auto_discover_hops > 0 and onboarded_hosts and not _sweep_cancel:
+        from app import auto_discover
+        for h in onboarded_hosts:
+            if _sweep_cancel:
+                break
+            # Resolve the device name for the onboarded IP
+            onb = _onboarding_state.get(h["ip"], {})
+            device_name = onb.get("device_name", "")
+            if not device_name:
+                continue
+            _log(f"Starting auto-discovery from {device_name} (hops={auto_discover_hops})")
+            try:
+                ad_result = await auto_discover.auto_discover_from_node(
+                    seed_node_name=device_name,
+                    max_hops=auto_discover_hops,
+                    location_id=location_id,
+                    secrets_group_id=secrets_group_id,
+                    snmp_community=snmp_community,
+                    log_fn=_log,
+                )
+                _log(f"Auto-discovery from {device_name}: "
+                     f"{ad_result['succeeded']} succeeded, "
+                     f"{ad_result['failed']} failed, "
+                     f"{ad_result['skipped']} skipped")
+            except Exception as exc:
+                _log(f"Auto-discovery from {device_name} failed: {exc}")
+                log.warning("auto_discover_failed", "Auto-discovery failed",
+                            context={"seed": device_name, "error": str(exc)})
 
     # ------------------------------------------------------------------
     # Summary

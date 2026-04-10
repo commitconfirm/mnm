@@ -49,7 +49,7 @@
           placeholder="192.0.2.0/24&#10;198.51.100.0/24"></textarea>
       </div>
 
-      <div class="grid-3">
+      <div class="grid-4">
         <div class="form-row">
           <label for="location-select">Location</label>
           <select id="location-select" style="width: 100%;">
@@ -65,6 +65,10 @@
         <div class="form-row">
           <label for="snmp-community">SNMP Community</label>
           <input type="text" id="snmp-community" value="public" style="width: 100%;" placeholder="public">
+        </div>
+        <div class="form-row">
+          <label for="auto-discover-hops" title="After onboarding a network device, attempt to auto-onboard its LLDP neighbors up to this many hops away. 0 = disabled (default).">Auto-discover hops</label>
+          <input type="number" id="auto-discover-hops" value="0" min="0" max="5" style="width: 100%;" title="0 = disabled. 1–5 = walk LLDP neighbors after each onboarding.">
         </div>
       </div>
 

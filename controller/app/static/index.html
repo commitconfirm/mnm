@@ -239,6 +239,21 @@
       </table>
     </div>
 
+    <!-- Recently Auto-Discovered -->
+    <div class="card" id="auto-discover-card" style="display:none">
+      <h2>Recently Auto-Discovered
+        <span id="auto-discover-count" style="font-size:0.8rem;font-weight:normal;color:var(--text-muted);float:right"></span>
+      </h2>
+      <p style="color:var(--text-muted); font-size:0.85rem; margin-top:-8px">
+        These nodes were auto-discovered via LLDP neighbor walk in the last 24 hours.
+        Review to confirm they belong in your monitoring scope.
+      </p>
+      <table>
+        <thead><tr><th>Node</th><th>IP</th><th>Discovered From</th><th>Hop</th><th>Status</th></tr></thead>
+        <tbody id="auto-discover-table"></tbody>
+      </table>
+    </div>
+
     <!-- LLDP Neighbors -->
     <div class="card" id="neighbors-card" style="display: none;">
       <h2>Unrecognized LLDP Neighbors</h2>

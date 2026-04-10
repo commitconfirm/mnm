@@ -12,6 +12,7 @@ Tables:
   - ip_observations     — sweep-time per-IP snapshots (Shodan-style)
   - routes              — per-node routing table snapshots
   - bgp_neighbors       — per-node BGP peer state
+  - auto_discovery_runs — hop-limited LLDP auto-discovery run logs
   - kv_config           — controller config (replaces config.json)
 
 Nautobot IPAM remains the source of truth for IP records. This database tracks
@@ -416,6 +417,42 @@ class BGPNeighbor(Base):
             "vrf": self.vrf or "default",
             "address_family": self.address_family or "ipv4 unicast",
             "collected_at": self.collected_at.isoformat() if self.collected_at else "",
+        }
+
+
+class AutoDiscoveryRun(Base):
+    """Persistent log of hop-limited auto-discovery runs.
+
+    Each row records one auto_discover_from_node() invocation with its
+    seed node, hop limit, results summary, and per-node detail in JSONB.
+    """
+    __tablename__ = "auto_discovery_runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    seed_node = Column(Text, nullable=False, index=True)
+    max_hops = Column(Integer, nullable=False)
+    attempted = Column(Integer, nullable=False, default=0)
+    succeeded = Column(Integer, nullable=False, default=0)
+    failed = Column(Integer, nullable=False, default=0)
+    skipped = Column(Integer, nullable=False, default=0)
+    nodes = Column(JSONB, nullable=False, default=list)
+    triggered_by = Column(Text, nullable=False, default="manual")  # "sweep" or "manual"
+    started_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False, index=True)
+    finished_at = Column(DateTime(timezone=True))
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "seed_node": self.seed_node,
+            "max_hops": self.max_hops,
+            "attempted": self.attempted,
+            "succeeded": self.succeeded,
+            "failed": self.failed,
+            "skipped": self.skipped,
+            "nodes": self.nodes or [],
+            "triggered_by": self.triggered_by or "manual",
+            "started_at": self.started_at.isoformat() if self.started_at else "",
+            "finished_at": self.finished_at.isoformat() if self.finished_at else "",
         }
 
 
