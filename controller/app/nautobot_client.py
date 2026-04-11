@@ -1,9 +1,15 @@
-"""Async HTTP client for Nautobot REST API."""
+"""Async HTTP client for Nautobot REST API.
+
+Uses a shared httpx.AsyncClient for connection pooling across all API calls.
+Frequently-read reference data (devices, statuses, namespaces) is cached with
+a short TTL to avoid redundant round-trips during polling and correlation.
+"""
 
 import asyncio
 import os
 import re
 import time
+from typing import Any
 
 import docker
 import httpx
@@ -15,6 +21,58 @@ log = StructuredLogger(__name__, module="nautobot")
 NAUTOBOT_URL = os.environ.get("NAUTOBOT_URL", "http://nautobot:8080")
 _api_token: str | None = None
 
+# ---------------------------------------------------------------------------
+# Shared HTTP client — connection pooling across all Nautobot API calls
+# ---------------------------------------------------------------------------
+
+_client: httpx.AsyncClient | None = None
+
+
+def _get_client() -> httpx.AsyncClient:
+    """Return the shared httpx client, creating it lazily on first use."""
+    global _client
+    if _client is None or _client.is_closed:
+        _client = httpx.AsyncClient(base_url=NAUTOBOT_URL, timeout=15)
+    return _client
+
+
+async def close_client() -> None:
+    """Close the shared httpx client. Call on app shutdown."""
+    global _client
+    if _client is not None and not _client.is_closed:
+        await _client.close()
+        _client = None
+
+
+# ---------------------------------------------------------------------------
+# Response cache — short TTL for reference data that rarely changes
+# ---------------------------------------------------------------------------
+
+_cache: dict[str, tuple[float, Any]] = {}
+_CACHE_TTL = 30.0  # seconds
+
+
+def _cache_get(key: str) -> Any | None:
+    entry = _cache.get(key)
+    if entry is not None:
+        ts, value = entry
+        if time.monotonic() - ts < _CACHE_TTL:
+            return value
+    return None
+
+
+def _cache_set(key: str, value: Any) -> None:
+    _cache[key] = (time.monotonic(), value)
+
+
+def clear_cache() -> None:
+    """Clear all cached responses. Call after data-mutating operations."""
+    _cache.clear()
+
+
+# ---------------------------------------------------------------------------
+# Auth
+# ---------------------------------------------------------------------------
 
 def _get_token() -> str:
     """Get or create an API token via docker exec into the nautobot container."""
@@ -57,33 +115,41 @@ def _headers() -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Device / inventory queries
+# ---------------------------------------------------------------------------
+
 async def get_devices() -> list[dict]:
+    cached = _cache_get("devices")
+    if cached is not None:
+        return cached
     t0 = time.monotonic()
-    async with httpx.AsyncClient(base_url=NAUTOBOT_URL, timeout=15) as client:
-        # depth=1 ensures nested objects (primary_ip4, platform, location, role)
-        # include display/address fields, not just id/url references.
-        resp = await client.get("/api/dcim/devices/?limit=1000&depth=1", headers=_headers())
-        resp.raise_for_status()
-        results = resp.json().get("results", [])
-        log.debug("api_call", "GET devices", context={"path": "/api/dcim/devices/", "status": resp.status_code, "count": len(results), "duration_ms": round((time.monotonic() - t0) * 1000)})
-        return results
+    client = _get_client()
+    # depth=1 ensures nested objects (primary_ip4, platform, location, role)
+    # include display/address fields, not just id/url references.
+    resp = await client.get("/api/dcim/devices/?limit=1000&depth=1", headers=_headers())
+    resp.raise_for_status()
+    results = resp.json().get("results", [])
+    log.debug("api_call", "GET devices", context={"path": "/api/dcim/devices/", "status": resp.status_code, "count": len(results), "duration_ms": round((time.monotonic() - t0) * 1000)})
+    _cache_set("devices", results)
+    return results
 
 
 async def get_device(device_id: str) -> dict:
-    async with httpx.AsyncClient(base_url=NAUTOBOT_URL, timeout=15) as client:
-        resp = await client.get(f"/api/dcim/devices/{device_id}/", headers=_headers())
-        resp.raise_for_status()
-        return resp.json()
+    client = _get_client()
+    resp = await client.get(f"/api/dcim/devices/{device_id}/", headers=_headers())
+    resp.raise_for_status()
+    return resp.json()
 
 
 async def get_interfaces(device_id: str) -> list[dict]:
-    async with httpx.AsyncClient(base_url=NAUTOBOT_URL, timeout=15) as client:
-        resp = await client.get(
-            f"/api/dcim/interfaces/?device_id={device_id}&limit=1000",
-            headers=_headers(),
-        )
-        resp.raise_for_status()
-        return resp.json().get("results", [])
+    client = _get_client()
+    resp = await client.get(
+        f"/api/dcim/interfaces/?device_id={device_id}&limit=1000",
+        headers=_headers(),
+    )
+    resp.raise_for_status()
+    return resp.json().get("results", [])
 
 
 async def get_device_interface_subnets() -> set[str]:
@@ -96,42 +162,43 @@ async def get_device_interface_subnets() -> set[str]:
     import ipaddress as _ipaddress
     subnets: set[str] = set()
     devices = await get_devices()
-    async with httpx.AsyncClient(base_url=NAUTOBOT_URL, timeout=30) as client:
-        for dev in devices:
-            dev_id = dev.get("id")
-            if not dev_id:
+    client = _get_client()
+    for dev in devices:
+        dev_id = dev.get("id")
+        if not dev_id:
+            continue
+        ifaces = await get_interfaces(dev_id)
+        for ifc in ifaces:
+            ifc_id = ifc.get("id")
+            if not ifc_id:
                 continue
-            ifaces = await get_interfaces(dev_id)
-            for ifc in ifaces:
-                ifc_id = ifc.get("id")
-                if not ifc_id:
+            resp = await client.get(
+                f"/api/ipam/ip-addresses/?interfaces={ifc_id}&limit=50",
+                headers=_headers(),
+                timeout=30,
+            )
+            if resp.status_code != 200:
+                continue
+            for ip_obj in resp.json().get("results", []):
+                display = ip_obj.get("display") or ip_obj.get("address") or ""
+                host = display.split("/")[0] if "/" in display else display
+                if not host:
                     continue
-                resp = await client.get(
-                    f"/api/ipam/ip-addresses/?interfaces={ifc_id}&limit=50",
-                    headers=_headers(),
-                )
-                if resp.status_code != 200:
+                try:
+                    addr = _ipaddress.ip_address(host)
+                    prefix_len = 24 if addr.version == 4 else 64
+                    net = _ipaddress.ip_network(f"{host}/{prefix_len}", strict=False)
+                    subnets.add(str(net))
+                except ValueError:
                     continue
-                for ip_obj in resp.json().get("results", []):
-                    display = ip_obj.get("display") or ip_obj.get("address") or ""
-                    host = display.split("/")[0] if "/" in display else display
-                    if not host:
-                        continue
-                    try:
-                        addr = _ipaddress.ip_address(host)
-                        prefix_len = 24 if addr.version == 4 else 64
-                        net = _ipaddress.ip_network(f"{host}/{prefix_len}", strict=False)
-                        subnets.add(str(net))
-                    except ValueError:
-                        continue
     return subnets
 
 
 async def get_secrets_groups() -> list[dict]:
-    async with httpx.AsyncClient(base_url=NAUTOBOT_URL, timeout=15) as client:
-        resp = await client.get("/api/extras/secrets-groups/", headers=_headers())
-        resp.raise_for_status()
-        return resp.json().get("results", [])
+    client = _get_client()
+    resp = await client.get("/api/extras/secrets-groups/", headers=_headers())
+    resp.raise_for_status()
+    return resp.json().get("results", [])
 
 
 async def get_locations() -> list[dict]:
@@ -144,39 +211,39 @@ async def get_locations() -> list[dict]:
     PENDING. Filtering here means the UI/API only ever surfaces locations
     that can actually hold a device.
     """
-    async with httpx.AsyncClient(base_url=NAUTOBOT_URL, timeout=15) as client:
-        resp = await client.get("/api/dcim/locations/?limit=100", headers=_headers())
-        resp.raise_for_status()
-        locations = resp.json().get("results", [])
+    client = _get_client()
+    resp = await client.get("/api/dcim/locations/?limit=100", headers=_headers())
+    resp.raise_for_status()
+    locations = resp.json().get("results", [])
 
-        # Build a map of location-type id -> set of content type strings
-        types_resp = await client.get(
-            "/api/dcim/location-types/?limit=100", headers=_headers()
+    # Build a map of location-type id -> set of content type strings
+    types_resp = await client.get(
+        "/api/dcim/location-types/?limit=100", headers=_headers()
+    )
+    types_resp.raise_for_status()
+    type_accepts_device: dict[str, bool] = {}
+    for lt in types_resp.json().get("results", []):
+        cts = lt.get("content_types") or []
+        type_accepts_device[lt.get("id")] = any(
+            (isinstance(c, str) and c == "dcim.device")
+            or (isinstance(c, dict) and c.get("app_label") == "dcim" and c.get("model") == "device")
+            for c in cts
         )
-        types_resp.raise_for_status()
-        type_accepts_device: dict[str, bool] = {}
-        for lt in types_resp.json().get("results", []):
-            cts = lt.get("content_types") or []
-            type_accepts_device[lt.get("id")] = any(
-                (isinstance(c, str) and c == "dcim.device")
-                or (isinstance(c, dict) and c.get("app_label") == "dcim" and c.get("model") == "device")
-                for c in cts
-            )
 
-        def _accepts(loc: dict) -> bool:
-            lt = loc.get("location_type") or {}
-            lt_id = lt.get("id") if isinstance(lt, dict) else lt
-            return type_accepts_device.get(lt_id, False)
+    def _accepts(loc: dict) -> bool:
+        lt = loc.get("location_type") or {}
+        lt_id = lt.get("id") if isinstance(lt, dict) else lt
+        return type_accepts_device.get(lt_id, False)
 
-        return [loc for loc in locations if _accepts(loc)]
+    return [loc for loc in locations if _accepts(loc)]
 
 
 async def get_cables() -> list[dict]:
     """Get cable connections to identify LLDP neighbors."""
-    async with httpx.AsyncClient(base_url=NAUTOBOT_URL, timeout=30) as client:
-        resp = await client.get("/api/dcim/cables/?limit=1000", headers=_headers())
-        resp.raise_for_status()
-        return resp.json().get("results", [])
+    client = _get_client()
+    resp = await client.get("/api/dcim/cables/?limit=1000", headers=_headers(), timeout=30)
+    resp.raise_for_status()
+    return resp.json().get("results", [])
 
 
 async def get_uplinks() -> set[tuple[str, str]]:
@@ -273,12 +340,13 @@ async def get_uplinks() -> set[tuple[str, str]]:
         if not dev_id or not local_name:
             return set()
         try:
-            async with httpx.AsyncClient(base_url=NAUTOBOT_URL, timeout=60) as client:
-                resp = await client.get(
-                    f"/api/dcim/devices/{dev_id}/napalm/",
-                    params={"method": "get_lldp_neighbors"},
-                    headers=_headers(),
-                )
+            client = _get_client()
+            resp = await client.get(
+                f"/api/dcim/devices/{dev_id}/napalm/",
+                params={"method": "get_lldp_neighbors"},
+                headers=_headers(),
+                timeout=60,
+            )
             if resp.status_code != 200:
                 return set()
             data = resp.json().get("get_lldp_neighbors", {}) or {}
@@ -312,13 +380,17 @@ async def get_uplinks() -> set[tuple[str, str]]:
 
 async def get_ip_addresses() -> list[dict]:
     t0 = time.monotonic()
-    async with httpx.AsyncClient(base_url=NAUTOBOT_URL, timeout=15) as client:
-        resp = await client.get("/api/ipam/ip-addresses/?limit=1000", headers=_headers())
-        resp.raise_for_status()
-        results = resp.json().get("results", [])
-        log.debug("api_call", "GET ip-addresses", context={"path": "/api/ipam/ip-addresses/", "status": resp.status_code, "count": len(results), "duration_ms": round((time.monotonic() - t0) * 1000)})
-        return results
+    client = _get_client()
+    resp = await client.get("/api/ipam/ip-addresses/?limit=1000", headers=_headers())
+    resp.raise_for_status()
+    results = resp.json().get("results", [])
+    log.debug("api_call", "GET ip-addresses", context={"path": "/api/ipam/ip-addresses/", "status": resp.status_code, "count": len(results), "duration_ms": round((time.monotonic() - t0) * 1000)})
+    return results
 
+
+# ---------------------------------------------------------------------------
+# Onboarding
+# ---------------------------------------------------------------------------
 
 async def submit_onboarding_job(
     ip: str,
@@ -334,112 +406,111 @@ async def submit_onboarding_job(
     have to auto-detect the platform from the SSH banner.
     """
     log.info("onboarding_job_submit", "Submitting onboarding job", context={"ip": ip, "platform": platform_slug})
-    async with httpx.AsyncClient(base_url=NAUTOBOT_URL, timeout=30) as client:
-        # Find the single-device onboarding job (not the SSoT/CSV-based one)
+    client = _get_client()
+    # Find the single-device onboarding job (not the SSoT/CSV-based one)
+    jobs_resp = await client.get(
+        "/api/extras/jobs/?name=Perform+Device+Onboarding+(Original)",
+        headers=_headers(),
+        timeout=30,
+    )
+    jobs_resp.raise_for_status()
+    jobs = jobs_resp.json().get("results", [])
+    if not jobs:
+        # Fallback to the SSoT job name
         jobs_resp = await client.get(
-            "/api/extras/jobs/?name=Perform+Device+Onboarding+(Original)",
+            "/api/extras/jobs/?name=Sync+Devices+From+Network",
             headers=_headers(),
+            timeout=30,
         )
         jobs_resp.raise_for_status()
         jobs = jobs_resp.json().get("results", [])
-        if not jobs:
-            # Fallback to the SSoT job name
-            jobs_resp = await client.get(
-                "/api/extras/jobs/?name=Sync+Devices+From+Network",
-                headers=_headers(),
-            )
-            jobs_resp.raise_for_status()
-            jobs = jobs_resp.json().get("results", [])
-        if not jobs:
-            raise RuntimeError("Device onboarding job not found in Nautobot")
-        job_id = jobs[0]["id"]
+    if not jobs:
+        raise RuntimeError("Device onboarding job not found in Nautobot")
+    job_id = jobs[0]["id"]
 
-        # Resolve platform slug to ID if provided
-        platform_id = None
-        if platform_slug:
-            plat_resp = await client.get(
-                f"/api/dcim/platforms/?network_driver={platform_slug}&limit=1",
-                headers=_headers(),
-            )
-            if plat_resp.status_code == 200:
-                plat_results = plat_resp.json().get("results", [])
-                if plat_results:
-                    platform_id = plat_results[0]["id"]
-                    log.debug("platform_resolved", "Resolved platform slug to ID", context={"slug": platform_slug, "id": platform_id})
-
-        # Build job data
-        job_data: dict = {
-            "ip_address": ip,
-            "port": port,
-            "timeout": 30,
-            "location": location_id,
-            "credentials": secrets_group_id,
-        }
-        if platform_id:
-            job_data["platform"] = platform_id
-
-        # Run the job
-        resp = await client.post(
-            f"/api/extras/jobs/{job_id}/run/",
-            headers={**_headers(), "Content-Type": "application/json"},
-            json={"data": job_data},
+    # Resolve platform slug to ID if provided
+    platform_id = None
+    if platform_slug:
+        plat_resp = await client.get(
+            f"/api/dcim/platforms/?network_driver={platform_slug}&limit=1",
+            headers=_headers(),
         )
-        resp.raise_for_status()
-        return resp.json()
+        if plat_resp.status_code == 200:
+            plat_results = plat_resp.json().get("results", [])
+            if plat_results:
+                platform_id = plat_results[0]["id"]
+                log.debug("platform_resolved", "Resolved platform slug to ID", context={"slug": platform_slug, "id": platform_id})
+
+    # Build job data
+    job_data: dict = {
+        "ip_address": ip,
+        "port": port,
+        "timeout": 30,
+        "location": location_id,
+        "credentials": secrets_group_id,
+    }
+    if platform_id:
+        job_data["platform"] = platform_id
+
+    # Run the job
+    resp = await client.post(
+        f"/api/extras/jobs/{job_id}/run/",
+        headers={**_headers(), "Content-Type": "application/json"},
+        json={"data": job_data},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    # Bust device cache since a new device may be created
+    clear_cache()
+    return resp.json()
 
 
 async def get_job_result(job_result_id: str) -> dict:
-    async with httpx.AsyncClient(base_url=NAUTOBOT_URL, timeout=15) as client:
-        resp = await client.get(
-            f"/api/extras/job-results/{job_result_id}/",
-            headers=_headers(),
-        )
-        resp.raise_for_status()
-        return resp.json()
+    client = _get_client()
+    resp = await client.get(
+        f"/api/extras/job-results/{job_result_id}/",
+        headers=_headers(),
+    )
+    resp.raise_for_status()
+    return resp.json()
 
 
 async def delete_standalone_ip(ip: str) -> bool:
     """Delete IPAddress records for ``ip`` that are NOT attached to any
     device interface.
 
-    The controller's sweep records every alive IP into IPAM with discovery
-    custom fields. When the same IP is later onboarded as a device, the
-    nautobot-device-onboarding plugin tries to ``IPAddress.objects.create``
-    that IP and crashes with a UniqueViolation. Removing the standalone
-    record beforehand lets the plugin own the IPAddress; the discovery CFs
-    will be re-applied to the newly-created (now interface-attached) record
-    on the next sweep.
-
-    Skips deletion when the IP is already attached to an interface (i.e.
-    the device exists), to avoid orphaning a real device.
+    The controller's sweep records every alive IP into Nautobot IPAM with
+    discovery custom fields. When the same IP is later onboarded as a device,
+    the nautobot-device-onboarding plugin tries to ``IPAddress.objects.create``
+    and crashes with a UniqueViolation. Removing the standalone record
+    beforehand lets the plugin own the IPAddress.
     """
-    address = f"{ip}/32"
     deleted = False
-    async with httpx.AsyncClient(base_url=NAUTOBOT_URL, timeout=15) as client:
-        resp = await client.get(
-            f"/api/ipam/ip-addresses/?address={ip}&limit=10",
+    client = _get_client()
+    resp = await client.get(
+        f"/api/ipam/ip-addresses/?address={ip}&limit=10",
+        headers=_headers(),
+    )
+    if resp.status_code != 200:
+        return False
+    for ipo in resp.json().get("results", []):
+        if not (ipo.get("address") or "").startswith(ip):
+            continue
+        interfaces = ipo.get("interfaces") or []
+        if interfaces:
+            # Already on a device interface — leave it alone.
+            continue
+        del_resp = await client.delete(
+            f"/api/ipam/ip-addresses/{ipo['id']}/",
             headers=_headers(),
         )
-        if resp.status_code != 200:
-            return False
-        for ipo in resp.json().get("results", []):
-            if not (ipo.get("address") or "").startswith(ip):
-                continue
-            interfaces = ipo.get("interfaces") or []
-            if interfaces:
-                # Already on a device interface — leave it alone.
-                continue
-            del_resp = await client.delete(
-                f"/api/ipam/ip-addresses/{ipo['id']}/",
-                headers=_headers(),
+        if del_resp.status_code in (200, 202, 204):
+            log.info(
+                "ip_pre_onboard_deleted",
+                "Deleted standalone IP record before onboarding",
+                context={"ip": ip, "id": ipo["id"]},
             )
-            if del_resp.status_code in (200, 202, 204):
-                log.info(
-                    "ip_pre_onboard_deleted",
-                    "Deleted standalone IP record before onboarding",
-                    context={"ip": ip, "id": ipo["id"]},
-                )
-                deleted = True
+            deleted = True
     return deleted
 
 
@@ -450,46 +521,40 @@ async def find_device_by_ip(ip: str) -> dict | None:
     nautobot-device-onboarding plugin can leave its JobResult row stuck in
     PENDING after raising OnboardException, so polling JobResult.status is
     unreliable. Device presence is the actual outcome that matters.
-
-    Implementation: looks up the IPAddress record by host address, then
-    finds any interface that lists that IPAddress, and resolves the
-    interface's parent device. The Nautobot 3.x ``primary_ip4__host``
-    filter is rejected (HTTP 400), so we cannot query Devices directly
-    by IP.
     """
-    async with httpx.AsyncClient(base_url=NAUTOBOT_URL, timeout=15) as client:
-        ip_resp = await client.get(
-            f"/api/ipam/ip-addresses/?address={ip}&limit=5",
+    client = _get_client()
+    ip_resp = await client.get(
+        f"/api/ipam/ip-addresses/?address={ip}&limit=5",
+        headers=_headers(),
+    )
+    if ip_resp.status_code != 200:
+        return None
+    ip_results = ip_resp.json().get("results", [])
+    if not ip_results:
+        return None
+
+    for ipo in ip_results:
+        ip_id = ipo.get("id")
+        if not ip_id:
+            continue
+        iface_resp = await client.get(
+            f"/api/dcim/interfaces/?ip_addresses={ip_id}&limit=5",
             headers=_headers(),
         )
-        if ip_resp.status_code != 200:
-            return None
-        ip_results = ip_resp.json().get("results", [])
-        if not ip_results:
-            return None
-
-        for ipo in ip_results:
-            ip_id = ipo.get("id")
-            if not ip_id:
+        if iface_resp.status_code != 200:
+            continue
+        for iface in iface_resp.json().get("results", []):
+            dev_obj = iface.get("device") or {}
+            dev_id = dev_obj.get("id") if isinstance(dev_obj, dict) else None
+            if not dev_id:
                 continue
-            iface_resp = await client.get(
-                f"/api/dcim/interfaces/?ip_addresses={ip_id}&limit=5",
+            dev_resp = await client.get(
+                f"/api/dcim/devices/{dev_id}/",
                 headers=_headers(),
             )
-            if iface_resp.status_code != 200:
-                continue
-            for iface in iface_resp.json().get("results", []):
-                dev_obj = iface.get("device") or {}
-                dev_id = dev_obj.get("id") if isinstance(dev_obj, dict) else None
-                if not dev_id:
-                    continue
-                dev_resp = await client.get(
-                    f"/api/dcim/devices/{dev_id}/",
-                    headers=_headers(),
-                )
-                if dev_resp.status_code == 200:
-                    return dev_resp.json()
-        return None
+            if dev_resp.status_code == 200:
+                return dev_resp.json()
+    return None
 
 
 async def submit_sync_network_data(
@@ -503,80 +568,79 @@ async def submit_sync_network_data(
 
     If device_ids is empty, fetches all onboarded devices and syncs them all.
     """
-    async with httpx.AsyncClient(base_url=NAUTOBOT_URL, timeout=30) as client:
-        # Find the job
-        jobs_resp = await client.get(
-            "/api/extras/jobs/?name=Sync+Network+Data+From+Network",
-            headers=_headers(),
-        )
-        jobs_resp.raise_for_status()
-        jobs = jobs_resp.json().get("results", [])
-        if not jobs:
-            raise RuntimeError("Sync Network Data From Network job not found")
-        job_id = jobs[0]["id"]
+    client = _get_client()
+    # Find the job
+    jobs_resp = await client.get(
+        "/api/extras/jobs/?name=Sync+Network+Data+From+Network",
+        headers=_headers(),
+        timeout=30,
+    )
+    jobs_resp.raise_for_status()
+    jobs = jobs_resp.json().get("results", [])
+    if not jobs:
+        raise RuntimeError("Sync Network Data From Network job not found")
+    job_id = jobs[0]["id"]
 
-        # If no device IDs provided, get all onboarded devices
-        if not device_ids:
-            devices = await get_devices()
-            device_ids = [d["id"] for d in devices]
+    # If no device IDs provided, get all onboarded devices
+    if not device_ids:
+        devices = await get_devices()
+        device_ids = [d["id"] for d in devices]
 
-        if not device_ids:
-            raise RuntimeError("No devices to sync")
+    if not device_ids:
+        raise RuntimeError("No devices to sync")
 
-        # Resolve required job parameters: the Sync Network Data job demands
-        # explicit namespace + status IDs even though they're typically "Global"
-        # / "Active". Skipping them yields HTTP 400 with field errors.
-        namespace_id = None
-        for ns in await get_namespaces():
-            if ns.get("name") == "Global":
-                namespace_id = ns["id"]
-                break
-        active_status_id = None
-        for s in await get_statuses():
-            if s.get("name") == "Active":
-                active_status_id = s["id"]
-                break
+    # Resolve required job parameters: the Sync Network Data job demands
+    # explicit namespace + status IDs even though they're typically "Global"
+    # / "Active". Skipping them yields HTTP 400 with field errors.
+    namespace_id = None
+    for ns in await get_namespaces():
+        if ns.get("name") == "Global":
+            namespace_id = ns["id"]
+            break
+    active_status_id = None
+    for s in await get_statuses():
+        if s.get("name") == "Active":
+            active_status_id = s["id"]
+            break
 
-        log.info("sync_submit", f"Submitting sync for {len(device_ids)} devices", context={
-            "device_count": len(device_ids),
-            "sync_cables": sync_cables,
-            "sync_vlans": sync_vlans,
-            "dryrun": dryrun,
-        })
+    log.info("sync_submit", f"Submitting sync for {len(device_ids)} devices", context={
+        "device_count": len(device_ids),
+        "sync_cables": sync_cables,
+        "sync_vlans": sync_vlans,
+        "dryrun": dryrun,
+    })
 
-        # Submit the job
-        resp = await client.post(
-            f"/api/extras/jobs/{job_id}/run/",
-            headers={**_headers(), "Content-Type": "application/json"},
-            json={
-                "data": {
-                    "devices": device_ids,
-                    "sync_cables": sync_cables,
-                    "sync_vlans": sync_vlans,
-                    "sync_vrfs": sync_vrfs,
-                    "namespace": namespace_id,
-                    "interface_status": active_status_id,
-                    "ip_address_status": active_status_id,
-                    "default_prefix_status": active_status_id,
-                    "debug": False,
-                },
-                "schedule": {"interval": "immediately"},
-                "task_queue": "default",
+    # Submit the job
+    resp = await client.post(
+        f"/api/extras/jobs/{job_id}/run/",
+        headers={**_headers(), "Content-Type": "application/json"},
+        json={
+            "data": {
+                "devices": device_ids,
+                "sync_cables": sync_cables,
+                "sync_vlans": sync_vlans,
+                "sync_vrfs": sync_vrfs,
+                "namespace": namespace_id,
+                "interface_status": active_status_id,
+                "ip_address_status": active_status_id,
+                "default_prefix_status": active_status_id,
+                "debug": False,
             },
+            "schedule": {"interval": "immediately"},
+            "task_queue": "default",
+        },
+        timeout=30,
+    )
+    if resp.status_code >= 400:
+        body = ""
+        try:
+            body = resp.text[:500]
+        except Exception:
+            pass
+        raise RuntimeError(
+            f"Nautobot rejected sync job (HTTP {resp.status_code}): {body}"
         )
-        if resp.status_code >= 400:
-            # Surface Nautobot's actual validation message instead of the
-            # generic httpx error string. Particularly useful for sync runs
-            # that fail because the device has no IP to connect to.
-            body = ""
-            try:
-                body = resp.text[:500]
-            except Exception:
-                pass
-            raise RuntimeError(
-                f"Nautobot rejected sync job (HTTP {resp.status_code}): {body}"
-            )
-        return resp.json()
+    return resp.json()
 
 
 # ---------------------------------------------------------------------------
@@ -585,18 +649,28 @@ async def submit_sync_network_data(
 
 async def get_statuses() -> list[dict]:
     """Get status objects to find the Active status ID."""
-    async with httpx.AsyncClient(base_url=NAUTOBOT_URL, timeout=15) as client:
-        resp = await client.get("/api/extras/statuses/?limit=100", headers=_headers())
-        resp.raise_for_status()
-        return resp.json().get("results", [])
+    cached = _cache_get("statuses")
+    if cached is not None:
+        return cached
+    client = _get_client()
+    resp = await client.get("/api/extras/statuses/?limit=100", headers=_headers())
+    resp.raise_for_status()
+    results = resp.json().get("results", [])
+    _cache_set("statuses", results)
+    return results
 
 
 async def get_namespaces() -> list[dict]:
     """Get namespace objects to find the Global namespace ID."""
-    async with httpx.AsyncClient(base_url=NAUTOBOT_URL, timeout=15) as client:
-        resp = await client.get("/api/ipam/namespaces/?limit=100", headers=_headers())
-        resp.raise_for_status()
-        return resp.json().get("results", [])
+    cached = _cache_get("namespaces")
+    if cached is not None:
+        return cached
+    client = _get_client()
+    resp = await client.get("/api/ipam/namespaces/?limit=100", headers=_headers())
+    resp.raise_for_status()
+    results = resp.json().get("results", [])
+    _cache_set("namespaces", results)
+    return results
 
 
 async def ensure_prefix(cidr: str, namespace: str = "Global") -> dict:
@@ -604,47 +678,47 @@ async def ensure_prefix(cidr: str, namespace: str = "Global") -> dict:
 
     Returns the prefix object (existing or newly created).
     """
-    async with httpx.AsyncClient(base_url=NAUTOBOT_URL, timeout=15) as client:
-        # Check if prefix already exists
-        resp = await client.get(
-            f"/api/ipam/prefixes/?prefix={cidr}&limit=1",
-            headers=_headers(),
-        )
-        resp.raise_for_status()
-        results = resp.json().get("results", [])
-        if results:
-            return results[0]
+    client = _get_client()
+    # Check if prefix already exists
+    resp = await client.get(
+        f"/api/ipam/prefixes/?prefix={cidr}&limit=1",
+        headers=_headers(),
+    )
+    resp.raise_for_status()
+    results = resp.json().get("results", [])
+    if results:
+        return results[0]
 
-        # Resolve namespace ID
-        ns_id = None
-        namespaces = await get_namespaces()
-        for ns in namespaces:
-            if ns.get("name") == namespace or ns.get("display") == namespace:
-                ns_id = ns["id"]
-                break
+    # Resolve namespace ID
+    ns_id = None
+    namespaces = await get_namespaces()
+    for ns in namespaces:
+        if ns.get("name") == namespace or ns.get("display") == namespace:
+            ns_id = ns["id"]
+            break
 
-        # Resolve Active status ID
-        active_status_id = None
-        statuses = await get_statuses()
-        for s in statuses:
-            if s.get("name") == "Active":
-                active_status_id = s["id"]
-                break
+    # Resolve Active status ID
+    active_status_id = None
+    statuses = await get_statuses()
+    for s in statuses:
+        if s.get("name") == "Active":
+            active_status_id = s["id"]
+            break
 
-        payload: dict = {
-            "prefix": cidr,
-            "status": active_status_id,
-        }
-        if ns_id:
-            payload["namespace"] = ns_id
+    payload: dict = {
+        "prefix": cidr,
+        "status": active_status_id,
+    }
+    if ns_id:
+        payload["namespace"] = ns_id
 
-        resp = await client.post(
-            "/api/ipam/prefixes/",
-            headers={**_headers(), "Content-Type": "application/json"},
-            json=payload,
-        )
-        resp.raise_for_status()
-        return resp.json()
+    resp = await client.post(
+        "/api/ipam/prefixes/",
+        headers={**_headers(), "Content-Type": "application/json"},
+        json=payload,
+    )
+    resp.raise_for_status()
+    return resp.json()
 
 
 async def upsert_discovered_ip(ip: str, data: dict) -> dict:
@@ -690,84 +764,84 @@ async def upsert_discovered_ip(ip: str, data: dict) -> dict:
     # Use /32 for host addresses
     address = f"{ip}/32"
 
-    async with httpx.AsyncClient(base_url=NAUTOBOT_URL, timeout=15) as client:
-        # Check if IP already exists
-        resp = await client.get(
-            f"/api/ipam/ip-addresses/?address={ip}&limit=5",
-            headers=_headers(),
-        )
-        resp.raise_for_status()
-        results = resp.json().get("results", [])
+    client = _get_client()
+    # Check if IP already exists
+    resp = await client.get(
+        f"/api/ipam/ip-addresses/?address={ip}&limit=5",
+        headers=_headers(),
+    )
+    resp.raise_for_status()
+    results = resp.json().get("results", [])
 
-        existing = None
-        for r in results:
-            # Match on the host portion of the address
-            addr_display = r.get("address", "")
-            if addr_display.startswith(ip):
-                existing = r
-                break
+    existing = None
+    for r in results:
+        # Match on the host portion of the address
+        addr_display = r.get("address", "")
+        if addr_display.startswith(ip):
+            existing = r
+            break
 
-        if existing:
-            # Update — preserve first_seen
-            existing_cf = existing.get("custom_fields", {})
-            if existing_cf.get("discovery_first_seen"):
-                custom_fields.pop("discovery_first_seen", None)
-            else:
-                custom_fields["discovery_first_seen"] = data.get("first_seen", "")
-
-            resp = await client.patch(
-                f"/api/ipam/ip-addresses/{existing['id']}/",
-                headers={**_headers(), "Content-Type": "application/json"},
-                json={"custom_fields": custom_fields},
-            )
-            resp.raise_for_status()
-            log.debug("upsert_discovered_ip", "Updated existing IP", context={"ip": ip, "action": "update"})
-            return resp.json()
+    if existing:
+        # Update — preserve first_seen
+        existing_cf = existing.get("custom_fields", {})
+        if existing_cf.get("discovery_first_seen"):
+            custom_fields.pop("discovery_first_seen", None)
         else:
-            # Create new IP address
             custom_fields["discovery_first_seen"] = data.get("first_seen", "")
 
-            # Nautobot 2.x requires a parent Prefix to exist for the IP.
-            # Auto-create a /24 in the Global namespace if missing.
-            try:
-                import ipaddress as _ipaddress
-                parent_net = _ipaddress.ip_network(f"{ip}/24", strict=False)
-                await ensure_prefix(str(parent_net), "Global")
-            except Exception:
-                pass
+        resp = await client.patch(
+            f"/api/ipam/ip-addresses/{existing['id']}/",
+            headers={**_headers(), "Content-Type": "application/json"},
+            json={"custom_fields": custom_fields},
+        )
+        resp.raise_for_status()
+        log.debug("upsert_discovered_ip", "Updated existing IP", context={"ip": ip, "action": "update"})
+        return resp.json()
+    else:
+        # Create new IP address
+        custom_fields["discovery_first_seen"] = data.get("first_seen", "")
 
-            # Resolve Active status
-            active_status_id = None
-            statuses = await get_statuses()
-            for s in statuses:
-                if s.get("name") == "Active":
-                    active_status_id = s["id"]
-                    break
+        # Nautobot 2.x requires a parent Prefix to exist for the IP.
+        # Auto-create a /24 in the Global namespace if missing.
+        try:
+            import ipaddress as _ipaddress
+            parent_net = _ipaddress.ip_network(f"{ip}/24", strict=False)
+            await ensure_prefix(str(parent_net), "Global")
+        except Exception:
+            pass
 
-            # Resolve namespace
-            ns_id = None
-            namespaces = await get_namespaces()
-            for ns in namespaces:
-                if ns.get("name") == "Global":
-                    ns_id = ns["id"]
-                    break
+        # Resolve Active status
+        active_status_id = None
+        statuses = await get_statuses()
+        for s in statuses:
+            if s.get("name") == "Active":
+                active_status_id = s["id"]
+                break
 
-            payload: dict = {
-                "address": address,
-                "status": active_status_id,
-                "custom_fields": custom_fields,
-            }
-            if ns_id:
-                payload["namespace"] = ns_id
+        # Resolve namespace
+        ns_id = None
+        namespaces = await get_namespaces()
+        for ns in namespaces:
+            if ns.get("name") == "Global":
+                ns_id = ns["id"]
+                break
 
-            resp = await client.post(
-                "/api/ipam/ip-addresses/",
-                headers={**_headers(), "Content-Type": "application/json"},
-                json=payload,
-            )
-            resp.raise_for_status()
-            log.debug("upsert_discovered_ip", "Created new IP", context={"ip": ip, "action": "create"})
-            return resp.json()
+        payload: dict = {
+            "address": address,
+            "status": active_status_id,
+            "custom_fields": custom_fields,
+        }
+        if ns_id:
+            payload["namespace"] = ns_id
+
+        resp = await client.post(
+            "/api/ipam/ip-addresses/",
+            headers={**_headers(), "Content-Type": "application/json"},
+            json=payload,
+        )
+        resp.raise_for_status()
+        log.debug("upsert_discovered_ip", "Created new IP", context={"ip": ip, "action": "create"})
+        return resp.json()
 
 
 async def napalm_get(device_id: str, method: str, **kwargs) -> dict:
@@ -777,14 +851,15 @@ async def napalm_get(device_id: str, method: str, **kwargs) -> dict:
     forwards them to the NAPALM getter as keyword arguments.
     """
     params = {"method": method, **kwargs}
-    async with httpx.AsyncClient(base_url=NAUTOBOT_URL, timeout=60) as client:
-        resp = await client.get(
-            f"/api/dcim/devices/{device_id}/napalm/",
-            params=params,
-            headers=_headers(),
-        )
-        resp.raise_for_status()
-        return resp.json()
+    client = _get_client()
+    resp = await client.get(
+        f"/api/dcim/devices/{device_id}/napalm/",
+        params=params,
+        headers=_headers(),
+        timeout=60,
+    )
+    resp.raise_for_status()
+    return resp.json()
 
 
 async def upsert_endpoint_ip(ip: str, endpoint: dict) -> dict:
@@ -809,57 +884,57 @@ async def upsert_endpoint_ip(ip: str, endpoint: dict) -> dict:
 
     address = f"{ip}/32"
 
-    async with httpx.AsyncClient(base_url=NAUTOBOT_URL, timeout=15) as client:
-        resp = await client.get(
-            f"/api/ipam/ip-addresses/?address={ip}&limit=5",
-            headers=_headers(),
+    client = _get_client()
+    resp = await client.get(
+        f"/api/ipam/ip-addresses/?address={ip}&limit=5",
+        headers=_headers(),
+    )
+    resp.raise_for_status()
+    results = resp.json().get("results", [])
+
+    if results:
+        existing = results[0]
+        existing_cf = existing.get("custom_fields", {})
+        if existing_cf.get("discovery_classification"):
+            custom_fields["endpoint_data_source"] = "both"
+
+        resp = await client.patch(
+            f"/api/ipam/ip-addresses/{existing['id']}/",
+            headers={**_headers(), "Content-Type": "application/json"},
+            json={"custom_fields": custom_fields},
         )
         resp.raise_for_status()
-        results = resp.json().get("results", [])
+        log.debug("upsert_endpoint_ip", "Updated endpoint IP", context={"ip": ip, "action": "update"})
+        return resp.json()
+    else:
+        custom_fields["discovery_first_seen"] = endpoint.get("first_seen", "")
+        custom_fields["discovery_method"] = "infrastructure"
 
-        if results:
-            existing = results[0]
-            existing_cf = existing.get("custom_fields", {})
-            if existing_cf.get("discovery_classification"):
-                custom_fields["endpoint_data_source"] = "both"
+        active_status_id = None
+        for s in await get_statuses():
+            if s.get("name") == "Active":
+                active_status_id = s["id"]
+                break
 
-            resp = await client.patch(
-                f"/api/ipam/ip-addresses/{existing['id']}/",
-                headers={**_headers(), "Content-Type": "application/json"},
-                json={"custom_fields": custom_fields},
-            )
-            resp.raise_for_status()
-            log.debug("upsert_endpoint_ip", "Updated endpoint IP", context={"ip": ip, "action": "update"})
-            return resp.json()
-        else:
-            custom_fields["discovery_first_seen"] = endpoint.get("first_seen", "")
-            custom_fields["discovery_method"] = "infrastructure"
+        ns_id = None
+        for ns in await get_namespaces():
+            if ns.get("name") == "Global":
+                ns_id = ns["id"]
+                break
 
-            active_status_id = None
-            for s in await get_statuses():
-                if s.get("name") == "Active":
-                    active_status_id = s["id"]
-                    break
+        payload: dict = {
+            "address": address,
+            "status": active_status_id,
+            "custom_fields": custom_fields,
+        }
+        if ns_id:
+            payload["namespace"] = ns_id
 
-            ns_id = None
-            for ns in await get_namespaces():
-                if ns.get("name") == "Global":
-                    ns_id = ns["id"]
-                    break
-
-            payload: dict = {
-                "address": address,
-                "status": active_status_id,
-                "custom_fields": custom_fields,
-            }
-            if ns_id:
-                payload["namespace"] = ns_id
-
-            resp = await client.post(
-                "/api/ipam/ip-addresses/",
-                headers={**_headers(), "Content-Type": "application/json"},
-                json=payload,
-            )
-            resp.raise_for_status()
-            log.debug("upsert_endpoint_ip", "Created endpoint IP", context={"ip": ip, "action": "create"})
-            return resp.json()
+        resp = await client.post(
+            "/api/ipam/ip-addresses/",
+            headers={**_headers(), "Content-Type": "application/json"},
+            json=payload,
+        )
+        resp.raise_for_status()
+        log.debug("upsert_endpoint_ip", "Created endpoint IP", context={"ip": ip, "action": "create"})
+        return resp.json()

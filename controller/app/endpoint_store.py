@@ -11,9 +11,7 @@ import json
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterable
-
-from sqlalchemy import and_, delete, func, select
+from sqlalchemy import delete, func, select
 
 from app import db
 from app.logging_config import StructuredLogger

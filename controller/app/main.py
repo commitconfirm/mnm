@@ -6,11 +6,10 @@ import hmac
 import os
 import platform
 import secrets
-import sys
 import time
 
 from fastapi import FastAPI, HTTPException, Request, Response, Depends
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -19,7 +18,7 @@ from app.logging_config import StructuredLogger, setup_logging, get_recent_logs
 # Initialize structured logging before anything else
 setup_logging()
 
-from app import auto_discover, db, discovery, docker_manager, endpoint_collector, endpoint_store, nautobot_client, polling
+from app import auto_discover, db, discovery, docker_manager, endpoint_store, nautobot_client, polling
 from app.connectors import proxmox as proxmox_connector
 from app.config import (
     DATA_DIR, load_config, load_config_async, save_config, save_config_async,
@@ -159,19 +158,20 @@ async def on_startup():
 
     # Launch background tasks
     asyncio.create_task(discovery.scheduled_sweep_loop())
-    if os.getenv("MNM_LEGACY_COLLECTOR", "false").lower() == "true":
-        # Legacy monolithic endpoint collector — replaced by modular polling (polling.py).
-        # Enable with MNM_LEGACY_COLLECTOR=true if needed during transition.
-        asyncio.create_task(endpoint_collector.scheduled_collection_loop())
     asyncio.create_task(polling.poll_loop())
     asyncio.create_task(proxmox_connector.scheduled_loop())
     asyncio.create_task(_scheduled_prune_loop())
     log.info("background_tasks",
              "Background tasks launched: sweep scheduler, modular poller, proxmox connector, prune loop",
              context={"proxmox_configured": proxmox_connector.is_configured(),
-                      "legacy_collector": os.getenv("MNM_LEGACY_COLLECTOR", "false"),
                       "retention_days": _retention_days(),
                       "prune_interval_hours": _prune_interval_hours()})
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    await nautobot_client.close_client()
+    log.info("shutdown", "MNM Controller shutting down")
 
 
 # -------------------------------------------------------------------------
@@ -187,8 +187,8 @@ async def health():
         pass
     healthy = sum(1 for c in containers if c.get("health") == "healthy")
 
-    ep_state = endpoint_collector.get_collection_state()
     sweep_state = discovery.get_sweep_state()
+    poll_state = polling.get_poll_state()
     ep_count = 0
     if db.is_ready():
         try:
@@ -205,7 +205,7 @@ async def health():
         "containers_healthy": healthy,
         "db_connected": db.is_ready(),
         "last_sweep": sweep_state.get("finished_at"),
-        "last_collection": ep_state.get("last_run"),
+        "last_poll": poll_state.get("last_check"),
         "endpoints_tracked": ep_count,
         "log_level": os.environ.get("MNM_LOG_LEVEL", "INFO"),
     }
@@ -926,7 +926,7 @@ async def api_logs_export():
     except Exception as e:
         containers = [{"error": str(e)}]
     sweep = discovery.get_sweep_state()
-    coll = endpoint_collector.get_collection_state()
+    poll = polling.get_poll_state()
     bundle = {
         "mnm_version": MNM_VERSION,
         "exported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -942,11 +942,10 @@ async def api_logs_export():
             "finished_at": sweep.get("finished_at"),
             "summary": sweep.get("summary"),
         },
-        "last_collection": {
-            "running": coll.get("running"),
-            "last_run": coll.get("last_run"),
-            "summary": coll.get("summary"),
-            "errors": coll.get("errors", [])[-50:],
+        "modular_poller": {
+            "running": poll.get("running"),
+            "last_check": poll.get("last_check"),
+            "polls_dispatched": poll.get("polls_dispatched", 0),
         },
         "log_count": len(entries),
         "logs": entries,
@@ -1010,7 +1009,7 @@ async def get_endpoints(
 @app.get("/api/endpoints/summary", dependencies=[Depends(require_auth)])
 async def endpoints_summary():
     """Return summary stats for endpoint collection."""
-    state = endpoint_collector.get_collection_state()
+    poll_state = polling.get_poll_state()
     endpoints = await _all_endpoints()
 
     vlans = {e.get("vlan") for e in endpoints if e.get("vlan")}
@@ -1022,8 +1021,8 @@ async def endpoints_summary():
         "vlans_active": len(vlans),
         "vendors_seen": len(vendors),
         "switches": len(switches),
-        "last_collection": state.get("last_run"),
-        "running": state.get("running", False),
+        "last_collection": poll_state.get("last_check"),
+        "running": poll_state.get("running", False),
     }
 
 
@@ -1182,19 +1181,29 @@ async def endpoint_timeline(mac: str):
 
 @app.get("/api/endpoints/collection-status", dependencies=[Depends(require_auth)])
 async def collection_status():
-    """Return collection progress for the progress bar."""
-    return endpoint_collector.get_collection_state()
+    """Return collection progress (backed by modular poller state)."""
+    return polling.get_poll_state()
 
 
 @app.post("/api/endpoints/collect", dependencies=[Depends(require_auth)])
 async def trigger_collection():
-    """Manually trigger an endpoint collection run."""
-    state = endpoint_collector.get_collection_state()
-    if state.get("running"):
-        raise HTTPException(status_code=409, detail="Collection already running")
-
-    asyncio.create_task(endpoint_collector.collect_all())
-    return {"status": "started"}
+    """Trigger an immediate poll cycle on all devices."""
+    poll_state = polling.get_poll_state()
+    if poll_state.get("running"):
+        raise HTTPException(status_code=409, detail="Poll cycle already running")
+    # Trigger all devices by setting their next_due to now
+    try:
+        devices = await nautobot_client.get_devices()
+        triggered = 0
+        for dev in devices:
+            name = dev.get("name")
+            if name:
+                count = await polling.trigger_device(name)
+                if count:
+                    triggered += 1
+        return {"status": "started", "devices_triggered": triggered}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # -------------------------------------------------------------------------
@@ -1833,12 +1842,6 @@ async def get_node(node_name: str):
     }
 
 
-# Deprecation redirect: /api/devices/ → /api/nodes/
-@app.get("/api/devices", include_in_schema=False)
-async def deprecated_devices_redirect():
-    """Deprecated: use /api/nodes/ instead."""
-    return RedirectResponse(url="/api/nodes", status_code=301)
-
 
 # -------------------------------------------------------------------------
 # Routes — routing table data collected from nodes
@@ -1953,10 +1956,6 @@ async def list_jobs():
         if schedules else None
     )
 
-    # --- Endpoint Collector ---
-    ep = endpoint_collector.get_collection_state()
-    ep_interval = config.get("endpoint_collection_interval_minutes", 15)
-
     # --- Proxmox Collector ---
     px = proxmox_connector.get_state()
     px_interval = proxmox_connector.PROXMOX_INTERVAL_SECONDS
@@ -1980,21 +1979,6 @@ async def list_jobs():
             "trigger_url": "/api/discover/sweep-scheduled",
             "schedule_count": len(schedules),
             "enabled": len(schedules) > 0,
-        },
-        {
-            "id": "endpoint_collector",
-            "name": "Endpoint Collector (legacy)",
-            "description": "Monolithic ARP/MAC collection — replaced by Modular Poller",
-            "status": "running" if ep.get("running") else "idle",
-            "running": ep.get("running", False),
-            "schedule_interval": f"{ep_interval}m",
-            "schedule_seconds": ep_interval * 60,
-            "last_run": ep.get("last_run"),
-            "duration_seconds": (ep.get("summary") or {}).get("duration_seconds"),
-            "summary": ep.get("summary"),
-            "error": (ep.get("errors") or [None])[-1],
-            "trigger_url": "/api/endpoints/collect",
-            "enabled": os.getenv("MNM_LEGACY_COLLECTOR", "false").lower() == "true",
         },
         {
             "id": "proxmox_collector",
