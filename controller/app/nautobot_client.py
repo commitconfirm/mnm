@@ -28,11 +28,15 @@ _api_token: str | None = None
 _client: httpx.AsyncClient | None = None
 
 
+_DEFAULT_TIMEOUT = httpx.Timeout(connect=30, read=120, write=30, pool=10)
+_NAPALM_TIMEOUT = httpx.Timeout(connect=30, read=180, write=30, pool=10)
+
+
 def _get_client() -> httpx.AsyncClient:
     """Return the shared httpx client, creating it lazily on first use."""
     global _client
     if _client is None or _client.is_closed:
-        _client = httpx.AsyncClient(base_url=NAUTOBOT_URL, timeout=15)
+        _client = httpx.AsyncClient(base_url=NAUTOBOT_URL, timeout=_DEFAULT_TIMEOUT)
     return _client
 
 
@@ -175,7 +179,6 @@ async def get_device_interface_subnets() -> set[str]:
             resp = await client.get(
                 f"/api/ipam/ip-addresses/?interfaces={ifc_id}&limit=50",
                 headers=_headers(),
-                timeout=30,
             )
             if resp.status_code != 200:
                 continue
@@ -241,7 +244,7 @@ async def get_locations() -> list[dict]:
 async def get_cables() -> list[dict]:
     """Get cable connections to identify LLDP neighbors."""
     client = _get_client()
-    resp = await client.get("/api/dcim/cables/?limit=1000", headers=_headers(), timeout=30)
+    resp = await client.get("/api/dcim/cables/?limit=1000", headers=_headers())
     resp.raise_for_status()
     return resp.json().get("results", [])
 
@@ -345,7 +348,7 @@ async def get_uplinks() -> set[tuple[str, str]]:
                 f"/api/dcim/devices/{dev_id}/napalm/",
                 params={"method": "get_lldp_neighbors"},
                 headers=_headers(),
-                timeout=60,
+                timeout=_NAPALM_TIMEOUT,
             )
             if resp.status_code != 200:
                 return set()
@@ -411,7 +414,6 @@ async def submit_onboarding_job(
     jobs_resp = await client.get(
         "/api/extras/jobs/?name=Perform+Device+Onboarding+(Original)",
         headers=_headers(),
-        timeout=30,
     )
     jobs_resp.raise_for_status()
     jobs = jobs_resp.json().get("results", [])
@@ -420,7 +422,6 @@ async def submit_onboarding_job(
         jobs_resp = await client.get(
             "/api/extras/jobs/?name=Sync+Devices+From+Network",
             headers=_headers(),
-            timeout=30,
         )
         jobs_resp.raise_for_status()
         jobs = jobs_resp.json().get("results", [])
@@ -457,7 +458,6 @@ async def submit_onboarding_job(
         f"/api/extras/jobs/{job_id}/run/",
         headers={**_headers(), "Content-Type": "application/json"},
         json={"data": job_data},
-        timeout=30,
     )
     resp.raise_for_status()
     # Bust device cache since a new device may be created
@@ -573,7 +573,6 @@ async def submit_sync_network_data(
     jobs_resp = await client.get(
         "/api/extras/jobs/?name=Sync+Network+Data+From+Network",
         headers=_headers(),
-        timeout=30,
     )
     jobs_resp.raise_for_status()
     jobs = jobs_resp.json().get("results", [])
@@ -629,7 +628,6 @@ async def submit_sync_network_data(
             "schedule": {"interval": "immediately"},
             "task_queue": "default",
         },
-        timeout=30,
     )
     if resp.status_code >= 400:
         body = ""
@@ -856,7 +854,7 @@ async def napalm_get(device_id: str, method: str, **kwargs) -> dict:
         f"/api/dcim/devices/{device_id}/napalm/",
         params=params,
         headers=_headers(),
-        timeout=60,
+        timeout=_NAPALM_TIMEOUT,
     )
     resp.raise_for_status()
     return resp.json()
