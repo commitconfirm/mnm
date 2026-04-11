@@ -1267,39 +1267,175 @@ def _detect_platform(snmp_data: dict) -> str | None:
 
 
 async def _ensure_primary_ip(ip: str) -> None:
-    """Ensure the newly onboarded device has a primary IP set.
+    """Ensure the newly onboarded device has its management IP set as primary.
 
-    After onboarding, the device may not have its primary_ip4 set.
-    NAPALM tabs (Status, LLDP, Configuration) need this to connect.
+    After onboarding, the device may exist in Nautobot but without a
+    primary_ip4 — which is needed for NAPALM connections, SNMP polling,
+    and the /api/nodes display.
+
+    Runs a Django ORM script inside the Nautobot container via nbshell.
+    The script finds/creates the IP, assigns it to a management interface,
+    and sets it as primary_ip4.
     """
     import docker as _docker
+    import io
+    import tarfile
 
-    # Find the device by checking which device was just created for this IP
-    # Use docker exec into nautobot to set it directly (API has location validation issues)
+    repair_code = f"""\
+import sys
+from nautobot.dcim.models import Device, Interface
+from nautobot.ipam.models import IPAddress, Namespace, Prefix
+from nautobot.extras.models import Status
+from netaddr import IPNetwork
+ip_str = '{ip}'
+dev = None
+for ipa in IPAddress.objects.filter(host=ip_str):
+    for iface in ipa.interfaces.all():
+        if iface.device:
+            dev = iface.device
+            break
+    if dev:
+        break
+if not dev:
+    candidates = Device.objects.filter(primary_ip4__isnull=True).order_by('-created')
+    if candidates.exists():
+        dev = candidates.first()
+if not dev:
+    sys.stderr.write('NO_DEVICE: ' + ip_str + chr(10))
+elif dev.primary_ip4:
+    sys.stderr.write('ALREADY_SET: ' + dev.name + chr(10))
+else:
+    active = Status.objects.get(name='Active')
+    ns = Namespace.objects.get(name='Global')
+    prefix_str = str(IPNetwork(ip_str + '/24').network) + '/24'
+    pfx, _ = Prefix.objects.get_or_create(prefix=prefix_str, namespace=ns, defaults={{'status': active}})
+    ipa, _ = IPAddress.objects.get_or_create(host=ip_str, mask_length=32, parent=pfx, defaults={{'status': active}})
+    mgmt_iface = None
+    for iface in Interface.objects.filter(device=dev).order_by('name'):
+        iname = iface.name.lower()
+        if any(x in iname for x in ['mgmt', 'me0', 'fxp0', 'em0', 'management', 'vme']):
+            mgmt_iface = iface
+            break
+    if not mgmt_iface:
+        mgmt_iface = Interface.objects.filter(device=dev).order_by('name').first()
+    if mgmt_iface:
+        if ipa not in mgmt_iface.ip_addresses.all():
+            mgmt_iface.ip_addresses.add(ipa)
+        dev.primary_ip4 = ipa
+        dev.validated_save()
+        sys.stderr.write('SET: ' + dev.name + ' -> ' + str(ipa) + ' on ' + mgmt_iface.name + chr(10))
+    else:
+        sys.stderr.write('NO_INTERFACE: ' + dev.name + chr(10))
+"""
     try:
         client = _docker.from_env()
         container = client.containers.get("mnm-nautobot")
-        script = f'''echo "
-from nautobot.dcim.models import Device
-from nautobot.ipam.models import IPAddress
-# Find IP address matching {ip}
-ips = IPAddress.objects.all()
-for addr in ips:
-    if '{ip}' in str(addr.address):
-        # Find device without primary_ip4 that was recently created
-        for dev in Device.objects.filter(primary_ip4__isnull=True):
-            dev.primary_ip4 = addr
-            dev.save()
-            import sys; sys.stderr.write(f'Set primary_ip4={{addr}} on {{dev.name}}' + chr(10))
-            break
-        break
-" | nautobot-server nbshell'''
-        result = container.exec_run(["bash", "-c", script], stderr=True)
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode='w') as tar:
+            script_bytes = repair_code.encode('utf-8')
+            info = tarfile.TarInfo(name='_set_pip.py')
+            info.size = len(script_bytes)
+            tar.addfile(info, io.BytesIO(script_bytes))
+        buf.seek(0)
+        container.put_archive('/tmp', buf)
+        result = container.exec_run(
+            ["nautobot-server", "nbshell", "--command", "exec(open('/tmp/_set_pip.py').read())"],
+            stderr=True,
+        )
         output = result.output.decode("utf-8", errors="replace")
-        if "Set primary_ip4" in output:
-            log.info("primary_ip_set", f"Set primary IP for device at {ip}")
+        if "SET:" in output:
+            log.info("primary_ip_set", f"Set primary IP for device at {ip}",
+                     context={"output": output.strip()[-300:]})
+        elif "ALREADY_SET:" in output:
+            log.debug("primary_ip_exists", f"Device at {ip} already has primary IP")
+        else:
+            log.warning("primary_ip_issue", f"Primary IP assignment issue",
+                        context={"ip": ip, "output": output.strip()[-300:]})
     except Exception as exc:
-        log.debug("primary_ip_skip", f"Could not set primary IP: {exc}")
+        log.warning("primary_ip_failed", f"Could not set primary IP: {exc}",
+                    context={"ip": ip, "error": str(exc)})
+
+
+async def repair_missing_primary_ips() -> dict:
+    """Startup repair: find onboarded devices without primary_ip4 and fix them.
+
+    Called once at startup to handle devices onboarded before this fix existed.
+    Uses docker exec into nautobot container to run a Django script via nbshell.
+    Returns summary of actions taken.
+    """
+    import docker as _docker
+    import tempfile
+    import os
+
+    # Write the repair script to a temp file on the host, then copy into container
+    repair_code = """\
+import sys
+from nautobot.dcim.models import Device, Interface
+from nautobot.ipam.models import IPAddress
+fixed = 0
+skipped = 0
+failed = 0
+for dev in Device.objects.filter(primary_ip4__isnull=True):
+    mgmt_ip = None
+    mgmt_iface = None
+    for iface in Interface.objects.filter(device=dev).order_by('name'):
+        for ipa in iface.ip_addresses.all():
+            mgmt_ip = ipa
+            mgmt_iface = iface
+            break
+        if mgmt_ip:
+            break
+    if mgmt_ip:
+        dev.primary_ip4 = mgmt_ip
+        try:
+            dev.validated_save()
+            sys.stderr.write('FIXED: ' + dev.name + ' -> ' + str(mgmt_ip) + chr(10))
+            fixed += 1
+        except Exception as e:
+            sys.stderr.write('FAIL: ' + dev.name + ': ' + str(e) + chr(10))
+            failed += 1
+    else:
+        sys.stderr.write('SKIP: ' + dev.name + ' has no IP on any interface' + chr(10))
+        skipped += 1
+sys.stderr.write('SUMMARY: fixed=' + str(fixed) + ' skipped=' + str(skipped) + ' failed=' + str(failed) + chr(10))
+"""
+    try:
+        client = _docker.from_env()
+        container = client.containers.get("mnm-nautobot")
+
+        # Use put_archive to copy script into container (avoids heredoc issues)
+        import io
+        import tarfile
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode='w') as tar:
+            script_bytes = repair_code.encode('utf-8')
+            info = tarfile.TarInfo(name='_repair_ips.py')
+            info.size = len(script_bytes)
+            tar.addfile(info, io.BytesIO(script_bytes))
+        buf.seek(0)
+        container.put_archive('/tmp', buf)
+
+        result = container.exec_run(
+            ["nautobot-server", "nbshell", "--command", "exec(open('/tmp/_repair_ips.py').read())"],
+            stderr=True,
+        )
+        output = result.output.decode("utf-8", errors="replace")
+        log.info("primary_ip_repair", "Primary IP repair completed",
+                 context={"output": output.strip()[-500:]})
+
+        summary: dict = {"fixed": 0, "skipped": 0, "failed": 0}
+        for line in output.splitlines():
+            if "SUMMARY:" in line:
+                import re
+                for k in ("fixed", "skipped", "failed"):
+                    m = re.search(f"{k}=(\\d+)", line)
+                    if m:
+                        summary[k] = int(m.group(1))
+        return summary
+    except Exception as exc:
+        log.warning("primary_ip_repair_failed", "Primary IP repair failed",
+                    context={"error": str(exc)})
+        return {"fixed": 0, "skipped": 0, "failed": 0, "error": str(exc)}
 
 
 async def _onboard_host(

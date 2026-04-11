@@ -136,6 +136,27 @@ async def on_startup():
         "endpoints_in_db": (await endpoint_store.count_endpoints()) if db.is_ready() else 0,
     })
 
+    # Repair missing primary IPs on onboarded devices (Phase 2.8 fix)
+    try:
+        repair = await discovery.repair_missing_primary_ips()
+        if repair.get("fixed"):
+            log.info("primary_ip_repair_done", "Repaired missing primary IPs",
+                     context=repair)
+    except Exception as e:
+        log.warning("primary_ip_repair_error", "Primary IP repair failed at startup",
+                    context={"error": str(e)})
+
+    # Seed any missing poll job types for existing devices (e.g. routes, bgp added after initial onboarding)
+    try:
+        devices = await nautobot_client.get_devices()
+        for dev in devices:
+            name = dev.get("name")
+            if name:
+                await polling.ensure_device_polls(name)
+    except Exception as e:
+        log.warning("poll_seed_startup", "Failed to seed missing poll types",
+                    context={"error": str(e)})
+
     # Launch background tasks
     asyncio.create_task(discovery.scheduled_sweep_loop())
     if os.getenv("MNM_LEGACY_COLLECTOR", "false").lower() == "true":
@@ -1608,23 +1629,35 @@ async def list_nodes():
 
 @app.get("/api/nodes/macs", dependencies=[Depends(require_auth)])
 async def node_macs():
-    """Return set of MAC addresses belonging to onboarded nodes.
+    """Return MAC addresses and IPs belonging to onboarded nodes.
 
     Used by the endpoints page to filter out infrastructure devices
-    so that only passively-discovered endpoints are shown.
+    so that only passively-discovered endpoints are shown. Returns both
+    MACs (from interfaces) and IPs (from primary_ip4) since Nautobot
+    may not populate MAC addresses for all device interfaces.
     """
     poll_rows = await polling.get_all_poll_status()
     node_names = {r["device_name"] for r in poll_rows}
     if not node_names:
-        return {"macs": []}
+        return {"macs": [], "ips": []}
 
-    # Get interfaces for each node from Nautobot to find their MACs
     macs = set()
+    ips = set()
     try:
         devices = await nautobot_client.get_devices()
         for dev in devices:
             if dev.get("name") not in node_names:
                 continue
+
+            # Collect primary IP
+            pip = dev.get("primary_ip4") or {}
+            if isinstance(pip, dict):
+                addr = pip.get("display") or pip.get("address") or ""
+                host = addr.split("/")[0] if "/" in addr else addr
+                if host:
+                    ips.add(host)
+
+            # Collect interface MACs
             dev_id = dev.get("id")
             if not dev_id:
                 continue
@@ -1637,10 +1670,10 @@ async def node_macs():
             except Exception:
                 pass
     except Exception as exc:
-        log.warning("node_macs_failed", "Could not fetch node MACs",
+        log.warning("node_identifiers_failed", "Could not fetch node identifiers",
                     context={"error": str(exc)})
 
-    return {"macs": sorted(macs)}
+    return {"macs": sorted(macs), "ips": sorted(ips)}
 
 
 @app.get("/api/nodes/{node_name}", dependencies=[Depends(require_auth)])

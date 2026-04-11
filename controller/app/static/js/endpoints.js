@@ -4,6 +4,7 @@ let allEndpoints = [];
 let refreshTimer = null;
 let excludedIpSet = new Set();
 let nodeMacSet = new Set();
+let nodeIpSet = new Set();
 
 async function loadExcludedIps() {
   try {
@@ -16,12 +17,13 @@ async function loadExcludedIps() {
   } catch (e) { /* non-fatal — table renders without strikethrough */ }
 }
 
-async function loadNodeMacs() {
+async function loadNodeIdentifiers() {
   try {
     const r = await fetch('/api/nodes/macs');
     if (!r.ok) return;
     const data = await r.json();
     nodeMacSet = new Set((data.macs || []).map(m => m.toUpperCase()));
+    nodeIpSet = new Set(data.ips || []);
   } catch (e) { /* non-fatal — endpoints render unfiltered */ }
 }
 
@@ -103,10 +105,11 @@ async function loadEndpoints() {
     const resp = await fetch('/api/endpoints');
     if (resp.status === 401) { window.location.href = '/login'; return; }
     const data = await resp.json();
-    // Filter out onboarded node MACs — endpoints page shows passively-discovered only
+    // Filter out onboarded nodes — endpoints page shows passively-discovered only
+    // Match by MAC (if Nautobot has interface MACs) OR by IP (primary_ip4)
     const raw = data.endpoints || [];
-    allEndpoints = nodeMacSet.size > 0
-      ? raw.filter(ep => !nodeMacSet.has((ep.mac || '').toUpperCase()))
+    allEndpoints = (nodeMacSet.size > 0 || nodeIpSet.size > 0)
+      ? raw.filter(ep => !nodeMacSet.has((ep.mac || '').toUpperCase()) && !nodeIpSet.has(ep.ip || ''))
       : raw;
     populateFilters();
     applyFiltersAndRender();
@@ -357,7 +360,7 @@ document.getElementById('watch-add-btn').addEventListener('click', async () => {
 
 checkAuth().then(async () => {
   await loadExcludedIps();  // populate set before first table render
-  await loadNodeMacs();     // filter out infrastructure node MACs
+  await loadNodeIdentifiers();  // filter out infrastructure nodes by MAC and IP
   loadSummary();
   loadEndpoints();
   loadHistory();

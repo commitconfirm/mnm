@@ -60,7 +60,9 @@ def _headers() -> dict:
 async def get_devices() -> list[dict]:
     t0 = time.monotonic()
     async with httpx.AsyncClient(base_url=NAUTOBOT_URL, timeout=15) as client:
-        resp = await client.get("/api/dcim/devices/?limit=1000", headers=_headers())
+        # depth=1 ensures nested objects (primary_ip4, platform, location, role)
+        # include display/address fields, not just id/url references.
+        resp = await client.get("/api/dcim/devices/?limit=1000&depth=1", headers=_headers())
         resp.raise_for_status()
         results = resp.json().get("results", [])
         log.debug("api_call", "GET devices", context={"path": "/api/dcim/devices/", "status": resp.status_code, "count": len(results), "duration_ms": round((time.monotonic() - t0) * 1000)})

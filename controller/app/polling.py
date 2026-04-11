@@ -367,56 +367,59 @@ async def collect_lldp(device_name: str, device_id: str) -> dict:
                 "error": err, "count": 0, "duration": duration}
 
 
-async def collect_routes(device_name: str, device_id: str) -> dict:
-    """Collect routing table from one device via NAPALM.
+async def collect_routes(device_name: str, device_id: str,
+                         device_ip: str | None = None) -> dict:
+    """Collect routing table from one device using tiered fallback.
 
-    Strategy:
-      1. Try get_route_to with destination=0.0.0.0/0 — on Junos (PyEZ) this
-         returns the full routing table via RPC get-route-information.
-      2. If that returns too little data, try get_network_instances to get
-         VRF info and tag routes accordingly.
-      3. Parse the NAPALM-format route dict into flat route rows.
+    Tier 1: NAPALM get_route_to (structured, but requires destination arg
+             which the Nautobot proxy may not support)
+    Tier 2: Direct SNMP walk of ipCidrRouteTable / inetCidrRouteTable
+             (universal, reliable, works across all vendors with SNMP)
+    Tier 3: Reserved for future CLI fallback
 
-    NAPALM get_route_to returns: {prefix: [{protocol, next_hop, ...}, ...]}.
+    Stops at the first tier that returns data.
     """
     t0 = time.monotonic()
     await _mark_attempt(device_name, "routes")
+    tier_used = "none"
+
     try:
-        # NAPALM get_route_to — Junos driver returns full RIB for 0.0.0.0/0
-        data = await nautobot_client.napalm_get(device_id, "get_route_to")
-        raw_routes = data.get("get_route_to", {})
+        routes: list[dict] = []
 
-        routes = []
-        for prefix, entries in raw_routes.items():
-            if not isinstance(entries, list):
-                continue
-            for entry in entries:
-                next_hop = entry.get("next_hop", "")
-                protocol = entry.get("protocol", "unknown")
-                # Normalize protocol names
-                proto_lower = protocol.lower()
-                if "direct" in proto_lower or "connected" in proto_lower or "local" in proto_lower:
-                    protocol = "connected" if "local" not in proto_lower else "local"
-                elif "static" in proto_lower:
-                    protocol = "static"
-                elif "ospf" in proto_lower:
-                    protocol = "ospf"
-                elif "bgp" in proto_lower:
-                    protocol = "bgp"
-                elif "isis" in proto_lower:
-                    protocol = "isis"
+        # --- Tier 1: NAPALM get_route_to ---
+        try:
+            data = await nautobot_client.napalm_get(device_id, "get_route_to")
+            raw_routes = data.get("get_route_to", {})
+            # Check for error response (Junos returns {"error": "..."} when no destination given)
+            if isinstance(raw_routes, dict) and "error" not in raw_routes and raw_routes:
+                for prefix, entries in raw_routes.items():
+                    if not isinstance(entries, list):
+                        continue
+                    for entry in entries:
+                        routes.append(_parse_napalm_route(device_name, prefix, entry))
+                if routes:
+                    tier_used = "napalm"
+                    log.debug("poll_routes_tier1", "NAPALM get_route_to succeeded",
+                              context={"device": device_name, "routes": len(routes)})
+        except Exception as exc:
+            log.debug("poll_routes_tier1_failed", "NAPALM route collection failed, trying SNMP",
+                      context={"device": device_name, "error": str(exc)[:200]})
 
-                routes.append({
-                    "node_name": device_name,
-                    "prefix": prefix,
-                    "next_hop": next_hop or "",
-                    "protocol": protocol,
-                    "vrf": "default",
-                    "metric": entry.get("metric"),
-                    "preference": entry.get("preference") or entry.get("administrative_distance"),
-                    "outgoing_interface": entry.get("outgoing_interface") or entry.get("interface"),
-                    "active": entry.get("current_active", True),
-                })
+        # --- Tier 2: SNMP route table walk ---
+        if not routes and device_ip:
+            try:
+                snmp_routes = await _collect_routes_snmp(device_name, device_ip)
+                if snmp_routes:
+                    routes = snmp_routes
+                    tier_used = "snmp"
+            except Exception as exc:
+                log.debug("poll_routes_tier2_failed", "SNMP route collection failed",
+                          context={"device": device_name, "error": str(exc)[:200]})
+
+        if not routes:
+            tier_used = "none"
+            log.info("poll_routes_empty", "No routes collected from any tier",
+                     context={"device": device_name, "has_ip": bool(device_ip)})
 
         # Upsert in bulk
         count = await endpoint_store.upsert_routes_bulk(routes)
@@ -424,9 +427,10 @@ async def collect_routes(device_name: str, device_id: str) -> dict:
         duration = time.monotonic() - t0
         await _mark_success(device_name, "routes", duration)
         log.info("poll_routes_done", "Route collection complete",
-                 context={"device": device_name, "routes": count, "duration": round(duration, 1)})
+                 context={"device": device_name, "routes": count,
+                          "tier": tier_used, "duration": round(duration, 1)})
         return {"device_name": device_name, "job_type": "routes", "success": True,
-                "count": count, "duration": duration}
+                "count": count, "duration": duration, "tier": tier_used}
     except Exception as exc:
         duration = time.monotonic() - t0
         err = str(exc)[:500]
@@ -435,6 +439,230 @@ async def collect_routes(device_name: str, device_id: str) -> dict:
                     context={"device": device_name, "error": err})
         return {"device_name": device_name, "job_type": "routes", "success": False,
                 "error": err, "count": 0, "duration": duration}
+
+
+def _parse_napalm_route(device_name: str, prefix: str, entry: dict) -> dict:
+    """Parse a single NAPALM route entry into our standard dict."""
+    protocol = entry.get("protocol", "unknown")
+    proto_lower = protocol.lower()
+    if "direct" in proto_lower or "connected" in proto_lower or "local" in proto_lower:
+        protocol = "connected" if "local" not in proto_lower else "local"
+    elif "static" in proto_lower:
+        protocol = "static"
+    elif "ospf" in proto_lower:
+        protocol = "ospf"
+    elif "bgp" in proto_lower:
+        protocol = "bgp"
+    elif "isis" in proto_lower:
+        protocol = "isis"
+    return {
+        "node_name": device_name,
+        "prefix": prefix,
+        "next_hop": entry.get("next_hop", "") or "",
+        "protocol": protocol,
+        "vrf": "default",
+        "metric": entry.get("metric"),
+        "preference": entry.get("preference") or entry.get("administrative_distance"),
+        "outgoing_interface": entry.get("outgoing_interface") or entry.get("interface"),
+        "active": entry.get("current_active", True),
+    }
+
+
+# SNMP route protocol integer → string mapping (RFC 4292 / RFC 2096)
+_SNMP_ROUTE_PROTO = {
+    1: "other", 2: "local", 3: "static", 4: "icmp",
+    8: "rip", 9: "igrp", 10: "eigrp", 11: "ospf",
+    12: "ospf", 13: "ospf", 14: "bgp", 15: "bgp",
+    16: "idpr", 17: "idrp",
+}
+
+
+async def _collect_routes_snmp(device_name: str, device_ip: str) -> list[dict]:
+    """Collect routes via direct SNMP walk of the IP routing MIBs.
+
+    This is the first direct-to-device SNMP path in the controller (distinct
+    from snmp_exporter which is Prometheus-native). Uses pysnmp async HLAPI
+    with bulkCmd for efficiency.
+
+    Tries MIBs in order:
+      1. ipCidrRouteTable (1.3.6.1.2.1.4.24.4) — RFC 2096, widely supported
+      2. ipRouteTable (1.3.6.1.2.1.4.21) — RFC 1213 legacy fallback
+    """
+    community = os.environ.get("SNMP_COMMUNITY", "public")
+    routes: list[dict] = []
+
+    # Try ipCidrRouteTable first (RFC 2096: 1.3.6.1.2.1.4.24.4)
+    routes = await _snmp_walk_ip_cidr_route(device_name, device_ip, community)
+    if routes:
+        log.debug("poll_routes_snmp_cidr", "SNMP ipCidrRouteTable walk succeeded",
+                  context={"device": device_name, "routes": len(routes)})
+        return routes
+
+    # Fallback: ipRouteTable (RFC 1213: 1.3.6.1.2.1.4.21)
+    routes = await _snmp_walk_ip_route(device_name, device_ip, community)
+    if routes:
+        log.debug("poll_routes_snmp_legacy", "SNMP ipRouteTable walk succeeded",
+                  context={"device": device_name, "routes": len(routes)})
+    return routes
+
+
+async def _snmp_walk(device_ip: str, community: str, base_oid: str,
+                     max_rows: int = 5000) -> list[tuple[str, object]]:
+    """Walk an SNMP table via repeated bulkCmd calls.
+
+    pysnmp 6.x bulkCmd returns a single (errI, errS, errIdx, varBinds) tuple
+    per call — not an async iterator. We loop manually, advancing the OID
+    on each call.
+
+    Returns list of (oid_string, value) tuples.
+    """
+    from pysnmp.hlapi.asyncio import (
+        CommunityData, ContextData, ObjectIdentity, ObjectType,
+        SnmpEngine, UdpTransportTarget, bulkCmd,
+    )
+
+    engine = SnmpEngine()
+    target = UdpTransportTarget((device_ip, 161), timeout=10, retries=1)
+    results: list[tuple[str, object]] = []
+    oid_cursor = ObjectType(ObjectIdentity(base_oid))
+
+    for _ in range(max_rows // 25 + 1):
+        errI, errS, errIdx, varBinds = await bulkCmd(
+            engine, CommunityData(community), target, ContextData(),
+            0, 25, oid_cursor,
+        )
+        if errI or errS:
+            break
+        if not varBinds:
+            break
+
+        out_of_scope = False
+        last_ot = None
+        for item in varBinds:
+            # pysnmp 6.x returns [[ObjectType(oid, val)], ...] — each item is a list
+            ot = item[0] if isinstance(item, list) else item
+            oid_str = str(ot[0])
+            if not oid_str.startswith(base_oid + "."):
+                out_of_scope = True
+                break
+            results.append((oid_str, ot[1]))
+            last_ot = ot
+            if len(results) >= max_rows:
+                return results
+
+        if out_of_scope or not varBinds or last_ot is None:
+            break
+        # Advance cursor to last received OID
+        oid_cursor = ObjectType(last_ot[0])
+
+    return results
+
+
+async def _snmp_walk_ip_cidr_route(
+    device_name: str, device_ip: str, community: str
+) -> list[dict]:
+    """Walk ipCidrRouteTable (OID 1.3.6.1.2.1.4.24.4).
+
+    Index: ipCidrRouteDest.ipCidrRouteMask.ipCidrRouteTos.ipCidrRouteNextHop
+    Columns: .5=ifIndex, .6=type, .7=proto, .11=metric1, .16=status
+    """
+    import ipaddress as _ipaddress
+
+    BASE_OID = "1.3.6.1.2.1.4.24.4"
+    raw_results = await _snmp_walk(device_ip, community, BASE_OID)
+    if not raw_results:
+        return []
+
+    # Group by index key
+    raw: dict[str, dict] = {}
+    for oid_str, val in raw_results:
+        suffix = oid_str[len(BASE_OID) + 3:]  # skip ".1."
+        parts = suffix.split(".", 1)
+        if len(parts) < 2:
+            continue
+        col, index_key = parts[0], parts[1]
+        raw.setdefault(index_key, {})[col] = val
+
+    routes = []
+    for index_key, cols in raw.items():
+        idx_parts = index_key.split(".")
+        if len(idx_parts) < 13:
+            continue
+        dest = ".".join(idx_parts[0:4])
+        mask = ".".join(idx_parts[4:8])
+        nexthop = ".".join(idx_parts[9:13])
+
+        try:
+            prefix_len = _ipaddress.IPv4Network(f"0.0.0.0/{mask}").prefixlen
+        except Exception:
+            prefix_len = 0
+
+        proto_int = int(cols.get("7", 0) or 0)
+        metric_val = int(cols.get("11", 0) or 0)
+
+        routes.append({
+            "node_name": device_name,
+            "prefix": f"{dest}/{prefix_len}",
+            "next_hop": nexthop if nexthop != "0.0.0.0" else "",
+            "protocol": _SNMP_ROUTE_PROTO.get(proto_int, "unknown"),
+            "vrf": "default",
+            "metric": metric_val or None,
+            "preference": None,
+            "outgoing_interface": None,
+            "active": True,
+        })
+    return routes
+
+
+async def _snmp_walk_ip_route(
+    device_name: str, device_ip: str, community: str
+) -> list[dict]:
+    """Walk ipRouteTable (OID 1.3.6.1.2.1.4.21) — RFC 1213 legacy fallback.
+
+    Index is the destination IP. Columns: .1=dest, .3=metric, .7=nexthop,
+    .9=proto, .11=mask.
+    """
+    import ipaddress as _ipaddress
+
+    BASE_OID = "1.3.6.1.2.1.4.21"
+    raw_results = await _snmp_walk(device_ip, community, BASE_OID)
+    if not raw_results:
+        return []
+
+    raw: dict[str, dict] = {}
+    for oid_str, val in raw_results:
+        suffix = oid_str[len(BASE_OID) + 3:]
+        parts = suffix.split(".", 1)
+        if len(parts) < 2:
+            continue
+        col, index_key = parts[0], parts[1]
+        raw.setdefault(index_key, {})[col] = val
+
+    routes = []
+    for index_key, cols in raw.items():
+        dest = str(cols.get("1", index_key) or index_key)
+        nexthop = str(cols.get("7", "0.0.0.0") or "0.0.0.0")
+        mask = str(cols.get("11", "0.0.0.0") or "0.0.0.0")
+        metric_val = int(cols.get("3", 0) or 0)
+        proto_int = int(cols.get("9", 0) or 0)
+
+        try:
+            prefix_len = _ipaddress.IPv4Network(f"0.0.0.0/{mask}").prefixlen
+        except Exception:
+            prefix_len = 0
+
+        routes.append({
+            "node_name": device_name,
+            "prefix": f"{dest}/{prefix_len}",
+            "next_hop": nexthop if nexthop != "0.0.0.0" else "",
+            "protocol": _SNMP_ROUTE_PROTO.get(proto_int, "unknown"),
+            "vrf": "default",
+            "metric": metric_val or None,
+            "preference": None,
+            "outgoing_interface": None,
+            "active": True,
+        })
+    return routes
 
 
 async def collect_bgp(device_name: str, device_id: str) -> dict:
@@ -556,7 +784,7 @@ async def poll_device(device_name: str, device_id: str,
         elif jt == "lldp":
             results.append(await collect_lldp(device_name, device_id))
         elif jt == "routes":
-            results.append(await collect_routes(device_name, device_id))
+            results.append(await collect_routes(device_name, device_id, device_ip=device_ip))
         elif jt == "bgp":
             results.append(await collect_bgp(device_name, device_id))
     return results
