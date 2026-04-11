@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MNM - Node Detail</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <style>
+    .tab-bar { display:flex; gap:0; border-bottom:2px solid var(--border); margin-bottom:16px; }
+    .tab-bar button { background:none; border:none; padding:10px 18px; color:var(--text-muted); font-size:0.85rem; font-family:var(--font-sans); cursor:pointer; border-bottom:2px solid transparent; margin-bottom:-2px; }
+    .tab-bar button:hover { color:var(--text); }
+    .tab-bar button.active { color:var(--accent); border-bottom-color:var(--accent); }
+    .tab-bar .tab-count { font-size:0.75rem; background:var(--bg-elevated); border-radius:10px; padding:1px 7px; margin-left:5px; color:var(--text-muted); }
+    .tab-panel { display:none; }
+    .tab-panel.active { display:block; }
+    .node-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; flex-wrap:wrap; gap:12px; }
+    .node-meta { display:flex; gap:24px; flex-wrap:wrap; font-size:0.85rem; color:var(--text-muted); }
+    .node-meta .field { }
+    .node-meta .field-label { font-size:0.7rem; text-transform:uppercase; letter-spacing:0.5px; color:var(--text-muted); }
+    .node-meta .field-value { color:var(--text); }
+  </style>
+</head>
+<body>
+  <header>
+    <a href="/" class="logo"><span>MNM</span> Controller</a>
+    <nav>
+      <a href="/">Dashboard</a>
+      <span class="nav-separator"></span>
+      <span class="nav-group-label">Intelligence</span>
+      <a href="/nodes" class="active">Nodes</a>
+      <a href="/endpoints">Endpoints</a>
+      <a href="/events">Events</a>
+      <span class="nav-separator"></span>
+      <span class="nav-group-label">Operations</span>
+      <a href="/discover">Discovery</a>
+      <a href="/jobs">Jobs</a>
+      <a href="/logs">Logs</a>
+      <span class="nav-separator"></span>
+      <div class="theme-switcher">
+        <button data-theme="light" title="Light">Light</button>
+        <button data-theme="dark" title="Dark" class="active">Dark</button>
+        <button data-theme="system" title="System">Auto</button>
+      </div>
+      <a href="/search" id="search-nav-btn" title="Search">&#128269;</a>
+      <a href="#" id="prefs-btn" title="Preferences">&#9881;</a>
+      <a id="logout-link" href="#">Logout</a>
+    </nav>
+  </header>
+
+  <div class="container">
+    <!-- Header -->
+    <div class="card">
+      <div class="node-header">
+        <h2 id="node-title" style="margin-bottom:0">Node</h2>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button id="poll-now-btn" class="btn">Poll Now</button>
+          <a id="nautobot-link" href="#" target="_blank" class="btn" style="display:none">Nautobot</a>
+        </div>
+      </div>
+      <div class="node-meta" id="node-meta"></div>
+    </div>
+
+    <!-- Tabs -->
+    <div class="card">
+      <div class="tab-bar" id="tab-bar">
+        <button class="active" data-tab="arp">ARP Table <span class="tab-count" id="count-arp">-</span></button>
+        <button data-tab="mac">MAC Table <span class="tab-count" id="count-mac">-</span></button>
+        <button data-tab="routes">Routing Table <span class="tab-count" id="count-routes">-</span></button>
+        <button data-tab="lldp">LLDP Neighbors <span class="tab-count" id="count-lldp">-</span></button>
+        <button data-tab="bgp">BGP Peers <span class="tab-count" id="count-bgp">-</span></button>
+        <button data-tab="polls">Poll History <span class="tab-count" id="count-polls">-</span></button>
+      </div>
+
+      <div class="tab-panel active" id="panel-arp">
+        <div class="filter-bar">
+          <input type="text" id="arp-search" placeholder="Filter by IP or MAC...">
+        </div>
+        <div id="arp-dt"></div>
+      </div>
+      <div class="tab-panel" id="panel-mac">
+        <div class="filter-bar">
+          <input type="text" id="mac-search" placeholder="Filter by MAC or interface...">
+        </div>
+        <div id="mac-dt"></div>
+      </div>
+      <div class="tab-panel" id="panel-routes">
+        <div class="filter-bar">
+          <input type="text" id="routes-search" placeholder="Filter by prefix, next-hop, or protocol...">
+        </div>
+        <div id="routes-dt"></div>
+      </div>
+      <div class="tab-panel" id="panel-lldp">
+        <div id="lldp-dt"></div>
+      </div>
+      <div class="tab-panel" id="panel-bgp">
+        <div id="bgp-dt"></div>
+      </div>
+      <div class="tab-panel" id="panel-polls">
+        <table>
+          <thead><tr><th>Job Type</th><th>Status</th><th>Last Success</th><th>Last Error</th><th>Duration</th><th>Interval</th></tr></thead>
+          <tbody id="polls-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/js/datatable.js"></script>
+  <script src="/static/js/preferences.js"></script>
+  <script src="/static/js/node_detail.js"></script>
+</body>
+</html>

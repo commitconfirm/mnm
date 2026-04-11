@@ -876,6 +876,200 @@ async def record_ip_observation(ip: str, host: dict) -> None:
 # viewer.
 
 # ---------------------------------------------------------------------------
+# Node raw data persistence (Phase 2.85)
+# ---------------------------------------------------------------------------
+
+async def upsert_node_arp_bulk(node_name: str, entries: list[dict]) -> int:
+    """Bulk upsert ARP entries for a node. Returns count."""
+    if not db.is_ready() or not entries:
+        return 0
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    now = _now()
+    rows = [{
+        "node_name": node_name,
+        "ip": e.get("ip", ""),
+        "mac": (e.get("mac", "") or "").upper(),
+        "interface": e.get("interface", ""),
+        "vrf": "default",
+        "collected_at": now,
+    } for e in entries if e.get("ip") and e.get("mac")]
+
+    if not rows:
+        return 0
+    async with db.SessionLocal() as session:
+        stmt = pg_insert(db.NodeArpEntry).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_arp_node_ip_mac_vrf",
+            set_={"interface": stmt.excluded.interface, "collected_at": stmt.excluded.collected_at},
+        )
+        await session.execute(stmt)
+        await session.commit()
+    return len(rows)
+
+
+async def upsert_node_mac_bulk(node_name: str, entries: list[dict]) -> int:
+    """Bulk upsert MAC table entries for a node. Returns count."""
+    if not db.is_ready() or not entries:
+        return 0
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    now = _now()
+    rows = [{
+        "node_name": node_name,
+        "mac": (e.get("mac", "") or "").upper(),
+        "interface": e.get("interface", ""),
+        "vlan": int(e.get("vlan", 0) or 0),
+        "entry_type": "static" if e.get("static") else "dynamic",
+        "collected_at": now,
+    } for e in entries if e.get("mac")]
+
+    if not rows:
+        return 0
+    async with db.SessionLocal() as session:
+        stmt = pg_insert(db.NodeMacEntry).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_mac_node_mac_iface_vlan",
+            set_={"entry_type": stmt.excluded.entry_type, "collected_at": stmt.excluded.collected_at},
+        )
+        await session.execute(stmt)
+        await session.commit()
+    return len(rows)
+
+
+async def upsert_node_lldp_bulk(node_name: str, lldp_data: dict) -> int:
+    """Bulk upsert LLDP neighbor entries for a node.
+
+    lldp_data is the NAPALM get_lldp_neighbors format:
+    {interface: [{hostname, port}, ...]}
+    """
+    if not db.is_ready() or not lldp_data:
+        return 0
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    now = _now()
+    rows = []
+    for iface, neighbors in lldp_data.items():
+        if not isinstance(neighbors, list):
+            continue
+        for n in neighbors:
+            if not isinstance(n, dict):
+                continue
+            rows.append({
+                "node_name": node_name,
+                "local_interface": iface,
+                "remote_system_name": n.get("hostname") or n.get("remote_system_name") or "",
+                "remote_port": n.get("port") or n.get("remote_port") or "",
+                "remote_chassis_id": n.get("remote_chassis_id") or "",
+                "remote_management_ip": n.get("remote_management_ip") or "",
+                "collected_at": now,
+            })
+
+    if not rows:
+        return 0
+    async with db.SessionLocal() as session:
+        stmt = pg_insert(db.NodeLldpEntry).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_lldp_node_iface_remote",
+            set_={
+                "remote_chassis_id": stmt.excluded.remote_chassis_id,
+                "remote_management_ip": stmt.excluded.remote_management_ip,
+                "collected_at": stmt.excluded.collected_at,
+            },
+        )
+        await session.execute(stmt)
+        await session.commit()
+    return len(rows)
+
+
+async def list_node_arp(node_name: str, ip: str | None = None,
+                        mac: str | None = None) -> list[dict]:
+    if not db.is_ready():
+        return []
+    async with db.SessionLocal() as session:
+        stmt = select(db.NodeArpEntry).where(
+            db.NodeArpEntry.node_name == node_name
+        ).order_by(db.NodeArpEntry.ip)
+        if ip:
+            stmt = stmt.where(db.NodeArpEntry.ip.contains(ip))
+        if mac:
+            stmt = stmt.where(db.NodeArpEntry.mac.contains(mac.upper()))
+        rows = (await session.execute(stmt)).scalars().all()
+        return [r.to_dict() for r in rows]
+
+
+async def list_node_mac(node_name: str, mac: str | None = None,
+                        interface: str | None = None,
+                        vlan: int | None = None) -> list[dict]:
+    if not db.is_ready():
+        return []
+    async with db.SessionLocal() as session:
+        stmt = select(db.NodeMacEntry).where(
+            db.NodeMacEntry.node_name == node_name
+        ).order_by(db.NodeMacEntry.mac)
+        if mac:
+            stmt = stmt.where(db.NodeMacEntry.mac.contains(mac.upper()))
+        if interface:
+            stmt = stmt.where(db.NodeMacEntry.interface == interface)
+        if vlan is not None:
+            stmt = stmt.where(db.NodeMacEntry.vlan == vlan)
+        rows = (await session.execute(stmt)).scalars().all()
+        return [r.to_dict() for r in rows]
+
+
+async def list_node_lldp(node_name: str) -> list[dict]:
+    if not db.is_ready():
+        return []
+    async with db.SessionLocal() as session:
+        stmt = select(db.NodeLldpEntry).where(
+            db.NodeLldpEntry.node_name == node_name
+        ).order_by(db.NodeLldpEntry.local_interface)
+        rows = (await session.execute(stmt)).scalars().all()
+        return [r.to_dict() for r in rows]
+
+
+async def upsert_node_fib_bulk(node_name: str, routes: list[dict],
+                               source: str = "snmp_rib") -> int:
+    """Bulk upsert FIB entries for a node. Returns count."""
+    if not db.is_ready() or not routes:
+        return 0
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    now = _now()
+    rows = [{
+        "node_name": node_name,
+        "prefix": r.get("prefix", ""),
+        "next_hop": r.get("next_hop", ""),
+        "interface": r.get("outgoing_interface") or r.get("interface") or "",
+        "vrf": r.get("vrf", "default"),
+        "source": source,
+        "collected_at": now,
+    } for r in routes if r.get("prefix")]
+
+    if not rows:
+        return 0
+    async with db.SessionLocal() as session:
+        stmt = pg_insert(db.NodeFibEntry).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_fib_node_prefix_nh_vrf",
+            set_={"interface": stmt.excluded.interface, "source": stmt.excluded.source,
+                   "collected_at": stmt.excluded.collected_at},
+        )
+        await session.execute(stmt)
+        await session.commit()
+    return len(rows)
+
+
+async def list_node_fib(node_name: str, prefix: str | None = None) -> list[dict]:
+    if not db.is_ready():
+        return []
+    async with db.SessionLocal() as session:
+        stmt = select(db.NodeFibEntry).where(
+            db.NodeFibEntry.node_name == node_name
+        ).order_by(db.NodeFibEntry.prefix)
+        if prefix:
+            stmt = stmt.where(db.NodeFibEntry.prefix.contains(prefix))
+        rows = (await session.execute(stmt)).scalars().all()
+        return [r.to_dict() for r in rows]
+
+
+# ---------------------------------------------------------------------------
 # Route and BGP persistence (Phase 2.8)
 # ---------------------------------------------------------------------------
 
@@ -1231,6 +1425,36 @@ async def prune_stale_sentinels(retention_days: int) -> int:
     return n
 
 
+async def prune_old_node_arp(retention_days: int) -> int:
+    """Delete node_arp_entries older than retention_days."""
+    cutoff = _now() - timedelta(days=retention_days)
+    async with db.SessionLocal() as session:
+        result = await session.execute(
+            db.NodeArpEntry.__table__.delete().where(db.NodeArpEntry.collected_at < cutoff))
+        await session.commit()
+        return result.rowcount or 0
+
+
+async def prune_old_node_mac(retention_days: int) -> int:
+    """Delete node_mac_entries older than retention_days."""
+    cutoff = _now() - timedelta(days=retention_days)
+    async with db.SessionLocal() as session:
+        result = await session.execute(
+            db.NodeMacEntry.__table__.delete().where(db.NodeMacEntry.collected_at < cutoff))
+        await session.commit()
+        return result.rowcount or 0
+
+
+async def prune_old_node_lldp(retention_days: int) -> int:
+    """Delete node_lldp_entries older than retention_days."""
+    cutoff = _now() - timedelta(days=retention_days)
+    async with db.SessionLocal() as session:
+        result = await session.execute(
+            db.NodeLldpEntry.__table__.delete().where(db.NodeLldpEntry.collected_at < cutoff))
+        await session.commit()
+        return result.rowcount or 0
+
+
 async def prune_old_routes(retention_days: int) -> int:
     """Delete routes older than retention_days. Returns row count."""
     cutoff = _now() - timedelta(days=retention_days)
@@ -1288,6 +1512,9 @@ async def prune_all(retention_days: int) -> dict:
     routes = await prune_old_routes(retention_days)
     bgp = await prune_old_bgp_neighbors(retention_days)
     auto_disc = await prune_old_auto_discovery_runs(retention_days)
+    node_arp = await prune_old_node_arp(retention_days)
+    node_mac = await prune_old_node_mac(retention_days)
+    node_lldp = await prune_old_node_lldp(retention_days)
     summary = {
         "events": events,
         "observations": observations,
@@ -1296,6 +1523,9 @@ async def prune_all(retention_days: int) -> dict:
         "routes": routes,
         "bgp_neighbors": bgp,
         "auto_discovery_runs": auto_disc,
+        "node_arp": node_arp,
+        "node_mac": node_mac,
+        "node_lldp": node_lldp,
     }
     _prune_log.info("prune_complete",
                     f"Daily prune: {events} events, {observations} observations, "
@@ -1347,6 +1577,18 @@ async def prune_preview(retention_days: int) -> dict:
             select(func.count()).select_from(db.AutoDiscoveryRun)
             .where(db.AutoDiscoveryRun.started_at < cutoff)
         )).scalar_one()
+        node_arp = (await session.execute(
+            select(func.count()).select_from(db.NodeArpEntry)
+            .where(db.NodeArpEntry.collected_at < cutoff)
+        )).scalar_one()
+        node_mac = (await session.execute(
+            select(func.count()).select_from(db.NodeMacEntry)
+            .where(db.NodeMacEntry.collected_at < cutoff)
+        )).scalar_one()
+        node_lldp = (await session.execute(
+            select(func.count()).select_from(db.NodeLldpEntry)
+            .where(db.NodeLldpEntry.collected_at < cutoff)
+        )).scalar_one()
     return {
         "events": int(events),
         "observations": int(observations),
@@ -1355,6 +1597,9 @@ async def prune_preview(retention_days: int) -> dict:
         "routes": int(routes),
         "bgp_neighbors": int(bgp),
         "auto_discovery_runs": int(auto_disc),
+        "node_arp": int(node_arp),
+        "node_mac": int(node_mac),
+        "node_lldp": int(node_lldp),
     }
 
 

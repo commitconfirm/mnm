@@ -271,6 +271,11 @@ async def collect_arp(device_name: str, device_id: str) -> dict:
     try:
         data = await nautobot_client.napalm_get(device_id, "get_arp_table")
         entries = data.get("get_arp_table", [])
+        # Persist raw ARP data (Phase 2.85)
+        try:
+            await endpoint_store.upsert_node_arp_bulk(device_name, entries)
+        except Exception:
+            pass
         duration = time.monotonic() - t0
         await _mark_success(device_name, "arp", duration)
         log.info("poll_arp_done", "ARP collection complete",
@@ -294,6 +299,11 @@ async def collect_mac(device_name: str, device_id: str) -> dict:
     try:
         data = await nautobot_client.napalm_get(device_id, "get_mac_address_table")
         entries = data.get("get_mac_address_table", [])
+        # Persist raw MAC data (Phase 2.85)
+        try:
+            await endpoint_store.upsert_node_mac_bulk(device_name, entries)
+        except Exception:
+            pass
         duration = time.monotonic() - t0
         await _mark_success(device_name, "mac", duration)
         log.info("poll_mac_done", "MAC collection complete",
@@ -351,6 +361,11 @@ async def collect_lldp(device_name: str, device_id: str) -> dict:
         data = await nautobot_client.napalm_get(device_id, "get_lldp_neighbors")
         neighbors = data.get("get_lldp_neighbors", {})
         count = sum(len(v) if isinstance(v, list) else 1 for v in neighbors.values())
+        # Persist raw LLDP data (Phase 2.85)
+        try:
+            await endpoint_store.upsert_node_lldp_bulk(device_name, neighbors)
+        except Exception:
+            pass
         duration = time.monotonic() - t0
         await _mark_success(device_name, "lldp", duration)
         log.info("poll_lldp_done", "LLDP collection complete",
@@ -423,6 +438,12 @@ async def collect_routes(device_name: str, device_id: str,
 
         # Upsert in bulk
         count = await endpoint_store.upsert_routes_bulk(routes)
+        # Also populate FIB from SNMP data (SNMP RIB ≈ FIB on most platforms)
+        if routes and tier_used == "snmp":
+            try:
+                await endpoint_store.upsert_node_fib_bulk(device_name, routes, source="snmp_rib")
+            except Exception:
+                pass
 
         duration = time.monotonic() - t0
         await _mark_success(device_name, "routes", duration)

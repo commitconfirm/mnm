@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MNM - Network Search</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <style>
+    .search-box { display:flex; gap:12px; align-items:center; margin-bottom:16px; }
+    .search-box input { flex:1; font-size:1rem; padding:10px 16px; }
+    .search-box .btn { font-size:0.9rem; padding:10px 20px; }
+    .result-section { margin-bottom:16px; }
+    .result-section h3 { font-size:0.8rem; text-transform:uppercase; letter-spacing:0.5px; color:var(--text-muted); margin-bottom:8px; }
+    .result-section .count { color:var(--accent); }
+  </style>
+</head>
+<body>
+  <header>
+    <a href="/" class="logo"><span>MNM</span> Controller</a>
+    <nav>
+      <a href="/">Dashboard</a>
+      <span class="nav-separator"></span>
+      <span class="nav-group-label">Intelligence</span>
+      <a href="/nodes">Nodes</a>
+      <a href="/endpoints">Endpoints</a>
+      <a href="/events">Events</a>
+      <span class="nav-separator"></span>
+      <span class="nav-group-label">Operations</span>
+      <a href="/discover">Discovery</a>
+      <a href="/jobs">Jobs</a>
+      <a href="/logs">Logs</a>
+      <span class="nav-separator"></span>
+      <div class="theme-switcher">
+        <button data-theme="light" title="Light">Light</button>
+        <button data-theme="dark" title="Dark" class="active">Dark</button>
+        <button data-theme="system" title="System">Auto</button>
+      </div>
+      <a href="/search" id="search-nav-btn" title="Search">&#128269;</a>
+      <a href="#" id="prefs-btn" title="Preferences">&#9881;</a>
+      <a id="logout-link" href="#">Logout</a>
+    </nav>
+  </header>
+
+  <div class="container">
+    <div class="card">
+      <h2>Network Search</h2>
+      <div class="search-box">
+        <input type="text" id="search-input" placeholder="Search by MAC, IP, CIDR prefix, or hostname..." autofocus>
+        <button id="search-btn" class="btn primary">Search</button>
+      </div>
+      <div style="color:var(--text-muted); font-size:0.8rem;">
+        Auto-detects: MAC (AA:BB:CC:DD:EE:FF), IP (198.51.100.1), CIDR (198.51.100.0/24), or hostname text
+      </div>
+    </div>
+
+    <div id="search-results" style="display:none">
+      <div id="result-type" class="card" style="padding:12px 20px; font-size:0.85rem; color:var(--text-muted); margin-bottom:16px;"></div>
+
+      <div id="section-arp" class="result-section card" style="display:none">
+        <h3>ARP Table Matches <span class="count" id="arp-count"></span></h3>
+        <table><thead><tr><th>Node</th><th>IP</th><th>MAC</th><th>Interface</th><th>Last Seen</th></tr></thead>
+        <tbody id="arp-results"></tbody></table>
+      </div>
+
+      <div id="section-mac" class="result-section card" style="display:none">
+        <h3>MAC Table Matches <span class="count" id="mac-count"></span></h3>
+        <table><thead><tr><th>Node</th><th>MAC</th><th>Interface</th><th>VLAN</th><th>Type</th><th>Last Seen</th></tr></thead>
+        <tbody id="mac-results"></tbody></table>
+      </div>
+
+      <div id="section-routes" class="result-section card" style="display:none">
+        <h3>Route Matches <span class="count" id="route-count"></span></h3>
+        <table><thead><tr><th>Node</th><th>Prefix</th><th>Next Hop</th><th>Protocol</th><th>Metric</th><th>VRF</th></tr></thead>
+        <tbody id="route-results"></tbody></table>
+      </div>
+
+      <div id="section-lldp" class="result-section card" style="display:none">
+        <h3>LLDP Matches <span class="count" id="lldp-count"></span></h3>
+        <table><thead><tr><th>Node</th><th>Interface</th><th>Remote System</th><th>Remote Port</th></tr></thead>
+        <tbody id="lldp-results"></tbody></table>
+      </div>
+
+      <div id="section-endpoints" class="result-section card" style="display:none">
+        <h3>Endpoint Matches <span class="count" id="ep-count"></span></h3>
+        <table><thead><tr><th>MAC</th><th>IP</th><th>Hostname</th><th>Switch</th><th>Port</th><th>VLAN</th></tr></thead>
+        <tbody id="ep-results"></tbody></table>
+      </div>
+
+      <div id="no-results" class="card" style="display:none; text-align:center; color:var(--text-muted); padding:32px;">
+        No results found.
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/js/preferences.js"></script>
+  <script src="/static/js/search.js"></script>
+</body>
+</html>

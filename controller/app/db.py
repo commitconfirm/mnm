@@ -420,6 +420,123 @@ class BGPNeighbor(Base):
         }
 
 
+class NodeArpEntry(Base):
+    """Per-node ARP table snapshot. Upserted each poll cycle."""
+    __tablename__ = "node_arp_entries"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    node_name = Column(Text, nullable=False, index=True)
+    ip = Column(Text, nullable=False)
+    mac = Column(Text, nullable=False)
+    interface = Column(Text, nullable=False, default="")
+    vrf = Column(Text, nullable=False, default="default")
+    collected_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False, index=True)
+
+    __table_args__ = (
+        UniqueConstraint("node_name", "ip", "mac", "vrf",
+                         name="uq_arp_node_ip_mac_vrf"),
+    )
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id, "node_name": self.node_name, "ip": self.ip,
+            "mac": self.mac, "interface": self.interface,
+            "vrf": self.vrf or "default",
+            "collected_at": self.collected_at.isoformat() if self.collected_at else "",
+        }
+
+
+class NodeMacEntry(Base):
+    """Per-node MAC/FDB table snapshot. Upserted each poll cycle."""
+    __tablename__ = "node_mac_entries"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    node_name = Column(Text, nullable=False, index=True)
+    mac = Column(Text, nullable=False)
+    interface = Column(Text, nullable=False, default="")
+    vlan = Column(Integer, nullable=False, default=0)
+    entry_type = Column(Text, nullable=False, default="dynamic")
+    collected_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False, index=True)
+
+    __table_args__ = (
+        UniqueConstraint("node_name", "mac", "interface", "vlan",
+                         name="uq_mac_node_mac_iface_vlan"),
+    )
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id, "node_name": self.node_name, "mac": self.mac,
+            "interface": self.interface, "vlan": self.vlan,
+            "entry_type": self.entry_type or "dynamic",
+            "collected_at": self.collected_at.isoformat() if self.collected_at else "",
+        }
+
+
+class NodeLldpEntry(Base):
+    """Per-node LLDP neighbor snapshot. Upserted each poll cycle."""
+    __tablename__ = "node_lldp_entries"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    node_name = Column(Text, nullable=False, index=True)
+    local_interface = Column(Text, nullable=False)
+    remote_system_name = Column(Text, nullable=False, default="")
+    remote_port = Column(Text, nullable=False, default="")
+    remote_chassis_id = Column(Text)
+    remote_management_ip = Column(Text)
+    collected_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False, index=True)
+
+    __table_args__ = (
+        UniqueConstraint("node_name", "local_interface", "remote_system_name", "remote_port",
+                         name="uq_lldp_node_iface_remote"),
+    )
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id, "node_name": self.node_name,
+            "local_interface": self.local_interface,
+            "remote_system_name": self.remote_system_name or "",
+            "remote_port": self.remote_port or "",
+            "remote_chassis_id": self.remote_chassis_id or "",
+            "remote_management_ip": self.remote_management_ip or "",
+            "collected_at": self.collected_at.isoformat() if self.collected_at else "",
+        }
+
+
+class NodeFibEntry(Base):
+    """Per-node forwarding table (FIB) snapshot.
+
+    On most platforms, the SNMP routing MIB reflects the actual forwarding
+    table. This table stores FIB data when a dedicated FIB source exists
+    (e.g. Junos 'show route forwarding-table'). When no dedicated source
+    is available, populated from the SNMP route collection as a best-effort
+    approximation — marked with source='snmp_rib'.
+    """
+    __tablename__ = "node_fib_entries"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    node_name = Column(Text, nullable=False, index=True)
+    prefix = Column(Text, nullable=False)
+    next_hop = Column(Text, nullable=False, default="")
+    interface = Column(Text)
+    vrf = Column(Text, nullable=False, default="default")
+    source = Column(Text, nullable=False, default="snmp_rib")  # snmp_rib or cli_fib
+    collected_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False, index=True)
+
+    __table_args__ = (
+        UniqueConstraint("node_name", "prefix", "next_hop", "vrf",
+                         name="uq_fib_node_prefix_nh_vrf"),
+    )
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id, "node_name": self.node_name,
+            "prefix": self.prefix, "next_hop": self.next_hop or "",
+            "interface": self.interface or "", "vrf": self.vrf or "default",
+            "source": self.source or "snmp_rib",
+            "collected_at": self.collected_at.isoformat() if self.collected_at else "",
+        }
+
+
 class AutoDiscoveryRun(Base):
     """Persistent log of hop-limited auto-discovery runs.
 

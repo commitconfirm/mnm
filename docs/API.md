@@ -217,6 +217,36 @@ Returns MAC addresses belonging to onboarded nodes (used to filter endpoints pag
 {"macs": ["AA:BB:CC:DD:EE:FF", "11:22:33:44:55:66"]}
 ```
 
+### GET /api/nodes/{node_name}/arp
+ARP table for a specific node. Query params: `ip`, `mac`.
+
+### GET /api/nodes/{node_name}/mac-table
+MAC address table for a specific node. Query params: `mac`, `interface`, `vlan`.
+
+### GET /api/nodes/{node_name}/lldp
+LLDP neighbors for a specific node.
+
+### GET /api/nodes/{node_name}/fib
+Forwarding table (FIB) entries for a specific node. Populated from SNMP route data. Query param: `prefix`.
+
+### GET /api/search
+Cross-node network search. Auto-detects query type from input.
+
+**Query param:** `q` — MAC address, IP, CIDR prefix, or hostname text
+
+**Response:**
+```json
+{
+  "query": "198.51.100.1",
+  "type": "ip",
+  "results": {
+    "arp_table": [{"node_name": "...", "ip": "198.51.100.1", "mac": "...", "interface": "..."}],
+    "routes": [{"node_name": "...", "prefix": "198.51.100.0/24", "next_hop": "...", "protocol": "..."}],
+    "endpoints": [{"mac": "...", "ip": "198.51.100.1", "hostname": "..."}]
+  }
+}
+```
+
 ### GET /api/devices *(deprecated)*
 Returns `301 Moved Permanently` redirect to `/api/nodes`. Use `/api/nodes` instead.
 

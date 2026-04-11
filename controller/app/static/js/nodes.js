@@ -78,7 +78,7 @@ const nodesDT = new DataTable({
       return healthDot(v, row.health_label || '');
     } },
     { key: 'name', label: 'Name', sortable: true, render: function(v) {
-      return '<strong>' + escHtml(v) + '</strong>';
+      return '<a href="/nodes/' + encodeURIComponent(v) + '"><strong>' + escHtml(v) + '</strong></a>';
     } },
     { key: 'platform', label: 'Platform', sortable: true, render: function(v) { return escHtml(v || '-'); } },
     { key: 'primary_ip', label: 'Primary IP', sortable: true, render: function(v) { return escHtml(v || '-'); } },

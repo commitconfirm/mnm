@@ -553,13 +553,13 @@ th.sortable.desc::after { content: ' \2193'; opacity: 1; }
 .full-width-table table { width: 100%; }
 
 /* Preferences gear icon */
-#prefs-btn {
+#prefs-btn, #search-nav-btn {
   font-size: 1.1rem;
   color: var(--text-muted);
   cursor: pointer;
   text-decoration: none;
 }
-#prefs-btn:hover { color: var(--text); text-decoration: none; }
+#prefs-btn:hover, #search-nav-btn:hover { color: var(--text); text-decoration: none; }
 
 /* Responsive */
 @media (max-width: 768px) {

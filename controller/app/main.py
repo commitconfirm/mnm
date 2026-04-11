@@ -1436,6 +1436,16 @@ async def nodes_page():
     return FileResponse("app/static/nodes.html")
 
 
+@app.get("/nodes/{node_name}")
+async def node_detail_page(node_name: str):
+    return FileResponse("app/static/node_detail.html")
+
+
+@app.get("/search")
+async def search_page():
+    return FileResponse("app/static/search.html")
+
+
 @app.get("/endpoints")
 async def endpoints_page():
     return FileResponse("app/static/endpoints.html")
@@ -1674,6 +1684,132 @@ async def node_macs():
                     context={"error": str(exc)})
 
     return {"macs": sorted(macs), "ips": sorted(ips)}
+
+
+# -------------------------------------------------------------------------
+# Global network search (Phase 2.85)
+# -------------------------------------------------------------------------
+
+@app.get("/api/search", dependencies=[Depends(require_auth)])
+async def global_search(q: str = ""):
+    """Cross-node network search. Auto-detects query type:
+    MAC format → MAC search, IP → IP search, CIDR → prefix search, else hostname.
+    """
+    import ipaddress as _ipaddress
+    import re
+    from sqlalchemy import select
+
+    q = q.strip()
+    if not q:
+        return {"query": q, "type": "empty", "results": {}}
+
+    results: dict = {}
+
+    # Detect query type
+    mac_pattern = re.compile(r'^([0-9a-fA-F]{2}[:\-]){5}[0-9a-fA-F]{2}$')
+    is_mac = bool(mac_pattern.match(q))
+    is_cidr = "/" in q
+    is_ip = False
+    if not is_mac and not is_cidr:
+        try:
+            _ipaddress.ip_address(q)
+            is_ip = True
+        except ValueError:
+            pass
+
+    query_type = "mac" if is_mac else ("cidr" if is_cidr else ("ip" if is_ip else "text"))
+
+    if is_mac:
+        mac_upper = q.upper()
+        # Search MAC tables across all nodes
+        if db.is_ready():
+            async with db.SessionLocal() as session:
+                mac_rows = (await session.execute(
+                    select(db.NodeMacEntry).where(db.NodeMacEntry.mac == mac_upper)
+                )).scalars().all()
+                results["mac_table"] = [r.to_dict() for r in mac_rows]
+                arp_rows = (await session.execute(
+                    select(db.NodeArpEntry).where(db.NodeArpEntry.mac == mac_upper)
+                )).scalars().all()
+                results["arp_table"] = [r.to_dict() for r in arp_rows]
+        # Search endpoints
+        ep = await endpoint_store.get_endpoint(q)
+        if ep:
+            results["endpoint"] = ep
+
+    elif is_ip:
+        if db.is_ready():
+            async with db.SessionLocal() as session:
+                arp_rows = (await session.execute(
+                    select(db.NodeArpEntry).where(db.NodeArpEntry.ip == q)
+                )).scalars().all()
+                results["arp_table"] = [r.to_dict() for r in arp_rows]
+                route_rows = (await session.execute(
+                    select(db.Route).where(db.Route.prefix.contains(q))
+                )).scalars().all()
+                results["routes"] = [r.to_dict() for r in route_rows]
+        endpoints = await endpoint_store.list_endpoints()
+        matching = [e for e in endpoints if e.get("ip") == q or q in (e.get("additional_ips") or [])]
+        if matching:
+            results["endpoints"] = matching
+
+    elif is_cidr:
+        if db.is_ready():
+            async with db.SessionLocal() as session:
+                route_rows = (await session.execute(
+                    select(db.Route).where(db.Route.prefix.contains(q.split("/")[0]))
+                )).scalars().all()
+                results["routes"] = [r.to_dict() for r in route_rows]
+
+    else:
+        # Text search — hostname, LLDP system names
+        q_lower = q.lower()
+        if db.is_ready():
+            async with db.SessionLocal() as session:
+                lldp_rows = (await session.execute(
+                    select(db.NodeLldpEntry).where(
+                        db.NodeLldpEntry.remote_system_name.ilike(f"%{q}%"))
+                )).scalars().all()
+                results["lldp"] = [r.to_dict() for r in lldp_rows]
+        endpoints = await endpoint_store.list_endpoints()
+        matching = [e for e in endpoints if q_lower in (e.get("hostname") or "").lower()]
+        if matching:
+            results["endpoints"] = matching
+
+    return {"query": q, "type": query_type, "results": results}
+
+
+# -------------------------------------------------------------------------
+# Per-node data tables (Phase 2.85)
+# -------------------------------------------------------------------------
+
+@app.get("/api/nodes/{node_name}/arp", dependencies=[Depends(require_auth)])
+async def node_arp_table(node_name: str, ip: str | None = None, mac: str | None = None):
+    """ARP table entries for a specific node."""
+    entries = await endpoint_store.list_node_arp(node_name, ip=ip, mac=mac)
+    return {"entries": entries, "count": len(entries), "node_name": node_name}
+
+
+@app.get("/api/nodes/{node_name}/mac-table", dependencies=[Depends(require_auth)])
+async def node_mac_table(node_name: str, mac: str | None = None,
+                         interface: str | None = None, vlan: int | None = None):
+    """MAC address table entries for a specific node."""
+    entries = await endpoint_store.list_node_mac(node_name, mac=mac, interface=interface, vlan=vlan)
+    return {"entries": entries, "count": len(entries), "node_name": node_name}
+
+
+@app.get("/api/nodes/{node_name}/fib", dependencies=[Depends(require_auth)])
+async def node_fib_table(node_name: str, prefix: str | None = None):
+    """Forwarding table (FIB) entries for a specific node."""
+    entries = await endpoint_store.list_node_fib(node_name, prefix=prefix)
+    return {"entries": entries, "count": len(entries), "node_name": node_name}
+
+
+@app.get("/api/nodes/{node_name}/lldp", dependencies=[Depends(require_auth)])
+async def node_lldp_table(node_name: str):
+    """LLDP neighbor entries for a specific node."""
+    entries = await endpoint_store.list_node_lldp(node_name)
+    return {"entries": entries, "count": len(entries), "node_name": node_name}
 
 
 @app.get("/api/nodes/{node_name}", dependencies=[Depends(require_auth)])
