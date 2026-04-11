@@ -90,6 +90,14 @@ class DataTable {
       if (va == null) return 1;
       if (vb == null) return -1;
 
+      // IP address sort — numeric by octets (192.168.1.2 before 192.168.1.10)
+      const ipRe = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(\/\d+)?$/;
+      if (typeof va === 'string' && typeof vb === 'string' && ipRe.test(va) && ipRe.test(vb)) {
+        const ipNum = ip => ip.split('/')[0].split('.').reduce((a, o) => a * 256 + parseInt(o, 10), 0);
+        const cmp = ipNum(va) - ipNum(vb);
+        return dir === 'asc' ? cmp : -cmp;
+      }
+
       // Numeric comparison if both sides are numbers
       const na = Number(va);
       const nb = Number(vb);

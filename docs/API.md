@@ -229,26 +229,48 @@ LLDP neighbors for a specific node.
 ### GET /api/nodes/{node_name}/fib
 Forwarding table (FIB) entries for a specific node. Populated from SNMP route data. Query param: `prefix`.
 
-### GET /api/search
-Cross-node network search. Auto-detects query type from input.
+### GET /api/investigate
+Contextual network investigation. Auto-detects query type and returns categorized results.
+Accepts any MAC format (colon, hyphen, Cisco dot, bare hex) and normalizes internally.
 
-**Query param:** `q` — MAC address, IP, CIDR prefix, or hostname text
+**Query params:**
+- `q` (required) — MAC address, IP, CIDR prefix, or hostname text
+- `node` (optional) — filter results to a specific node
+- `vlan` (optional) — filter to a specific VLAN (MAC search only)
+- `type` (optional) — force query type: `mac`, `ip`, `prefix`, `text` (auto-detected if omitted)
 
-**Response:**
+**MAC search response:**
+```json
+{
+  "query": "aa:bb:cc:dd:ee:ff",
+  "query_type": "mac",
+  "results": {
+    "arp_hits": [{"node_name": "...", "ip": "198.51.100.10", "mac": "AA:BB:CC:DD:EE:FF", "interface": "ge-0/0/5"}],
+    "mac_hits": [{"node_name": "...", "mac": "AA:BB:CC:DD:EE:FF", "interface": "ge-0/0/5", "vlan": 100}],
+    "endpoint": {"mac": "AA:BB:CC:DD:EE:FF", "ip": "198.51.100.10", "hostname": "..."},
+    "location": {"switch": "core-switch-01", "interface": "ge-0/0/5", "vlan": 100, "description": "Connected to core-switch-01 port ge-0/0/5 in VLAN 100"},
+    "vm_host": {"name": "web-server-01", "vmid": 100, "node": "pve1", "status": "running", "type": "qemu"}
+  }
+}
+```
+
+**IP search response:**
 ```json
 {
   "query": "198.51.100.1",
-  "type": "ip",
+  "query_type": "ip",
   "results": {
-    "arp_table": [{"node_name": "...", "ip": "198.51.100.1", "mac": "...", "interface": "..."}],
-    "routes": [{"node_name": "...", "prefix": "198.51.100.0/24", "next_hop": "...", "protocol": "..."}],
+    "arp_hits": [{"node_name": "...", "ip": "198.51.100.1", "mac": "...", "interface": "..."}],
+    "routes": [{"node_name": "...", "prefix": "198.51.100.0/24", "next_hop": "...", "protocol": "ospf"}],
+    "fib": [{"node_name": "...", "prefix": "198.51.100.0/24", "next_hop": "...", "interface": "ge-0/0/0"}],
     "endpoints": [{"mac": "...", "ip": "198.51.100.1", "hostname": "..."}]
   }
 }
 ```
 
-### GET /api/devices *(deprecated)*
-Returns `301 Moved Permanently` redirect to `/api/nodes`. Use `/api/nodes` instead.
+**Prefix search response** includes `routes`, `fib`, `gateways`, and `arp_hits` (ARP entries within subnet).
+
+**Text search response** includes `lldp` (matching system names) and `endpoints` (matching hostnames).
 
 ## Nautobot Proxy
 

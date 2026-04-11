@@ -65,6 +65,7 @@ function sourceBadge(source) {
 const endpointsDT = new DataTable({
   containerId: 'endpoints-dt',
   columns: [
+    { key: 'classification', label: '', sortable: true, render: function(v) { return MNMIcons.deviceIcon(v || 'unknown', 'sm'); } },
     { key: 'ip', label: 'IP', sortable: true, render: function(v) {
       if (!v) return '-';
       if (excludedIpSet.has(v)) {

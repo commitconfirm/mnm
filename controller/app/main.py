@@ -1450,9 +1450,9 @@ async def node_detail_page(node_name: str):
     return FileResponse("app/static/node_detail.html")
 
 
-@app.get("/search")
-async def search_page():
-    return FileResponse("app/static/search.html")
+@app.get("/investigate")
+async def investigate_page():
+    return FileResponse("app/static/investigate.html")
 
 
 @app.get("/endpoints")
@@ -1696,96 +1696,280 @@ async def node_macs():
 
 
 # -------------------------------------------------------------------------
-# Global network search (Phase 2.85)
+# Investigations — unified network search (Phase 2.9)
 # -------------------------------------------------------------------------
 
-@app.get("/api/search", dependencies=[Depends(require_auth)])
-async def global_search(q: str = ""):
-    """Cross-node network search. Auto-detects query type:
-    MAC format → MAC search, IP → IP search, CIDR → prefix search, else hostname.
+def _normalize_mac_query(raw: str) -> str:
+    """Normalize any MAC format to uppercase colon-separated.
+
+    Accepts: AA:BB:CC:DD:EE:FF, aa-bb-cc-dd-ee-ff, aabb.ccdd.eeff, aabbccddeeff
+    Returns: AA:BB:CC:DD:EE:FF or empty string if not a valid MAC.
     """
+    import re
+    clean = re.sub(r"[^0-9a-fA-F]", "", raw)
+    if len(clean) != 12:
+        return ""
+    return ":".join(clean[i:i+2] for i in range(0, 12, 2)).upper()
+
+
+def _detect_query_type(q: str) -> str:
+    """Auto-detect query type from input string."""
     import ipaddress as _ipaddress
     import re
+    # MAC: any common format with 12 hex digits
+    mac_clean = re.sub(r"[^0-9a-fA-F]", "", q)
+    if len(mac_clean) == 12 and re.match(r"^[0-9a-fA-F]+$", mac_clean):
+        # Verify it looks intentional (has separators, or exactly 12 hex chars)
+        if (re.match(r'^([0-9a-fA-F]{2}[:\-]){5}[0-9a-fA-F]{2}$', q)
+                or re.match(r'^[0-9a-fA-F]{4}\.[0-9a-fA-F]{4}\.[0-9a-fA-F]{4}$', q)
+                or re.match(r'^[0-9a-fA-F]{12}$', q)):
+            return "mac"
+    # CIDR prefix
+    if "/" in q:
+        try:
+            _ipaddress.ip_network(q, strict=False)
+            return "prefix"
+        except ValueError:
+            pass
+    # IP address
+    try:
+        _ipaddress.ip_address(q)
+        return "ip"
+    except ValueError:
+        pass
+    return "text"
+
+
+@app.get("/api/investigate", dependencies=[Depends(require_auth)])
+async def investigate(
+    q: str = "",
+    node: str = "",
+    vlan: str = "",
+    type: str = "",
+):
+    """Contextual network investigation. Auto-detects query type:
+    MAC (any format) → MAC search, IP → IP search, CIDR → prefix search, else hostname/text.
+
+    Optional filters: node (filter to specific node), vlan (filter to VLAN),
+    type (force query type: mac, ip, prefix, text).
+    """
+    import ipaddress as _ipaddress
     from sqlalchemy import select
 
     q = q.strip()
     if not q:
-        return {"query": q, "type": "empty", "results": {}}
+        return {"query": q, "query_type": "empty", "results": {}}
 
+    query_type = type if type in ("mac", "ip", "prefix", "text") else _detect_query_type(q)
     results: dict = {}
+    node_filter = node.strip() if node else ""
+    vlan_filter = int(vlan) if vlan and vlan.isdigit() else None
 
-    # Detect query type
-    mac_pattern = re.compile(r'^([0-9a-fA-F]{2}[:\-]){5}[0-9a-fA-F]{2}$')
-    is_mac = bool(mac_pattern.match(q))
-    is_cidr = "/" in q
-    is_ip = False
-    if not is_mac and not is_cidr:
-        try:
-            _ipaddress.ip_address(q)
-            is_ip = True
-        except ValueError:
-            pass
+    if query_type == "mac":
+        mac_upper = _normalize_mac_query(q)
+        if not mac_upper:
+            mac_upper = q.upper()
 
-    query_type = "mac" if is_mac else ("cidr" if is_cidr else ("ip" if is_ip else "text"))
-
-    if is_mac:
-        mac_upper = q.upper()
-        # Search MAC tables across all nodes
         if db.is_ready():
             async with db.SessionLocal() as session:
-                mac_rows = (await session.execute(
-                    select(db.NodeMacEntry).where(db.NodeMacEntry.mac == mac_upper)
-                )).scalars().all()
-                results["mac_table"] = [r.to_dict() for r in mac_rows]
-                arp_rows = (await session.execute(
-                    select(db.NodeArpEntry).where(db.NodeArpEntry.mac == mac_upper)
-                )).scalars().all()
-                results["arp_table"] = [r.to_dict() for r in arp_rows]
-        # Search endpoints
-        ep = await endpoint_store.get_endpoint(q)
+                # ARP table hits
+                arp_stmt = select(db.NodeArpEntry).where(db.NodeArpEntry.mac == mac_upper)
+                if node_filter:
+                    arp_stmt = arp_stmt.where(db.NodeArpEntry.node_name == node_filter)
+                arp_rows = (await session.execute(arp_stmt)).scalars().all()
+                results["arp_hits"] = [r.to_dict() for r in arp_rows]
+
+                # MAC table hits
+                mac_stmt = select(db.NodeMacEntry).where(db.NodeMacEntry.mac == mac_upper)
+                if node_filter:
+                    mac_stmt = mac_stmt.where(db.NodeMacEntry.node_name == node_filter)
+                if vlan_filter is not None:
+                    mac_stmt = mac_stmt.where(db.NodeMacEntry.vlan == vlan_filter)
+                mac_rows = (await session.execute(mac_stmt)).scalars().all()
+                results["mac_hits"] = [r.to_dict() for r in mac_rows]
+
+                # Access port location — MAC table entries on non-uplink ports
+                access_entries = [m for m in results["mac_hits"]
+                                  if not _is_uplink_interface(m.get("interface", ""))]
+                if access_entries:
+                    loc = access_entries[0]
+                    results["location"] = {
+                        "switch": loc["node_name"],
+                        "interface": loc["interface"],
+                        "vlan": loc["vlan"],
+                        "description": f"Connected to {loc['node_name']} port {loc['interface']} in VLAN {loc['vlan']}",
+                    }
+
+        # Endpoint record
+        ep = await endpoint_store.get_endpoint(q if not _normalize_mac_query(q) else mac_upper)
         if ep:
             results["endpoint"] = ep
 
-    elif is_ip:
+        # VM host lookup from Proxmox
+        pxstate = proxmox_connector.get_state()
+        if pxstate.get("configured"):
+            for vm in pxstate.get("vms", []) + pxstate.get("containers", []):
+                vm_mac = (vm.get("mac") or "").upper()
+                if vm_mac and vm_mac == mac_upper:
+                    results["vm_host"] = {
+                        "name": vm.get("name", ""),
+                        "vmid": vm.get("vmid"),
+                        "node": vm.get("node", ""),
+                        "status": vm.get("status", ""),
+                        "type": vm.get("type", "qemu"),
+                    }
+                    break
+
+    elif query_type == "ip":
         if db.is_ready():
             async with db.SessionLocal() as session:
-                arp_rows = (await session.execute(
-                    select(db.NodeArpEntry).where(db.NodeArpEntry.ip == q)
-                )).scalars().all()
-                results["arp_table"] = [r.to_dict() for r in arp_rows]
-                route_rows = (await session.execute(
-                    select(db.Route).where(db.Route.prefix.contains(q))
-                )).scalars().all()
-                results["routes"] = [r.to_dict() for r in route_rows]
+                # ARP table hits
+                arp_stmt = select(db.NodeArpEntry).where(db.NodeArpEntry.ip == q)
+                if node_filter:
+                    arp_stmt = arp_stmt.where(db.NodeArpEntry.node_name == node_filter)
+                arp_rows = (await session.execute(arp_stmt)).scalars().all()
+                results["arp_hits"] = [r.to_dict() for r in arp_rows]
+
+                # Routing table hits — longest prefix match
+                route_rows = (await session.execute(select(db.Route))).scalars().all()
+                matching_routes = []
+                try:
+                    target = _ipaddress.ip_address(q)
+                    for r in route_rows:
+                        if node_filter and r.node_name != node_filter:
+                            continue
+                        try:
+                            net = _ipaddress.ip_network(r.prefix, strict=False)
+                            if target in net:
+                                matching_routes.append(r.to_dict())
+                        except ValueError:
+                            continue
+                except ValueError:
+                    pass
+                # Sort by prefix length (longest match first)
+                matching_routes.sort(key=lambda r: int(r["prefix"].split("/")[1]) if "/" in r["prefix"] else 32, reverse=True)
+                results["routes"] = matching_routes
+
+                # FIB hits
+                fib_rows = (await session.execute(select(db.NodeFibEntry))).scalars().all()
+                matching_fib = []
+                try:
+                    target = _ipaddress.ip_address(q)
+                    for f in fib_rows:
+                        if node_filter and f.node_name != node_filter:
+                            continue
+                        try:
+                            net = _ipaddress.ip_network(f.prefix, strict=False)
+                            if target in net:
+                                matching_fib.append(f.to_dict())
+                        except ValueError:
+                            continue
+                except ValueError:
+                    pass
+                matching_fib.sort(key=lambda r: int(r["prefix"].split("/")[1]) if "/" in r["prefix"] else 32, reverse=True)
+                if matching_fib:
+                    results["fib"] = matching_fib
+
+        # Endpoint record
         endpoints = await endpoint_store.list_endpoints()
         matching = [e for e in endpoints if e.get("ip") == q or q in (e.get("additional_ips") or [])]
         if matching:
             results["endpoints"] = matching
 
-    elif is_cidr:
+    elif query_type == "prefix":
+        try:
+            network = _ipaddress.ip_network(q, strict=False)
+        except ValueError:
+            return {"query": q, "query_type": query_type, "results": {}}
+
         if db.is_ready():
             async with db.SessionLocal() as session:
-                route_rows = (await session.execute(
-                    select(db.Route).where(db.Route.prefix.contains(q.split("/")[0]))
-                )).scalars().all()
-                results["routes"] = [r.to_dict() for r in route_rows]
+                # Routing table — exact and containing matches
+                route_rows = (await session.execute(select(db.Route))).scalars().all()
+                matching_routes = []
+                for r in route_rows:
+                    if node_filter and r.node_name != node_filter:
+                        continue
+                    try:
+                        route_net = _ipaddress.ip_network(r.prefix, strict=False)
+                        # Include routes that overlap with the query prefix
+                        if route_net.overlaps(network):
+                            matching_routes.append(r.to_dict())
+                    except ValueError:
+                        continue
+                results["routes"] = matching_routes
+
+                # FIB entries
+                fib_rows = (await session.execute(select(db.NodeFibEntry))).scalars().all()
+                matching_fib = []
+                for f in fib_rows:
+                    if node_filter and f.node_name != node_filter:
+                        continue
+                    try:
+                        fib_net = _ipaddress.ip_network(f.prefix, strict=False)
+                        if fib_net.overlaps(network):
+                            matching_fib.append(f.to_dict())
+                    except ValueError:
+                        continue
+                if matching_fib:
+                    results["fib"] = matching_fib
+
+                # Gateway identification — connected routes or lowest metric
+                gateways = []
+                for r in matching_routes:
+                    if r.get("protocol") in ("local", "connected") or r.get("next_hop") in ("", "0.0.0.0"):
+                        gateways.append(r)
+                if not gateways and matching_routes:
+                    by_metric = sorted(matching_routes, key=lambda r: r.get("metric") or 999999)
+                    gateways = [by_metric[0]]
+                if gateways:
+                    results["gateways"] = gateways
+
+                # ARP entries within the subnet
+                arp_rows = (await session.execute(select(db.NodeArpEntry))).scalars().all()
+                matching_arp = []
+                for a in arp_rows:
+                    if node_filter and a.node_name != node_filter:
+                        continue
+                    try:
+                        if _ipaddress.ip_address(a.ip) in network:
+                            matching_arp.append(a.to_dict())
+                    except ValueError:
+                        continue
+                if matching_arp:
+                    results["arp_hits"] = matching_arp
 
     else:
-        # Text search — hostname, LLDP system names
+        # Text search — hostname, LLDP system names, DHCP hostnames
         q_lower = q.lower()
         if db.is_ready():
             async with db.SessionLocal() as session:
-                lldp_rows = (await session.execute(
-                    select(db.NodeLldpEntry).where(
-                        db.NodeLldpEntry.remote_system_name.ilike(f"%{q}%"))
-                )).scalars().all()
-                results["lldp"] = [r.to_dict() for r in lldp_rows]
+                lldp_stmt = select(db.NodeLldpEntry).where(
+                    db.NodeLldpEntry.remote_system_name.ilike(f"%{q}%"))
+                if node_filter:
+                    lldp_stmt = lldp_stmt.where(db.NodeLldpEntry.node_name == node_filter)
+                lldp_rows = (await session.execute(lldp_stmt)).scalars().all()
+                if lldp_rows:
+                    results["lldp"] = [r.to_dict() for r in lldp_rows]
+
         endpoints = await endpoint_store.list_endpoints()
-        matching = [e for e in endpoints if q_lower in (e.get("hostname") or "").lower()]
+        matching = [e for e in endpoints
+                    if q_lower in (e.get("hostname") or "").lower()
+                    or q_lower in (e.get("device_name") or "").lower()]
         if matching:
             results["endpoints"] = matching
 
-    return {"query": q, "type": query_type, "results": results}
+    return {"query": q, "query_type": query_type, "results": results}
+
+
+def _is_uplink_interface(name: str) -> bool:
+    """Quick heuristic: return True if interface name looks like a trunk/uplink."""
+    lower = name.lower()
+    for prefix in ("ae", "irb", "lo", "vlan", "me", "em", "fxp", "bme",
+                    "port-channel", "loopback", "nve", "sup-eth", "vtep"):
+        if lower.startswith(prefix):
+            return True
+    return False
 
 
 # -------------------------------------------------------------------------

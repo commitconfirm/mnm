@@ -13,6 +13,7 @@
       <a href="/" class="active">Dashboard</a>
       <span class="nav-separator"></span>
       <span class="nav-group-label">Intelligence</span>
+      <a href="/investigate">Investigations</a>
       <a href="/nodes">Nodes</a>
       <a href="/endpoints">Endpoints</a>
       <a href="/events">Events</a>
@@ -27,13 +28,20 @@
         <button data-theme="dark" title="Dark" class="active">Dark</button>
         <button data-theme="system" title="System">Auto</button>
       </div>
-      <a href="/search" id="search-nav-btn" title="Search">&#128269;</a>
       <a href="#" id="prefs-btn" title="Preferences">&#9881;</a>
       <a id="logout-link" href="#">Logout</a>
     </nav>
   </header>
 
   <div class="container">
+    <!-- Search bar -->
+    <div class="card" style="margin-bottom: 16px;">
+      <form id="dashboard-search" style="display:flex; gap:12px; align-items:center;" action="/investigate" method="get">
+        <input type="text" name="q" placeholder="Investigate: MAC, IP, CIDR prefix, or hostname..." style="flex:1; font-size:1rem; padding:10px 16px;">
+        <button type="submit" class="btn primary" style="padding:10px 20px;">Investigate</button>
+      </form>
+    </div>
+
     <!-- Stats row -->
     <div class="grid-4" style="margin-bottom: 16px;">
       <div class="card">
@@ -67,9 +75,9 @@
       <h2>Services</h2>
       <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
         <div class="service-links">
-          <a class="service-link" href="#" target="_blank" rel="noopener">Nautobot</a>
-          <a class="service-link" href="#" target="_blank" rel="noopener">Grafana</a>
-          <a class="service-link" href="#" target="_blank" rel="noopener">Prometheus</a>
+          <a class="service-link" href="#" target="_blank" rel="noopener"><img class="service-icon" src="/static/icons/services/nautobot.svg" alt="Nautobot">Nautobot</a>
+          <a class="service-link" href="#" target="_blank" rel="noopener"><img class="service-icon" src="/static/icons/services/grafana.svg" alt="Grafana">Grafana</a>
+          <a class="service-link" href="#" target="_blank" rel="noopener"><img class="service-icon" src="/static/icons/services/prometheus.svg" alt="Prometheus">Prometheus</a>
         </div>
         <div style="display: flex; gap: 8px;">
           <button id="sync-all-btn" class="btn" title="Sync interfaces, cables, and LLDP data from all onboarded devices">Sync Network Data</button>
@@ -291,6 +299,7 @@
   </div>
 
   <script src="/static/js/datatable.js"></script>
+  <script src="/static/js/icons.js"></script>
   <script src="/static/js/preferences.js"></script>
   <script src="/static/js/status.js"></script>
 </body>

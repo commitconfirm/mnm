@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MNM - Investigations</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <style>
+    .search-box { display:flex; gap:12px; align-items:center; margin-bottom:12px; }
+    .search-box input { flex:1; font-size:1.05rem; padding:12px 18px; }
+    .search-box .btn { font-size:0.95rem; padding:12px 24px; }
+    .search-filters { display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin-bottom:8px; }
+    .search-filters label { display:inline; margin:0; font-size:0.8rem; color:var(--text-muted); }
+    .search-filters select, .search-filters input { padding:6px 10px; font-size:0.85rem; min-width:120px; }
+    .result-section { margin-bottom:16px; }
+    .result-section h3 { font-size:0.8rem; text-transform:uppercase; letter-spacing:0.5px; color:var(--text-muted); margin-bottom:8px; }
+    .result-section .count { color:var(--accent); font-weight:600; }
+    .query-info { font-size:0.85rem; color:var(--text-muted); padding:12px 20px; }
+    .query-info .query-type { color:var(--accent); font-weight:600; text-transform:uppercase; }
+    .location-card { padding:16px 20px; background:var(--bg-elevated); border-radius:var(--radius); font-size:0.9rem; }
+    .location-card .location-label { font-size:0.75rem; text-transform:uppercase; color:var(--text-muted); margin-bottom:6px; }
+    .location-card .location-text { color:var(--text); font-weight:500; }
+    .vm-card { display:flex; gap:16px; align-items:center; padding:12px 20px; background:var(--bg-elevated); border-radius:var(--radius); }
+    .vm-card .vm-name { font-weight:600; }
+    .vm-card .vm-detail { font-size:0.85rem; color:var(--text-muted); }
+  </style>
+</head>
+<body>
+  <header>
+    <a href="/" class="logo"><span>MNM</span> Controller</a>
+    <nav>
+      <a href="/">Dashboard</a>
+      <span class="nav-separator"></span>
+      <span class="nav-group-label">Intelligence</span>
+      <a href="/investigate" class="active">Investigations</a>
+      <a href="/nodes">Nodes</a>
+      <a href="/endpoints">Endpoints</a>
+      <a href="/events">Events</a>
+      <span class="nav-separator"></span>
+      <span class="nav-group-label">Operations</span>
+      <a href="/discover">Discovery</a>
+      <a href="/jobs">Jobs</a>
+      <a href="/logs">Logs</a>
+      <span class="nav-separator"></span>
+      <div class="theme-switcher">
+        <button data-theme="light" title="Light">Light</button>
+        <button data-theme="dark" title="Dark" class="active">Dark</button>
+        <button data-theme="system" title="System">Auto</button>
+      </div>
+      <a href="#" id="prefs-btn" title="Preferences">&#9881;</a>
+      <a id="logout-link" href="#">Logout</a>
+    </nav>
+  </header>
+
+  <div class="container">
+    <div class="card">
+      <h2>Investigations</h2>
+      <div class="search-box">
+        <input type="text" id="search-input" placeholder="MAC address, IP, CIDR prefix, or hostname..." autofocus>
+        <button id="search-btn" class="btn primary">Investigate</button>
+      </div>
+      <div class="search-filters">
+        <label>Node:</label>
+        <select id="filter-node"><option value="">All nodes</option></select>
+        <label>VLAN:</label>
+        <input type="text" id="filter-vlan" placeholder="Any" style="width:80px;">
+        <label>Type:</label>
+        <select id="filter-type">
+          <option value="">Auto-detect</option>
+          <option value="mac">MAC</option>
+          <option value="ip">IP</option>
+          <option value="prefix">Prefix</option>
+          <option value="text">Hostname</option>
+        </select>
+      </div>
+      <div style="color:var(--text-muted); font-size:0.78rem; margin-top:4px;">
+        Accepts any MAC format (AA:BB:CC:DD:EE:FF, aa-bb-cc-dd-ee-ff, aabb.ccdd.eeff, aabbccddeeff)
+      </div>
+    </div>
+
+    <div id="search-results" style="display:none">
+      <div id="query-info" class="card query-info" style="display:none"></div>
+
+      <div id="section-location" class="result-section card" style="display:none">
+        <h3>Access Port Location</h3>
+        <div class="location-card" id="location-content"></div>
+      </div>
+
+      <div id="section-vm" class="result-section card" style="display:none">
+        <h3>VM Host</h3>
+        <div class="vm-card" id="vm-content"></div>
+      </div>
+
+      <div id="section-endpoint" class="result-section card" style="display:none">
+        <h3>Endpoint Record</h3>
+        <div id="endpoint-content"></div>
+      </div>
+
+      <div id="section-endpoints" class="result-section card" style="display:none">
+        <h3>Endpoint Matches <span class="count" id="ep-count"></span></h3>
+        <div id="ep-table-wrap"></div>
+      </div>
+
+      <div id="section-arp" class="result-section card" style="display:none">
+        <h3>ARP Table <span class="count" id="arp-count"></span></h3>
+        <div id="arp-table-wrap"></div>
+      </div>
+
+      <div id="section-mac" class="result-section card" style="display:none">
+        <h3>MAC Table <span class="count" id="mac-count"></span></h3>
+        <div id="mac-table-wrap"></div>
+      </div>
+
+      <div id="section-routes" class="result-section card" style="display:none">
+        <h3>Routing Table <span class="count" id="route-count"></span></h3>
+        <div id="route-table-wrap"></div>
+      </div>
+
+      <div id="section-fib" class="result-section card" style="display:none">
+        <h3>Forwarding Table (FIB) <span class="count" id="fib-count"></span></h3>
+        <div id="fib-table-wrap"></div>
+      </div>
+
+      <div id="section-gateways" class="result-section card" style="display:none">
+        <h3>Gateway Identification <span class="count" id="gw-count"></span></h3>
+        <div id="gw-table-wrap"></div>
+      </div>
+
+      <div id="section-lldp" class="result-section card" style="display:none">
+        <h3>LLDP Matches <span class="count" id="lldp-count"></span></h3>
+        <div id="lldp-table-wrap"></div>
+      </div>
+
+      <div id="no-results" class="card" style="display:none; text-align:center; color:var(--text-muted); padding:32px;">
+        No results found.
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/js/datatable.js"></script>
+  <script src="/static/js/icons.js"></script>
+  <script src="/static/js/preferences.js"></script>
+  <script src="/static/js/investigate.js"></script>
+</body>
+</html>

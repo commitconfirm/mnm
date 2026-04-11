@@ -42,15 +42,16 @@ async function load() {
     ['Switch', ep.current_switch],
     ['Port', ep.current_port],
     ['VLAN', ep.current_vlan],
-    ['Classification', ep.classification],
+    ['Classification', ep.classification, true],
     ['First Seen', ep.first_seen],
     ['Last Seen', ep.last_seen],
     ['Source', ep.source],
   ];
-  meta.innerHTML = fields.map(f =>
-    '<div class="stat"><div class="value" style="font-size:1rem">' + escHtml(f[1] || '-') +
-    '</div><div class="label">' + escHtml(f[0]) + '</div></div>'
-  ).join('');
+  meta.innerHTML = fields.map(f => {
+    var val = f[2] ? MNMIcons.deviceIcon(f[1] || 'unknown') + ' ' + escHtml(f[1] || '-') : escHtml(f[1] || '-');
+    return '<div class="stat"><div class="value" style="font-size:1rem">' + val +
+    '</div><div class="label">' + escHtml(f[0]) + '</div></div>';
+  }).join('');
 
   // Timeline (oldest first narrative)
   const tlEl = document.getElementById('ep-timeline');

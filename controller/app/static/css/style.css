@@ -203,6 +203,9 @@ td {
 }
 
 tr:last-child td { border-bottom: none; }
+/* Alternating row colors — theme-aware */
+tbody tr:nth-child(even) { background: var(--bg-elevated); }
+tbody tr:hover { background: var(--bg-elevated); filter: brightness(1.1); }
 
 /* Status dots */
 .dot-wrap {
@@ -553,13 +556,24 @@ th.sortable.desc::after { content: ' \2193'; opacity: 1; }
 .full-width-table table { width: 100%; }
 
 /* Preferences gear icon */
-#prefs-btn, #search-nav-btn {
+#prefs-btn {
   font-size: 1.1rem;
   color: var(--text-muted);
   cursor: pointer;
   text-decoration: none;
 }
-#prefs-btn:hover, #search-nav-btn:hover { color: var(--text); text-decoration: none; }
+#prefs-btn:hover { color: var(--text); text-decoration: none; }
+
+/* Device classification icons (Affinity set) */
+.device-icon { width: 20px; height: 20px; vertical-align: middle; margin-right: 6px; }
+.device-icon-sm { width: 16px; height: 16px; }
+.device-icon-lg { width: 28px; height: 28px; }
+
+/* Service icons (dashboard links) */
+.service-icon { width: 18px; height: 18px; vertical-align: middle; margin-right: 6px; }
+
+/* Icon + text in table cells */
+.icon-cell { display: inline-flex; align-items: center; gap: 4px; }
 
 /* Responsive */
 @media (max-width: 768px) {
