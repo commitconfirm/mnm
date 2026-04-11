@@ -1632,6 +1632,18 @@ async def maintenance_stats() -> dict:
         auto_disc_count = (await session.execute(
             select(func.count()).select_from(db.AutoDiscoveryRun)
         )).scalar_one()
+        arp_count = (await session.execute(
+            select(func.count()).select_from(db.NodeArpEntry)
+        )).scalar_one()
+        mac_count = (await session.execute(
+            select(func.count()).select_from(db.NodeMacEntry)
+        )).scalar_one()
+        lldp_count = (await session.execute(
+            select(func.count()).select_from(db.NodeLldpEntry)
+        )).scalar_one()
+        fib_count = (await session.execute(
+            select(func.count()).select_from(db.NodeFibEntry)
+        )).scalar_one()
     return {
         "endpoint_rows": int(endpoint_count),
         "event_rows": int(event_count),
@@ -1640,6 +1652,10 @@ async def maintenance_stats() -> dict:
         "route_rows": int(route_count_val),
         "bgp_neighbor_rows": int(bgp_count_val),
         "auto_discovery_rows": int(auto_disc_count),
+        "arp_rows": int(arp_count),
+        "mac_rows": int(mac_count),
+        "lldp_rows": int(lldp_count),
+        "fib_rows": int(fib_count),
         "oldest_event": oldest_event.isoformat() if oldest_event else None,
         "oldest_observation": oldest_observation.isoformat() if oldest_observation else None,
     }

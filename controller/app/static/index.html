@@ -5,6 +5,26 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>MNM - Dashboard</title>
   <link rel="stylesheet" href="/static/css/style.css">
+  <style>
+    /* Container health bar */
+    .svc-bar { display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
+    .svc-item { display:inline-flex; align-items:center; gap:6px; padding:6px 12px; background:var(--bg-elevated); border:1px solid var(--border); border-radius:var(--radius); font-size:0.82rem; }
+    .svc-item img { width:16px; height:16px; }
+    .svc-item a { color:var(--text); text-decoration:none; }
+    .svc-item a:hover { color:var(--accent); }
+    .svc-item .svc-name { font-weight:500; }
+    /* Node health summary bar */
+    .health-summary { padding:10px 16px; border-radius:var(--radius); font-size:0.85rem; font-weight:500; margin-bottom:12px; }
+    .health-summary.all-good { background:rgba(63,185,80,0.1); border:1px solid rgba(63,185,80,0.3); color:var(--green); }
+    .health-summary.has-issues { background:rgba(248,81,73,0.1); border:1px solid rgba(248,81,73,0.3); color:var(--red); }
+    /* System health grid */
+    .sys-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(180px, 1fr)); gap:12px; }
+    .sys-item { text-align:center; }
+    .sys-item .sys-val { font-size:1.3rem; font-weight:700; }
+    .sys-item .sys-label { font-size:0.75rem; color:var(--text-muted); margin-top:2px; }
+    /* Interface error banner */
+    .iface-ok { padding:12px 16px; background:rgba(63,185,80,0.08); border:1px solid rgba(63,185,80,0.2); border-radius:var(--radius); color:var(--green); font-size:0.85rem; }
+  </style>
 </head>
 <body>
   <header>
@@ -34,98 +54,100 @@
   </header>
 
   <div class="container">
-    <!-- Search bar -->
-    <div class="card" style="margin-bottom: 16px;">
-      <form id="dashboard-search" style="display:flex; gap:12px; align-items:center;" action="/investigate" method="get">
-        <input type="text" name="q" placeholder="Investigate: MAC, IP, CIDR prefix, or hostname..." style="flex:1; font-size:1rem; padding:10px 16px;">
-        <button type="submit" class="btn primary" style="padding:10px 20px;">Investigate</button>
-      </form>
-    </div>
-
-    <!-- Stats row -->
-    <div class="grid-4" style="margin-bottom: 16px;">
-      <div class="card">
-        <div class="stat">
-          <div class="value" id="device-count">-</div>
-          <div class="label">Nodes</div>
-        </div>
+    <!-- Quick Actions row: three cards, equal height -->
+    <div class="grid-3" style="margin-bottom:16px; align-items:stretch;">
+      <!-- Investigate -->
+      <div class="card" style="margin-bottom:0;">
+        <h2>Investigate</h2>
+        <form id="dashboard-search" style="display:flex; gap:8px; align-items:center;" action="/investigate" method="get">
+          <input type="text" name="q" placeholder="MAC, IP, CIDR, or hostname..." style="flex:1; font-size:0.9rem; padding:8px 12px;">
+          <button type="submit" class="btn primary small">Search</button>
+        </form>
       </div>
-      <div class="card">
-        <div class="stat">
-          <div class="value" id="ip-count">-</div>
-          <div class="label">IPs Tracked</div>
-        </div>
+      <!-- Discover -->
+      <div class="card" style="margin-bottom:0;">
+        <h2>Discover</h2>
+        <form id="dashboard-discover" style="display:flex; gap:8px; align-items:center;" onsubmit="return false;">
+          <input type="text" id="quick-discover-input" placeholder="IP or CIDR to sweep..." style="flex:1; font-size:0.9rem; padding:8px 12px;">
+          <button type="button" id="quick-discover-btn" class="btn small">Sweep</button>
+        </form>
+        <div id="sweep-status" style="margin-top:6px; font-size:0.78rem; color:var(--text-muted);"></div>
       </div>
-      <div class="card">
-        <div class="stat">
-          <div class="value" id="container-count">-</div>
-          <div class="label">Docker Containers</div>
+      <!-- Operations -->
+      <div class="card" style="margin-bottom:0;">
+        <h2>Operations</h2>
+        <div style="display:flex; gap:8px; align-items:stretch; min-height:36px;">
+          <button id="sync-all-btn" class="btn small" style="flex:1;white-space:nowrap;padding-top:8px;padding-bottom:8px;" title="Sync interfaces, cables, and LLDP from all nodes">Sync Network Data</button>
+          <button id="trigger-collection-btn" class="btn small" style="flex:1;white-space:nowrap;padding-top:8px;padding-bottom:8px;" title="Trigger endpoint collection on all nodes">Collect Endpoints</button>
+          <button id="run-sweep-btn" class="btn small" style="flex:1;white-space:nowrap;padding-top:8px;padding-bottom:8px;" title="Re-run saved sweep schedule">Run Sweep</button>
         </div>
-      </div>
-      <div class="card">
-        <div class="stat">
-          <div class="value" id="healthy-count">-</div>
-          <div class="label">Healthy</div>
-        </div>
+        <div id="ops-status" style="margin-top:6px; font-size:0.78rem; color:var(--text-muted);"></div>
       </div>
     </div>
 
-    <!-- Service links + actions -->
+    <!-- Services: split into user-facing and infrastructure -->
+    <div class="grid-2" style="margin-bottom:16px;">
+      <div class="card" style="margin-bottom:0;">
+        <h2>Services
+          <span style="float:right;font-weight:normal;font-size:0.8rem;color:var(--text-muted)" id="svc-summary"></span>
+        </h2>
+        <div class="svc-bar" id="svc-bar-services">
+          <span style="color:var(--text-muted);font-size:0.85rem">Loading...</span>
+        </div>
+      </div>
+      <div class="card" style="margin-bottom:0;">
+        <h2>Infrastructure
+          <span style="float:right;font-weight:normal;font-size:0.8rem;color:var(--text-muted)" id="infra-summary"></span>
+        </h2>
+        <div class="svc-bar" id="svc-bar-infra">
+          <span style="color:var(--text-muted);font-size:0.85rem">Loading...</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Node Polling Health -->
+    <div class="card" id="polling-card" style="display:none">
+      <h2>Node Polling Health <a href="/nodes" style="font-size:0.8rem;font-weight:normal;float:right">View all &rarr;</a></h2>
+      <div id="polling-summary" class="health-summary all-good"></div>
+      <table>
+        <thead><tr><th></th><th>Node</th><th>Primary IP</th><th>Platform</th><th class="center">Health</th><th>Last Polled</th><th></th></tr></thead>
+        <tbody id="polling-table"></tbody>
+      </table>
+    </div>
+
+    <!-- System Health -->
     <div class="card">
-      <h2>Services</h2>
-      <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
-        <div class="service-links">
-          <a class="service-link" href="#" target="_blank" rel="noopener"><img class="service-icon" src="/static/icons/services/nautobot.svg" alt="Nautobot">Nautobot</a>
-          <a class="service-link" href="#" target="_blank" rel="noopener"><img class="service-icon" src="/static/icons/services/grafana.svg" alt="Grafana">Grafana</a>
-          <a class="service-link" href="#" target="_blank" rel="noopener"><img class="service-icon" src="/static/icons/services/prometheus.svg" alt="Prometheus">Prometheus</a>
-        </div>
-        <div style="display: flex; gap: 8px;">
-          <button id="sync-all-btn" class="btn" title="Sync interfaces, cables, and LLDP data from all onboarded devices">Sync Network Data</button>
-        </div>
-      </div>
-      <div id="sync-status" style="display: none; margin-top: 8px; font-size: 0.85rem; color: var(--text-muted);"></div>
-    </div>
-
-    <!-- Discovery summary -->
-    <div class="card" id="sweep-info-card" style="display: none;">
-      <h2>Discovery</h2>
-      <div class="schedule-info" id="sweep-summary">Last sweep info loading...</div>
-    </div>
-
-    <!-- Endpoints -->
-    <div class="card" id="endpoints-card">
-      <h2>Endpoints</h2>
-      <div class="grid-3" style="margin-bottom: 12px;">
-        <div class="stat">
-          <div class="value" id="endpoint-count">-</div>
-          <div class="label">Endpoints Tracked</div>
-        </div>
-        <div class="stat">
-          <div class="value" id="endpoint-vlans">-</div>
-          <div class="label">VLANs Active</div>
-        </div>
-        <div class="stat">
-          <div class="value" id="endpoint-last">-</div>
-          <div class="label">Last Collection</div>
-        </div>
-      </div>
-      <div style="display: flex; gap: 12px; align-items: center;">
-        <a href="/endpoints" class="btn">View Endpoints</a>
-        <button id="trigger-collection-btn" class="btn">Trigger Collection</button>
-        <span class="schedule-info" id="collection-status"></span>
-      </div>
-      <div id="collection-progress" style="display: none; margin-top: 12px;">
-        <div class="progress-bar-wrap">
-          <div class="progress-bar" id="collection-bar"></div>
-        </div>
-        <div style="display: flex; justify-content: space-between; margin-top: 4px; font-size: 0.8rem; color: var(--text-muted);">
-          <span id="collection-phase">Collecting...</span>
-          <span id="collection-count">0 / 0 devices</span>
-        </div>
+      <h2>System Health</h2>
+      <div class="sys-grid" id="sys-health">
+        <div class="sys-item"><div class="sys-val" id="sys-uptime">-</div><div class="sys-label">Uptime</div></div>
+        <div class="sys-item"><div class="sys-val" id="sys-endpoints">-</div><div class="sys-label">Endpoints</div></div>
+        <div class="sys-item"><div class="sys-val" id="sys-routes">-</div><div class="sys-label">Routes</div></div>
+        <div class="sys-item"><div class="sys-val" id="sys-arp-rows">-</div><div class="sys-label">ARP Entries</div></div>
+        <div class="sys-item"><div class="sys-val" id="sys-sweep">-</div><div class="sys-label">Last Sweep</div></div>
+        <div class="sys-item"><div class="sys-val" id="sys-prune">-</div><div class="sys-label">Last Prune</div></div>
       </div>
     </div>
 
-    <!-- Proxmox connector (Phase 2.7+) -->
+    <!-- Interface Errors -->
+    <div class="card" id="iface-errors-card">
+      <h2>Interface Errors</h2>
+      <div id="iface-errors-content">
+        <span style="color:var(--text-muted);font-size:0.85rem">Loading...</span>
+      </div>
+    </div>
+
+    <!-- Recent Events -->
+    <div class="card" id="recent-events-card">
+      <h2>Recent Events <a href="/events" style="font-size:0.8rem;font-weight:normal;float:right">View all &rarr;</a></h2>
+      <table>
+        <thead><tr><th>When</th><th>MAC</th><th>Event</th><th>From &rarr; To</th></tr></thead>
+        <tbody id="recent-events-tbody">
+          <tr><td colspan="4" style="text-align:center;color:var(--text-muted)">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Proxmox (if configured) -->
     <div class="card" id="proxmox-card" style="display:none">
       <h2>Proxmox <span id="proxmox-link" style="font-size:0.8rem;font-weight:normal;float:right"></span></h2>
       <div class="grid-4" style="margin-bottom:12px">
@@ -139,18 +161,61 @@
       <div id="proxmox-alerts" style="margin-top:8px"></div>
     </div>
 
-    <!-- Recent Events (Phase 2.7) -->
-    <div class="card" id="recent-events-card">
-      <h2>Recent Events <a href="/events" style="font-size:0.8rem;font-weight:normal;float:right">View all &rarr;</a></h2>
+    <!-- Advisories -->
+    <div class="card" id="incomplete-card" style="display:none">
+      <h2>Incomplete Nodes <span id="incomplete-count-badge" style="font-size:0.8rem;font-weight:normal;color:var(--accent)"></span>
+        <button id="sync-incomplete-btn" class="btn small" style="float:right">Sync All</button>
+      </h2>
+      <div id="incomplete-summary" class="alert warning"></div>
+      <div id="sync-incomplete-progress" style="display:none; margin: 8px 0;">
+        <div class="progress-bar-wrap"><div class="progress-bar" id="sync-incomplete-bar"></div></div>
+        <div style="display:flex; justify-content:space-between; margin-top:4px; font-size:0.8rem; color:var(--text-muted)">
+          <span id="sync-incomplete-phase">Starting...</span>
+          <span id="sync-incomplete-count">0 / 0</span>
+        </div>
+      </div>
       <table>
-        <thead><tr><th>When</th><th>MAC</th><th>Event</th><th>From &rarr; To</th></tr></thead>
-        <tbody id="recent-events-tbody">
-          <tr><td colspan="4" style="text-align:center;color:var(--text-muted)">Loading...</td></tr>
-        </tbody>
+        <thead><tr><th>Device</th><th>Type</th><th>Platform</th><th>Location</th><th>Status</th><th>Sync</th><th></th></tr></thead>
+        <tbody id="incomplete-table"></tbody>
       </table>
     </div>
 
-    <!-- Database Maintenance -->
+    <div class="card" id="subnets-card" style="display:none">
+      <h2>Discovered Subnets <span id="subnet-count-badge" style="font-size:0.8rem;font-weight:normal;color:var(--accent)"></span></h2>
+      <p style="color:var(--text-muted); font-size:0.85rem; margin-top:-8px">
+        Subnets observed on onboarded devices but not in any sweep schedule.
+      </p>
+      <table>
+        <thead><tr><th>CIDR</th><th>IPs Seen</th><th>Sample</th><th></th></tr></thead>
+        <tbody id="subnets-table"></tbody>
+      </table>
+    </div>
+
+    <div class="card" id="route-advisories-card" style="display:none">
+      <h2>Route Advisories <span id="route-advisory-count" style="font-size:0.8rem;font-weight:normal;color:var(--accent)"></span></h2>
+      <table>
+        <thead><tr><th>Node</th><th>Prefix</th><th>Next-Hop</th><th>Protocol</th><th>VRF</th><th></th></tr></thead>
+        <tbody id="route-advisories-table"></tbody>
+      </table>
+    </div>
+
+    <div class="card" id="auto-discover-card" style="display:none">
+      <h2>Recently Auto-Discovered <span id="auto-discover-count" style="font-size:0.8rem;font-weight:normal;color:var(--accent)"></span></h2>
+      <table>
+        <thead><tr><th>Node</th><th>IP</th><th>Discovered From</th><th>Hop</th><th>Status</th></tr></thead>
+        <tbody id="auto-discover-table"></tbody>
+      </table>
+    </div>
+
+    <div class="card" id="neighbors-card" style="display:none">
+      <h2>Unrecognized LLDP Neighbors <span id="neighbor-count-badge" style="font-size:0.8rem;font-weight:normal;color:var(--accent)"></span></h2>
+      <table>
+        <thead><tr><th>Neighbor</th><th>Connected To</th><th>Classification</th><th>MAC Vendor</th></tr></thead>
+        <tbody id="neighbor-table"></tbody>
+      </table>
+    </div>
+
+    <!-- Database Maintenance (bottom) -->
     <div class="card" id="maintenance-card">
       <h2>Database Maintenance
         <span style="font-size:0.8rem;font-weight:normal;color:var(--text-muted);float:right" id="maintenance-retention"></span>
@@ -168,133 +233,12 @@
         <div class="stat"></div>
       </div>
       <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-top:8px">
-        <button id="maint-preview-btn" class="btn">Preview Prune</button>
-        <button id="maint-prune-btn" class="btn">Run Prune Now</button>
+        <button id="maint-preview-btn" class="btn small">Preview Prune</button>
+        <button id="maint-prune-btn" class="btn small">Run Prune Now</button>
         <span class="schedule-info" id="maint-last-run"></span>
       </div>
       <div id="maint-preview-result" style="display:none; margin-top:12px" class="alert"></div>
       <div id="maint-meta" style="margin-top:8px; font-size:0.8rem; color:var(--text-muted)"></div>
-    </div>
-
-    <!-- Polling Status: per-node collection health -->
-    <div class="card" id="polling-card" style="display:none">
-      <h2>Polling Status <a href="/nodes" style="font-size:0.8rem;font-weight:normal;float:right">View all &rarr;</a></h2>
-      <table>
-        <thead>
-          <tr>
-            <th>Node</th>
-            <th>ARP</th>
-            <th>MAC</th>
-            <th>DHCP</th>
-            <th>LLDP</th>
-            <th>Routes</th>
-            <th>BGP</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody id="polling-table"></tbody>
-      </table>
-    </div>
-
-    <!-- Incomplete onboarding advisory: nodes in Nautobot with no IPs -->
-    <div class="card" id="incomplete-card" style="display:none">
-      <h2>Incomplete Nodes
-        <button id="sync-incomplete-btn" class="btn" style="float:right">Sync All</button>
-      </h2>
-      <div id="incomplete-summary" class="alert warning"></div>
-      <div id="sync-incomplete-progress" style="display:none; margin: 8px 0;">
-        <div class="progress-bar-wrap"><div class="progress-bar" id="sync-incomplete-bar"></div></div>
-        <div style="display:flex; justify-content:space-between; margin-top:4px; font-size:0.8rem; color:var(--text-muted)">
-          <span id="sync-incomplete-phase">Starting...</span>
-          <span id="sync-incomplete-count">0 / 0</span>
-        </div>
-      </div>
-      <table>
-        <thead><tr><th>Device</th><th>Type</th><th>Platform</th><th>Location</th><th>Status</th><th>Sync</th><th></th></tr></thead>
-        <tbody id="incomplete-table"></tbody>
-      </table>
-      <p style="color:var(--text-muted); font-size:0.8rem; margin-top:8px">
-        These devices exist in Nautobot but have no primary IP and no interface
-        IPs assigned, so MNM cannot SNMP-poll or ARP-collect from them. Click
-        <strong>Sync All</strong> to trigger Nautobot's "Sync Network Data From
-        Network" job for each device — the card will disappear once they're healthy.
-      </p>
-    </div>
-
-    <!-- Subnet advisory: subnets seen on onboarded devices but not in any sweep schedule -->
-    <div class="card" id="subnets-card" style="display:none">
-      <h2>Discovered Subnets <span style="font-size:0.8rem;font-weight:normal;color:var(--text-muted);float:right">advisory only</span></h2>
-      <p style="color:var(--text-muted); font-size:0.85rem; margin-top:-8px">
-        These subnets were observed on onboarded devices but aren't in any sweep
-        schedule yet. MNM never auto-expands scope (Rule 6) — review and add
-        the ones you want included in periodic sweeps.
-      </p>
-      <table>
-        <thead><tr><th>CIDR</th><th>IPs Seen</th><th>Sample</th><th></th></tr></thead>
-        <tbody id="subnets-table"></tbody>
-      </table>
-    </div>
-
-    <!-- Route Advisories: next-hops not in IPAM -->
-    <div class="card" id="route-advisories-card" style="display:none">
-      <h2>Route Advisories <span id="route-advisory-count" style="font-size:0.8rem;font-weight:normal;color:var(--text-muted);float:right">advisory only</span></h2>
-      <p style="color:var(--text-muted); font-size:0.85rem; margin-top:-8px">
-        These routes point to next-hop gateways that MNM hasn't seen in any
-        endpoint data or Nautobot IPAM. They may be discovery candidates.
-      </p>
-      <table>
-        <thead><tr><th>Node</th><th>Prefix</th><th>Next-Hop</th><th>Protocol</th><th>VRF</th><th></th></tr></thead>
-        <tbody id="route-advisories-table"></tbody>
-      </table>
-    </div>
-
-    <!-- Recently Auto-Discovered -->
-    <div class="card" id="auto-discover-card" style="display:none">
-      <h2>Recently Auto-Discovered
-        <span id="auto-discover-count" style="font-size:0.8rem;font-weight:normal;color:var(--text-muted);float:right"></span>
-      </h2>
-      <p style="color:var(--text-muted); font-size:0.85rem; margin-top:-8px">
-        These nodes were auto-discovered via LLDP neighbor walk in the last 24 hours.
-        Review to confirm they belong in your monitoring scope.
-      </p>
-      <table>
-        <thead><tr><th>Node</th><th>IP</th><th>Discovered From</th><th>Hop</th><th>Status</th></tr></thead>
-        <tbody id="auto-discover-table"></tbody>
-      </table>
-    </div>
-
-    <!-- LLDP Neighbors -->
-    <div class="card" id="neighbors-card" style="display: none;">
-      <h2>Unrecognized LLDP Neighbors</h2>
-      <div class="alert warning" id="neighbor-alert"></div>
-      <table>
-        <thead>
-          <tr>
-            <th>Neighbor</th>
-            <th>Connected To</th>
-            <th>Classification</th>
-            <th>MAC Vendor</th>
-          </tr>
-        </thead>
-        <tbody id="neighbor-table"></tbody>
-      </table>
-    </div>
-
-    <!-- Container status -->
-    <div class="card">
-      <h2>Container Status</h2>
-      <table>
-        <thead>
-          <tr>
-            <th class="center">Status</th>
-            <th>Container</th>
-            <th>Image</th>
-            <th>Health</th>
-            <th>Ports</th>
-          </tr>
-        </thead>
-        <tbody id="container-table"></tbody>
-      </table>
     </div>
   </div>
 

@@ -211,6 +211,59 @@ async def health():
     }
 
 
+@app.get("/api/dashboard/interface-errors", dependencies=[Depends(require_auth)])
+async def dashboard_interface_errors():
+    """Query Prometheus for interfaces with non-zero error/discard counters.
+
+    Returns a list of {node_name, interface, errors_in, errors_out, discards_in,
+    discards_out} for interfaces with any non-zero counter. Degrades gracefully
+    if Prometheus is unreachable.
+    """
+    import httpx as _httpx
+
+    prom_url = os.environ.get("PROMETHEUS_URL", "http://mnm-prometheus:9090")
+    metrics = {
+        "errors_in": "ifInErrors",
+        "errors_out": "ifOutErrors",
+        "discards_in": "ifInDiscards",
+        "discards_out": "ifOutDiscards",
+    }
+    # Collect all non-zero counters keyed by (instance, ifName)
+    iface_data: dict[tuple[str, str], dict] = {}
+
+    try:
+        async with _httpx.AsyncClient(timeout=10) as client:
+            for field, metric in metrics.items():
+                resp = await client.get(
+                    f"{prom_url}/api/v1/query",
+                    params={"query": f"{metric} > 0"},
+                )
+                if resp.status_code != 200:
+                    continue
+                results = resp.json().get("data", {}).get("result", [])
+                for r in results:
+                    labels = r.get("metric", {})
+                    instance = labels.get("instance", "")
+                    ifname = labels.get("ifName", labels.get("ifDescr", ""))
+                    device = labels.get("device_name", instance.split(":")[0])
+                    val = float(r.get("value", [0, 0])[1])
+                    if val <= 0:
+                        continue
+                    key = (device, ifname)
+                    if key not in iface_data:
+                        iface_data[key] = {
+                            "node_name": device,
+                            "interface": ifname,
+                            "errors_in": 0, "errors_out": 0,
+                            "discards_in": 0, "discards_out": 0,
+                        }
+                    iface_data[key][field] = int(val)
+    except Exception as e:
+        return {"interfaces": [], "error": str(e)}
+
+    return {"interfaces": sorted(iface_data.values(), key=lambda x: x["node_name"])}
+
+
 # -------------------------------------------------------------------------
 # Auth
 # -------------------------------------------------------------------------

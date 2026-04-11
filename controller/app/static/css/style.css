@@ -257,6 +257,7 @@ tbody tr:hover { background: var(--bg-elevated); filter: brightness(1.1); }
 .btn {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 6px;
   padding: 8px 16px;
   border: 1px solid var(--border);
@@ -267,12 +268,13 @@ tbody tr:hover { background: var(--bg-elevated); filter: brightness(1.1); }
   font-family: var(--font-sans);
   cursor: pointer;
   transition: all 0.15s;
+  text-align: center;
 }
 .btn:hover { border-color: var(--accent); color: var(--accent); background: var(--bg-surface); }
 .btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
 .btn.primary:hover { background: var(--accent-hover); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn.small { padding: 4px 10px; font-size: 0.8rem; }
+.btn.small { padding: 4px 8px; font-size: 0.78rem; }
 
 /* Forms */
 input, select {
