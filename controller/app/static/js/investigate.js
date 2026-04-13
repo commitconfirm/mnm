@@ -119,8 +119,8 @@ async function doSearch() {
         '<tr><td style="color:var(--text-muted)">IP(s)</td><td>' + allIps.map(esc).join(', ') + '</td></tr>' +
         '<tr><td style="color:var(--text-muted)">Hostname</td><td>' + esc(ep.hostname) + '</td></tr>' +
         '<tr><td style="color:var(--text-muted)">Vendor</td><td>' + esc(ep.mac_vendor) + '</td></tr>' +
-        '<tr><td style="color:var(--text-muted)">Switch / Port</td><td>' + esc(ep.device_name || ep.current_switch) + ' / ' + esc(ep.switch_port || ep.current_port) + '</td></tr>' +
-        '<tr><td style="color:var(--text-muted)">VLAN</td><td>' + (ep.vlan || ep.current_vlan || '-') + '</td></tr>' +
+        '<tr><td style="color:var(--text-muted)">Switch / Port</td><td>' + (function(){ var sw = ep.device_name || ep.current_switch || ''; var pt = ep.switch_port || ep.current_port || ''; sw = (sw === '(none)') ? '' : sw; pt = (pt === '(none)') ? '' : pt; return (sw || pt) ? esc(sw) + (sw && pt ? ' / ' : '') + esc(pt) : '-'; })() + '</td></tr>' +
+        '<tr><td style="color:var(--text-muted)">VLAN</td><td>' + (function(){ var v = ep.vlan || ep.current_vlan; return (v && v !== 0 && v !== '0') ? esc(String(v)) : '-'; })() + '</td></tr>' +
         '<tr><td style="color:var(--text-muted)">First Seen</td><td>' + esc(ep.first_seen) + '</td></tr>' +
         '<tr><td style="color:var(--text-muted)">Last Seen</td><td>' + esc(ep.last_seen) + '</td></tr>' +
         '</tbody></table>';
@@ -137,9 +137,9 @@ async function doSearch() {
         { key: 'ip', label: 'IP', sortable: true },
         { key: 'hostname', label: 'Hostname', sortable: true },
         { key: 'mac_vendor', label: 'Vendor', sortable: true },
-        { key: 'device_name', label: 'Switch', sortable: true },
-        { key: 'switch_port', label: 'Port', sortable: true },
-        { key: 'vlan', label: 'VLAN', sortable: true },
+        { key: 'device_name', label: 'Switch', sortable: true, render: function(v) { return (v && v !== '(none)') ? esc(v) : '-'; } },
+        { key: 'switch_port', label: 'Port', sortable: true, render: function(v) { return (v && v !== '(none)') ? esc(v) : '-'; } },
+        { key: 'vlan', label: 'VLAN', sortable: true, render: function(v) { return (v && v !== 0 && v !== '0') ? esc(String(v)) : '-'; } },
       ], 'investigate-endpoints', res.endpoints);
     }
 
@@ -167,7 +167,7 @@ async function doSearch() {
         { key: 'node_name', label: 'Node', sortable: true, render: function(v) { return nodeLink(v); } },
         { key: 'mac', label: 'MAC', sortable: true, render: function(v) { return macLink(v); } },
         { key: 'interface', label: 'Interface', sortable: true },
-        { key: 'vlan', label: 'VLAN', sortable: true },
+        { key: 'vlan', label: 'VLAN', sortable: true, render: function(v) { return (v && v !== 0 && v !== '0') ? esc(String(v)) : '-'; } },
         { key: 'entry_type', label: 'Type', sortable: true },
         { key: 'collected_at', label: 'Last Seen', sortable: true, render: function(v) { return timeAgo(v); } },
       ], 'investigate-mac', res.mac_hits);

@@ -910,8 +910,25 @@ async def _correlate_and_record(all_results: list[dict]) -> dict:
                         existing_additional.append(cip)
                 ep["additional_ips"] = existing_additional
 
+            # Derive change_source from which job types contributed to this
+            # device's data. If multiple jobs provided data (ARP + MAC + DHCP
+            # is the common case), tag the change as "poll" rather than a
+            # single job type — a field change could have come from any of
+            # them after correlation.
+            contributing = [
+                jt for jt in ("arp", "mac", "dhcp")
+                if data.get(jt)
+            ]
+            if len(contributing) == 1:
+                change_source = "poll_" + contributing[0]
+            else:
+                change_source = "poll"
+
             try:
-                await endpoint_store.upsert_endpoint(ep, source="infrastructure", uplinks=uplinks)
+                await endpoint_store.upsert_endpoint(
+                    ep, source="infrastructure", uplinks=uplinks,
+                    change_source=change_source,
+                )
                 total_recorded += 1
             except Exception:
                 total_failed += 1

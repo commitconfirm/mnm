@@ -34,7 +34,7 @@ var macDT = new DataTable({
   columns: [
     { key: 'mac', label: 'MAC', sortable: true, render: function(v) { return '<code>' + esc(v) + '</code>'; } },
     { key: 'interface', label: 'Interface', sortable: true, render: function(v) { return esc(v); } },
-    { key: 'vlan', label: 'VLAN', sortable: true, render: function(v) { return v != null ? esc(String(v)) : '-'; } },
+    { key: 'vlan', label: 'VLAN', sortable: true, render: function(v) { return (v != null && v !== 0 && v !== '0') ? esc(String(v)) : '-'; } },
     { key: 'entry_type', label: 'Type', sortable: true, render: function(v) { return '<span class="badge ' + esc(v) + '">' + esc(v) + '</span>'; } },
     { key: 'collected_at', label: 'Last Seen', sortable: true, render: function(v) { return '<span title="' + esc(v) + '">' + timeAgo(v) + '</span>'; } },
   ],
@@ -115,9 +115,9 @@ async function loadNodeInfo() {
     if (location) meta += '<div class="field"><div class="field-label">Location</div><div class="field-value">' + esc(location) + '</div></div>';
     document.getElementById('node-meta').innerHTML = meta;
 
-    if (dev.url) {
+    if (dev.id) {
       var link = document.getElementById('nautobot-link');
-      link.href = dev.url;
+      link.href = MNMServiceURLs.nautobotDevice(dev.id);
       link.style.display = 'inline-flex';
     }
 
@@ -254,6 +254,109 @@ function loadAll() {
   loadRoutes();
   loadLldp();
   loadBgp();
+  loadComments();
+  loadChangeHistory();
 }
 
-checkAuth().then(loadAll);
+// ---- Comments ----
+async function loadComments() {
+  try {
+    var r = await fetch('/api/comments?target_type=node&target_id=' + encodeURIComponent(nodeName));
+    if (!r.ok) return;
+    var comments = await r.json();
+    document.getElementById('comment-count').textContent = comments.length ? '(' + comments.length + ')' : '';
+    var list = document.getElementById('comment-list');
+    if (!comments.length) {
+      list.innerHTML = '<div style="color:var(--text-muted);font-size:0.85rem;padding:8px 0">No comments yet.</div>';
+      return;
+    }
+    list.innerHTML = comments.map(function(c) {
+      var when = new Date(c.created_at).toLocaleString();
+      return '<div style="padding:10px 12px;background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:8px">'
+        + '<div style="display:flex;justify-content:space-between;font-size:0.75rem;color:var(--text-muted);margin-bottom:4px">'
+        + '<span><strong>' + esc(c.created_by) + '</strong> &middot; ' + esc(when) + '</span>'
+        + '<button class="btn small" style="padding:2px 8px;font-size:0.72rem" data-comment-id="' + esc(c.id) + '">Delete</button>'
+        + '</div>'
+        + '<div style="white-space:pre-wrap">' + esc(c.comment_text) + '</div>'
+        + '</div>';
+    }).join('');
+  } catch (e) { console.error('Failed to load comments:', e); }
+}
+
+async function submitComment() {
+  var input = document.getElementById('comment-input');
+  var text = input.value.trim();
+  if (!text) return;
+  var btn = document.getElementById('comment-submit');
+  btn.disabled = true;
+  try {
+    var r = await fetch('/api/comments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target_type: 'node', target_id: nodeName, comment_text: text }),
+    });
+    if (!r.ok) { alert('Failed to add comment'); return; }
+    input.value = '';
+    await loadComments();
+    await loadChangeHistory();
+  } catch (e) { alert('Failed: ' + e.message); }
+  btn.disabled = false;
+}
+
+async function deleteComment(commentId) {
+  if (!confirm('Delete this comment?')) return;
+  try {
+    var r = await fetch('/api/comments/' + encodeURIComponent(commentId), { method: 'DELETE' });
+    if (r.status !== 204) { alert('Failed to delete'); return; }
+    await loadComments();
+    await loadChangeHistory();
+  } catch (e) { alert('Failed: ' + e.message); }
+}
+
+// ---- Change History ----
+var historyDT = null;
+
+async function loadChangeHistory() {
+  try {
+    var r = await fetch('/api/history?target_type=node&target_id=' + encodeURIComponent(nodeName) + '&limit=200');
+    if (!r.ok) return;
+    var history = await r.json();
+    document.getElementById('history-count').textContent = history.length ? '(' + history.length + ')' : '(none)';
+    if (!historyDT) {
+      historyDT = new DataTable({
+        containerId: 'history-dt',
+        columns: [
+          { key: 'changed_at', label: 'When', sortable: true, render: function(v) { return '<span title="' + esc(v) + '">' + new Date(v).toLocaleString() + '</span>'; } },
+          { key: 'field_name', label: 'Field', sortable: true, render: function(v) { return '<code>' + esc(v) + '</code>'; } },
+          { key: 'old_value', label: 'Old', sortable: false, render: function(v) { return v == null ? '<span style="color:var(--text-muted)">—</span>' : esc(v); } },
+          { key: 'new_value', label: 'New', sortable: false, render: function(v) { return v == null ? '<span style="color:var(--text-muted)">—</span>' : esc(v); } },
+          { key: 'change_source', label: 'Source', sortable: true, render: function(v) { return '<span class="badge">' + esc(v) + '</span>'; } },
+        ],
+        pageSize: 25,
+        storageKey: 'mnm-node-history',
+      });
+    }
+    historyDT.setData(history);
+    historyDT.render();
+  } catch (e) { console.error('Failed to load change history:', e); }
+}
+
+// Wire up comment submit + history toggle + delete (delegation)
+document.getElementById('comment-submit').addEventListener('click', submitComment);
+document.getElementById('history-toggle').addEventListener('click', function() {
+  var container = document.getElementById('history-container');
+  var btn = this;
+  if (container.style.display === 'none') {
+    container.style.display = '';
+    btn.innerHTML = btn.innerHTML.replace('&#9658;', '&#9660;');
+  } else {
+    container.style.display = 'none';
+    btn.innerHTML = btn.innerHTML.replace('&#9660;', '&#9658;');
+  }
+});
+document.getElementById('comment-list').addEventListener('click', function(e) {
+  var btn = e.target.closest('[data-comment-id]');
+  if (btn) deleteComment(btn.getAttribute('data-comment-id'));
+});
+
+checkAuth().then(function() { return MNMServiceURLs.load(); }).then(loadAll);

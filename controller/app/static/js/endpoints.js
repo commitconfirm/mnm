@@ -76,9 +76,9 @@ const endpointsDT = new DataTable({
     { key: 'mac', label: 'MAC', sortable: true, render: function(v) { return '<a href="/endpoints/' + encodeURIComponent(v) + '"><code>' + escHtml(v) + '</code></a>'; } },
     { key: 'mac_vendor', label: 'Vendor', sortable: true, render: function(v) { return escHtml(v || '-'); } },
     { key: 'hostname', label: 'Hostname', sortable: true, render: function(v, row) { return escHtml(v || row.dhcp_hostname || '-'); } },
-    { key: 'device_name', label: 'Switch', sortable: true, render: function(v, row) { return escHtml(v || row.switch || '-'); } },
-    { key: 'switch_port', label: 'Port', sortable: true, render: function(v, row) { return escHtml(v || row.port || '-'); } },
-    { key: 'vlan', label: 'VLAN', sortable: true, render: function(v) { return v != null ? escHtml(String(v)) : '-'; } },
+    { key: 'device_name', label: 'Switch', sortable: true, render: function(v, row) { var s = v || row.switch || ''; return (s && s !== '(none)') ? escHtml(s) : '-'; } },
+    { key: 'switch_port', label: 'Port', sortable: true, render: function(v, row) { var p = v || row.port || ''; return (p && p !== '(none)') ? escHtml(p) : '-'; } },
+    { key: 'vlan', label: 'VLAN', sortable: true, render: function(v) { return (v != null && v !== 0 && v !== '0') ? escHtml(String(v)) : '-'; } },
     { key: 'first_seen', label: 'First Seen', sortable: true, render: function(v) { return '<span title="' + escHtml(v || '') + '">' + timeAgo(v) + '</span>'; } },
     { key: 'last_seen', label: 'Last Seen', sortable: true, render: function(v) { return '<span title="' + escHtml(v || '') + '">' + timeAgo(v) + '</span>'; } },
     { key: 'source', label: 'Source', sortable: true, render: function(v) { return sourceBadge(v); } },
@@ -128,7 +128,12 @@ function populateFilters() {
 function uniqueValues(field) {
   const vals = new Set();
   allEndpoints.forEach(ep => {
-    if (ep[field]) vals.add(String(ep[field]));
+    var v = ep[field];
+    if (!v) return;
+    // Skip sentinel values
+    if (field === 'vlan' && (v === 0 || v === '0')) return;
+    if (String(v) === '(none)') return;
+    vals.add(String(v));
   });
   return Array.from(vals).sort();
 }

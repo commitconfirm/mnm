@@ -47,18 +47,16 @@ function fmtBytes(n) {
 var SVC_ICONS = {
   'mnm-nautobot': 'nautobot', 'mnm-grafana': 'grafana', 'mnm-prometheus': 'prometheus',
 };
-var SVC_LINKS = {}; // populated dynamically from hostname
+var SVC_LINKS = {}; // populated from /api/service-urls
 
 function initServiceLinks() {
-  var host = window.location.hostname;
-  var proto = window.location.protocol;
+  var urls = MNMServiceURLs.get();
   SVC_LINKS = {
-    'mnm-nautobot': proto + '//' + host + ':8443',
-    'mnm-grafana': proto + '//' + host + ':8080/grafana/',
-    'mnm-prometheus': proto + '//' + host + ':8080/prometheus/',
+    'mnm-nautobot': urls.nautobot,
+    'mnm-grafana': urls.grafana,
+    'mnm-prometheus': urls.prometheus,
   };
 }
-initServiceLinks();
 
 function containerDot(health, status) {
   if (health === 'healthy') return '<span class="dot green"></span>';
@@ -302,7 +300,7 @@ async function loadProxmox() {
     document.getElementById('proxmox-vms').textContent = d.vm_count;
     document.getElementById('proxmox-cts').textContent = d.container_count;
     document.getElementById('proxmox-last').textContent = d.last_run ? timeAgo(d.last_run) : '-';
-    var grafanaUrl = window.location.protocol + '//' + window.location.hostname + ':8080/grafana/d/mnm-proxmox-overview';
+    var grafanaUrl = MNMServiceURLs.grafanaDashboard('mnm-proxmox-overview');
     document.getElementById('proxmox-link').innerHTML = '<a href="' + grafanaUrl + '" target="_blank" rel="noopener">Grafana &rarr;</a>';
 
     if (d.nodes && d.nodes.length) {
@@ -392,7 +390,7 @@ async function loadIncompleteDevices() {
     if (badge) badge.textContent = devices.length;
     document.getElementById('incomplete-summary').textContent =
       devices.length + ' device' + (devices.length === 1 ? '' : 's') + ' with incomplete onboarding.';
-    var nautobotBase = window.location.protocol + '//' + window.location.hostname + ':8443';
+    var nautobotBase = MNMServiceURLs.nautobot();
     document.getElementById('incomplete-table').innerHTML = devices.map(function(dev) {
       var deviceUrl = nautobotBase + '/dcim/devices/' + dev.id + '/';
       return '<tr data-device-id="' + escHtml(dev.id) + '" data-device-name="' + escHtml(dev.name) + '">'
@@ -743,6 +741,9 @@ window.addEventListener('mnm-preferences-changed', startAutoRefresh);
 // ---------------------------------------------------------------------------
 
 checkAuth().then(function() {
+  return MNMServiceURLs.load();
+}).then(function() {
+  initServiceLinks();
   loadContainers();
   loadPolling();
   loadSystemHealth();

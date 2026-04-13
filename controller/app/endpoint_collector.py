@@ -136,6 +136,38 @@ def _is_access_interface(name: str) -> bool:
     return True
 
 
+def _infer_vlan_from_interface(iface: str) -> int:
+    """Infer VLAN ID from an interface name when MAC table data is unavailable.
+
+    Patterns matched:
+      irb.140             → 140  (Junos routed VLAN interface)
+      irb.140 [ae0.0]     → 140  (Junos NAPALM format with physical port)
+      vlan.100            → 100  (VLAN interface)
+      ge-0/0/0.130        → 130  (subinterface unit = VLAN on L3 routers)
+      Vlan100             → 100  (Cisco SVI)
+
+    Returns 0 if no VLAN can be inferred.
+    """
+    import re
+    # Strip bracketed physical port suffix: "irb.140 [ae0.0]" → "irb.140"
+    clean = re.sub(r'\s*\[.*\]$', '', iface).strip()
+    # irb.N, vlan.N
+    m = re.match(r'^(?:irb|vlan)\.(\d+)$', clean, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+    # Cisco VlanN (no dot)
+    m = re.match(r'^[Vv]lan(\d+)$', clean)
+    if m:
+        return int(m.group(1))
+    # Subinterface: anything.N where N is a plausible VLAN (1-4094)
+    m = re.search(r'\.(\d+)$', clean)
+    if m:
+        unit = int(m.group(1))
+        if 1 <= unit <= 4094:
+            return unit
+    return 0
+
+
 def _correlate_endpoints(
     arp_entries: list[dict],
     mac_entries: list[dict],
@@ -200,6 +232,12 @@ def _correlate_endpoints(
         mac_data = mac_info.get(mac, {})
         dhcp_data = dhcp_info.get(mac, {})
 
+        # VLAN: prefer MAC table, fall back to inferring from ARP interface
+        # name (irb.140 → 140, vlan.100 → 100, ge-0/0/0.130 → 130).
+        vlan = mac_data.get("vlan", 0)
+        if not vlan and arp_iface:
+            vlan = _infer_vlan_from_interface(arp_iface)
+
         now_iso = datetime.now(timezone.utc).isoformat()
         first_seen = now_iso
         hostname = dhcp_data.get("hostname", "")
@@ -210,7 +248,7 @@ def _correlate_endpoints(
             "mac_vendor": _mac_vendor(mac),
             "arp_interface": arp_iface,
             "switch_port": mac_data.get("interface", ""),
-            "vlan": mac_data.get("vlan", 0),
+            "vlan": vlan,
             "is_access_port": mac_data.get("is_access_port", False),
             "hostname": hostname,
             "dhcp_hostname": dhcp_data.get("hostname", ""),

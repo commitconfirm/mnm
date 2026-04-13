@@ -91,20 +91,28 @@ async function triggerJob(index) {
   if (btn) { btn.disabled = true; btn.textContent = 'Starting...'; }
 
   try {
+    if (!job.trigger_url) {
+      if (btn) { btn.textContent = 'No trigger'; setTimeout(function() { btn.textContent = 'Run Now'; btn.disabled = false; }, 2000); }
+      return;
+    }
     const resp = await fetch(job.trigger_url, { method: 'POST' });
     if (resp.status === 409) {
-      alert('Job is already running.');
+      if (btn) { btn.textContent = 'Already running'; }
+      setTimeout(loadJobs, 1000);
       return;
     }
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
-      alert('Failed: ' + (err.detail || resp.statusText));
+      const detail = err.detail || resp.statusText;
+      if (btn) { btn.textContent = 'Failed'; btn.title = detail; }
+      setTimeout(function() { if (btn) { btn.textContent = 'Run Now'; btn.disabled = false; btn.title = ''; } }, 3000);
       return;
     }
-    // Refresh immediately to pick up running state
-    setTimeout(loadJobs, 500);
+    if (btn) { btn.textContent = 'Started'; }
+    setTimeout(loadJobs, 1000);
   } catch (e) {
-    alert('Error: ' + e.message);
+    if (btn) { btn.textContent = 'Error'; }
+    setTimeout(function() { if (btn) { btn.textContent = 'Run Now'; btn.disabled = false; } }, 3000);
   }
 }
 

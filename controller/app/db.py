@@ -582,6 +582,69 @@ class KVConfig(Base):
     updated_at = Column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False)
 
 
+class Comment(Base):
+    """Operator-created comments attached to endpoints or nodes.
+
+    target_type is either "endpoint" (target_id = MAC address) or "node"
+    (target_id = node name). Comments are immutable once created — edit =
+    delete and re-add. Comments are NOT pruned; they persist until manually
+    deleted by the operator.
+    """
+    __tablename__ = "comments"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    target_type = Column(Text, nullable=False, index=True)
+    target_id = Column(Text, nullable=False, index=True)
+    comment_text = Column(Text, nullable=False)
+    created_by = Column(Text, nullable=False, default="admin")
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False, index=True)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": str(self.id),
+            "target_type": self.target_type,
+            "target_id": self.target_id,
+            "comment_text": self.comment_text,
+            "created_by": self.created_by,
+            "created_at": self.created_at.isoformat() if self.created_at else "",
+        }
+
+
+class ChangeHistory(Base):
+    """Field-level change log for endpoints and nodes.
+
+    Records what changed, when, and what triggered it. Distinct from
+    EndpointEvent (which tracks movement events like moved_port, ip_changed) —
+    this is a broader audit trail including metadata updates, classification
+    changes, and comment add/delete.
+
+    change_source values: poll_arp, poll_mac, poll_dhcp, poll_lldp, poll_routes,
+    poll_bgp, sweep, manual, comment, onboarding.
+    """
+    __tablename__ = "change_history"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    target_type = Column(Text, nullable=False, index=True)
+    target_id = Column(Text, nullable=False, index=True)
+    field_name = Column(Text, nullable=False)
+    old_value = Column(Text)
+    new_value = Column(Text)
+    change_source = Column(Text, nullable=False, default="unknown")
+    changed_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False, index=True)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": str(self.id),
+            "target_type": self.target_type,
+            "target_id": self.target_id,
+            "field_name": self.field_name,
+            "old_value": self.old_value,
+            "new_value": self.new_value,
+            "change_source": self.change_source,
+            "changed_at": self.changed_at.isoformat() if self.changed_at else "",
+        }
+
+
 # ---------------------------------------------------------------------------
 # Lifecycle
 # ---------------------------------------------------------------------------

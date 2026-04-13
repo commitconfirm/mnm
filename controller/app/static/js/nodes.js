@@ -81,7 +81,7 @@ const nodesDT = new DataTable({
       return '<a href="/nodes/' + encodeURIComponent(v) + '"><strong>' + escHtml(v) + '</strong></a>';
     } },
     { key: 'platform', label: 'Platform', sortable: true, render: function(v) { return escHtml(v || '-'); } },
-    { key: 'primary_ip', label: 'Primary IP', sortable: true, render: function(v) { return escHtml(v || '-'); } },
+    { key: 'primary_ip', label: 'Primary IP', sortable: true, render: function(v) { if (!v) return '-'; return '<code>' + escHtml(v.replace(/\/\d+$/, '')) + '</code>'; } },
     { key: 'role', label: 'Role', sortable: true, render: function(v) { return escHtml(v || '-'); } },
     { key: 'location', label: 'Location', sortable: true, render: function(v) { return escHtml(v || '-'); } },
     { key: 'jobs', label: 'Poll Jobs', sortable: false, render: function(v) { return jobDots(v); } },

@@ -264,6 +264,26 @@ async def dashboard_interface_errors():
     return {"interfaces": sorted(iface_data.values(), key=lambda x: x["node_name"])}
 
 
+@app.get("/api/service-urls")
+async def service_urls(request: Request):
+    """Return external URLs for linked services, derived from the request's
+    Host header so they work regardless of how the operator accesses MNM
+    (LAN IP, Tailscale, SSH tunnel, etc.). Ports are configurable via env vars.
+
+    This is the single source of truth for service URLs — all frontend pages
+    should use this instead of hardcoding ports.
+    """
+    host = request.headers.get("host", "localhost:9090").split(":")[0]
+    proto = "https" if request.url.scheme == "https" else "http"
+    nautobot_port = os.environ.get("MNM_NAUTOBOT_EXT_PORT", "8443")
+    traefik_port = os.environ.get("MNM_TRAEFIK_EXT_PORT", "8080")
+    return {
+        "nautobot": f"{proto}://{host}:{nautobot_port}",
+        "grafana": f"{proto}://{host}:{traefik_port}/grafana/",
+        "prometheus": f"{proto}://{host}:{traefik_port}/prometheus/",
+    }
+
+
 # -------------------------------------------------------------------------
 # Auth
 # -------------------------------------------------------------------------
@@ -1419,6 +1439,91 @@ async def _scheduled_prune_loop() -> None:
         await asyncio.sleep(_prune_interval_hours() * 3600)
 
 
+# -------------------------------------------------------------------------
+# Comments + Change History (Phase 2.9)
+# -------------------------------------------------------------------------
+
+class CommentCreate(BaseModel):
+    target_type: str
+    target_id: str
+    comment_text: str
+
+
+@app.get("/api/comments", dependencies=[Depends(require_auth)])
+async def list_comments_api(target_type: str, target_id: str):
+    """Return all comments for a given endpoint or node, newest first.
+
+    target_type: "endpoint" or "node"
+    target_id: MAC address (for endpoints) or node name (for nodes)
+    """
+    if target_type not in ("endpoint", "node"):
+        raise HTTPException(status_code=400, detail="target_type must be 'endpoint' or 'node'")
+    if not db.is_ready():
+        return []
+    # Normalize endpoint MAC to uppercase to match storage convention
+    if target_type == "endpoint":
+        target_id = target_id.upper()
+    return await endpoint_store.list_comments(target_type, target_id)
+
+
+@app.post("/api/comments", dependencies=[Depends(require_auth)])
+async def create_comment_api(body: CommentCreate, request: Request):
+    """Create a comment on an endpoint or node. Records a change_history entry."""
+    if body.target_type not in ("endpoint", "node"):
+        raise HTTPException(status_code=400, detail="target_type must be 'endpoint' or 'node'")
+    if not body.comment_text.strip():
+        raise HTTPException(status_code=400, detail="comment_text cannot be empty")
+    if not db.is_ready():
+        raise HTTPException(status_code=503, detail="Controller DB not available")
+    target_id = body.target_id.upper() if body.target_type == "endpoint" else body.target_id
+    created_by = os.environ.get("MNM_ADMIN_USER", "admin")
+    return await endpoint_store.add_comment(
+        target_type=body.target_type,
+        target_id=target_id,
+        comment_text=body.comment_text.strip(),
+        created_by=created_by,
+    )
+
+
+@app.delete("/api/comments/{comment_id}", dependencies=[Depends(require_auth)])
+async def delete_comment_api(comment_id: str):
+    """Delete a comment by ID. Records a change_history entry."""
+    if not db.is_ready():
+        raise HTTPException(status_code=503, detail="Controller DB not available")
+    ok = await endpoint_store.delete_comment(comment_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Comment not found")
+    return Response(status_code=204)
+
+
+@app.get("/api/history", dependencies=[Depends(require_auth)])
+async def change_history_api(
+    target_type: str,
+    target_id: str,
+    field_name: str | None = None,
+    change_source: str | None = None,
+    limit: int = 50,
+):
+    """Return change history for an endpoint or node, newest first.
+
+    Optional filters: field_name, change_source. Max limit 500.
+    """
+    if target_type not in ("endpoint", "node"):
+        raise HTTPException(status_code=400, detail="target_type must be 'endpoint' or 'node'")
+    if not db.is_ready():
+        return []
+    if target_type == "endpoint":
+        target_id = target_id.upper()
+    limit = max(1, min(limit, 500))
+    return await endpoint_store.list_change_history(
+        target_type=target_type,
+        target_id=target_id,
+        field_name=field_name,
+        change_source=change_source,
+        limit=limit,
+    )
+
+
 @app.get("/api/admin/maintenance", dependencies=[Depends(require_auth)])
 async def admin_maintenance_status():
     """Return DB row counts, oldest timestamps, retention setting, and the
@@ -2250,7 +2355,7 @@ async def list_jobs():
             "duration_seconds": None,
             "summary": {"dispatched": polling.get_poll_state().get("polls_dispatched", 0)},
             "error": None,
-            "trigger_url": None,
+            "trigger_url": "/api/endpoints/collect",
             "enabled": True,
         },
         {

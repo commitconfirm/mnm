@@ -510,6 +510,29 @@ th.sortable.desc::after { content: ' \2193'; opacity: 1; }
   50% { opacity: 0.3; }
 }
 
+/* Loading indicator */
+.loading-indicator {
+  text-align: center;
+  padding: 32px;
+  color: var(--accent);
+  font-size: 0.9rem;
+}
+.loading-indicator::before {
+  content: '';
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  margin-right: 8px;
+  vertical-align: middle;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
 /* DataTable pagination */
 .datatable-controls {
   display: flex;

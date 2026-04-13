@@ -2083,7 +2083,7 @@ async def sweep(
                         "classification": host_data.get("classification", ""),
                     }
                     try:
-                        await _es.upsert_endpoint(sweep_ep, source="sweep")
+                        await _es.upsert_endpoint(sweep_ep, source="sweep", change_source="sweep")
                     except Exception as exc:
                         log.debug("sweep_endpoint_upsert_failed", "Sweep upsert failed",
                                   context={"ip": ip, "error": str(exc)})

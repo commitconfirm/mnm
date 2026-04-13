@@ -36,7 +36,7 @@
   <div class="container">
     <div class="card">
       <h2 id="ep-title">Endpoint</h2>
-      <div id="ep-meta" class="grid-3"></div>
+      <div id="ep-meta" class="grid-3"><div class="loading-indicator" style="grid-column:1/-1">Loading endpoint data...</div></div>
     </div>
 
     <div class="card">
@@ -51,8 +51,31 @@
         <tbody id="ep-events"></tbody>
       </table>
     </div>
+
+    <!-- Comments: operator notebook -->
+    <div class="card">
+      <h2>Comments <span id="comment-count" style="font-size:0.8rem;font-weight:normal;color:var(--text-muted)"></span></h2>
+      <div style="display:flex;gap:8px;align-items:flex-start;margin-bottom:12px">
+        <textarea id="comment-input" rows="2" placeholder="Add a note about this endpoint..." style="flex:1;padding:8px 12px;font-size:0.9rem;resize:vertical;min-height:40px"></textarea>
+        <button id="comment-submit" class="btn primary small" style="align-self:stretch">Add</button>
+      </div>
+      <div id="comment-list"></div>
+    </div>
+
+    <!-- Change History: field-level audit trail -->
+    <div class="card">
+      <h2>
+        <button id="history-toggle" type="button" style="background:none;border:none;color:var(--text-muted);font-size:0.8rem;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;cursor:pointer;padding:0;font-family:var(--font-sans)">
+          &#9658; Change History <span id="history-count"></span>
+        </button>
+      </h2>
+      <div id="history-container" style="display:none">
+        <div id="history-dt"></div>
+      </div>
+    </div>
   </div>
 
+  <script src="/static/js/datatable.js"></script>
   <script src="/static/js/icons.js"></script>
   <script src="/static/js/preferences.js"></script>
   <script src="/static/js/endpoint_detail.js"></script>

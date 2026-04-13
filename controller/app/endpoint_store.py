@@ -50,7 +50,8 @@ async def _is_watched(session, mac: str) -> bool:
 
 
 async def upsert_endpoint(ep_dict: dict, source: str = "infrastructure",
-                           uplinks: set[tuple[str, str]] | None = None) -> dict:
+                           uplinks: set[tuple[str, str]] | None = None,
+                           change_source: str | None = None) -> dict:
     """Upsert an endpoint observation, keyed on (mac, switch, port, vlan).
 
     Behavior:
@@ -124,6 +125,24 @@ async def upsert_endpoint(ep_dict: dict, source: str = "infrastructure",
             )
         )).scalar_one_or_none()
 
+        # 1b. VLAN upgrade: if no exact match but there's a row on the same
+        # switch/port with vlan=0 (sentinel for "unknown"), and we now have a
+        # real VLAN, delete the sentinel row and let the code create a new one
+        # with the correct VLAN. This prevents stale vlan=0 rows from persisting
+        # indefinitely after VLAN inference is added.
+        if exact is None and new_vlan != 0:
+            sentinel = (await session.execute(
+                select(db.Endpoint).where(
+                    db.Endpoint.mac_address == mac,
+                    db.Endpoint.current_switch == new_switch,
+                    db.Endpoint.current_port == new_port,
+                    db.Endpoint.current_vlan == 0,
+                )
+            )).scalar_one_or_none()
+            if sentinel is not None:
+                await session.delete(sentinel)
+                await session.flush()
+
         # 2. Find any other active rows for this MAC (potential prior locations)
         other_active = (await session.execute(
             select(db.Endpoint).where(
@@ -141,6 +160,10 @@ async def upsert_endpoint(ep_dict: dict, source: str = "infrastructure",
                 row.active = False
 
         action = "unchanged"
+        # Field-level change diff — captured as (field_name, old, new) tuples
+        # and written as ChangeHistory rows before commit. This tracks the
+        # MAC's life story, orthogonal to EndpointEvent which tracks movement.
+        diffs: list[tuple[str, str | None, str | None]] = []
 
         if exact is not None:
             # Update in place — same physical location seen again.
@@ -149,10 +172,16 @@ async def upsert_endpoint(ep_dict: dict, source: str = "infrastructure",
                 action = "updated"
             if new_ip and exact.current_ip and new_ip != exact.current_ip:
                 events.append(("ip_changed", exact.current_ip, new_ip, {}))
+                diffs.append(("ip", exact.current_ip, new_ip))
                 action = "updated"
             if new_hostname and exact.hostname and new_hostname != exact.hostname:
                 events.append(("hostname_changed", exact.hostname, new_hostname, {}))
+                diffs.append(("hostname", exact.hostname, new_hostname))
                 action = "updated"
+            if ep_dict.get("classification") and exact.classification != ep_dict["classification"]:
+                diffs.append(("classification", exact.classification or None, ep_dict["classification"]))
+            if ep_dict.get("mac_vendor") and exact.mac_vendor != ep_dict["mac_vendor"]:
+                diffs.append(("mac_vendor", exact.mac_vendor or None, ep_dict["mac_vendor"]))
             if new_ip:
                 exact.current_ip = new_ip
             if new_additional_ips:
@@ -210,13 +239,19 @@ async def upsert_endpoint(ep_dict: dict, source: str = "infrastructure",
                 if prior.current_switch != new_switch:
                     events.append(("moved_switch", prior.current_switch, new_switch,
                                    {"old_port": prior.current_port, "new_port": new_port}))
+                    diffs.append(("switch", prior.current_switch, new_switch))
                 else:
                     events.append(("moved_port", prior.current_port, new_port,
                                    {"switch": new_switch}))
+                    diffs.append(("port", prior.current_port, new_port))
+                if prior.current_vlan != new_vlan:
+                    diffs.append(("vlan", str(prior.current_vlan), str(new_vlan)))
                 if new_ip and prior.current_ip and new_ip != prior.current_ip:
                     events.append(("ip_changed", prior.current_ip, new_ip, {}))
+                    diffs.append(("ip", prior.current_ip, new_ip))
                 if new_hostname and prior.hostname and new_hostname != prior.hostname:
                     events.append(("hostname_changed", prior.hostname, new_hostname, {}))
+                    diffs.append(("hostname", prior.hostname, new_hostname))
                 action = "updated"
 
         for ev_type, old, new, details in events:
@@ -230,6 +265,19 @@ async def upsert_endpoint(ep_dict: dict, source: str = "infrastructure",
                 new_value=new,
                 details=details,
                 timestamp=now,
+            ))
+
+        # Write field-level change history (separate from EndpointEvent)
+        effective_source = change_source or source or "unknown"
+        for field_name, old_val, new_val in diffs:
+            session.add(db.ChangeHistory(
+                target_type="endpoint",
+                target_id=mac,
+                field_name=field_name,
+                old_value=str(old_val) if old_val is not None else None,
+                new_value=str(new_val) if new_val is not None else None,
+                change_source=effective_source,
+                changed_at=now,
             ))
 
         # ------------------------------------------------------------------
@@ -1501,6 +1549,108 @@ async def prune_old_auto_discovery_runs(retention_days: int) -> int:
     return n
 
 
+# ---------------------------------------------------------------------------
+# Comments + change history (Phase 2.9)
+# ---------------------------------------------------------------------------
+
+async def add_comment(target_type: str, target_id: str, comment_text: str,
+                       created_by: str = "admin") -> dict:
+    """Create a comment on an endpoint or node. Also writes a change_history
+    entry so the comment add appears in the audit trail."""
+    now = _now()
+    async with db.SessionLocal() as session:
+        comment = db.Comment(
+            target_type=target_type,
+            target_id=target_id,
+            comment_text=comment_text,
+            created_by=created_by,
+            created_at=now,
+        )
+        session.add(comment)
+        session.add(db.ChangeHistory(
+            target_type=target_type,
+            target_id=target_id,
+            field_name="comment_added",
+            old_value=None,
+            new_value=comment_text,
+            change_source="manual",
+            changed_at=now,
+        ))
+        await session.commit()
+        await session.refresh(comment)
+        return comment.to_dict()
+
+
+async def list_comments(target_type: str, target_id: str) -> list[dict]:
+    """Return all comments for an endpoint or node, newest first."""
+    async with db.SessionLocal() as session:
+        rows = (await session.execute(
+            select(db.Comment)
+            .where(db.Comment.target_type == target_type,
+                   db.Comment.target_id == target_id)
+            .order_by(db.Comment.created_at.desc())
+        )).scalars().all()
+        return [r.to_dict() for r in rows]
+
+
+async def delete_comment(comment_id: str) -> bool:
+    """Delete a comment by ID. Writes a change_history entry for the delete."""
+    async with db.SessionLocal() as session:
+        row = (await session.execute(
+            select(db.Comment).where(db.Comment.id == comment_id)
+        )).scalar_one_or_none()
+        if row is None:
+            return False
+        # Record the deletion in change_history before dropping the row
+        session.add(db.ChangeHistory(
+            target_type=row.target_type,
+            target_id=row.target_id,
+            field_name="comment_deleted",
+            old_value=row.comment_text,
+            new_value=None,
+            change_source="manual",
+            changed_at=_now(),
+        ))
+        await session.delete(row)
+        await session.commit()
+        return True
+
+
+async def list_change_history(target_type: str, target_id: str,
+                                field_name: str | None = None,
+                                change_source: str | None = None,
+                                limit: int = 50) -> list[dict]:
+    """Return change history for an endpoint or node, newest first."""
+    async with db.SessionLocal() as session:
+        stmt = (
+            select(db.ChangeHistory)
+            .where(db.ChangeHistory.target_type == target_type,
+                   db.ChangeHistory.target_id == target_id)
+        )
+        if field_name:
+            stmt = stmt.where(db.ChangeHistory.field_name == field_name)
+        if change_source:
+            stmt = stmt.where(db.ChangeHistory.change_source == change_source)
+        stmt = stmt.order_by(db.ChangeHistory.changed_at.desc()).limit(limit)
+        rows = (await session.execute(stmt)).scalars().all()
+        return [r.to_dict() for r in rows]
+
+
+async def prune_old_change_history(retention_days: int) -> int:
+    """Delete change_history rows older than the retention threshold.
+    Comments are NOT pruned — only the change log."""
+    cutoff = _now() - timedelta(days=retention_days)
+    async with db.SessionLocal() as session:
+        result = await session.execute(
+            delete(db.ChangeHistory).where(db.ChangeHistory.changed_at < cutoff)
+        )
+        await session.commit()
+        n = result.rowcount or 0
+    _prune_log.info("prune_change_history", "Pruned old change history",
+                    context={"deleted": n, "retention_days": retention_days})
+    return n
+
+
 async def prune_all(retention_days: int) -> dict:
     """Run every prune helper and return a summary dict."""
     events = await prune_old_events(retention_days)
@@ -1513,6 +1663,7 @@ async def prune_all(retention_days: int) -> dict:
     node_arp = await prune_old_node_arp(retention_days)
     node_mac = await prune_old_node_mac(retention_days)
     node_lldp = await prune_old_node_lldp(retention_days)
+    change_history = await prune_old_change_history(retention_days)
     summary = {
         "events": events,
         "observations": observations,
@@ -1524,6 +1675,7 @@ async def prune_all(retention_days: int) -> dict:
         "node_arp": node_arp,
         "node_mac": node_mac,
         "node_lldp": node_lldp,
+        "change_history": change_history,
     }
     _prune_log.info("prune_complete",
                     f"Daily prune: {events} events, {observations} observations, "
@@ -1587,6 +1739,10 @@ async def prune_preview(retention_days: int) -> dict:
             select(func.count()).select_from(db.NodeLldpEntry)
             .where(db.NodeLldpEntry.collected_at < cutoff)
         )).scalar_one()
+        change_history = (await session.execute(
+            select(func.count()).select_from(db.ChangeHistory)
+            .where(db.ChangeHistory.changed_at < cutoff)
+        )).scalar_one()
     return {
         "events": int(events),
         "observations": int(observations),
@@ -1598,6 +1754,7 @@ async def prune_preview(retention_days: int) -> dict:
         "node_arp": int(node_arp),
         "node_mac": int(node_mac),
         "node_lldp": int(node_lldp),
+        "change_history": int(change_history),
     }
 
 
@@ -1644,6 +1801,12 @@ async def maintenance_stats() -> dict:
         fib_count = (await session.execute(
             select(func.count()).select_from(db.NodeFibEntry)
         )).scalar_one()
+        comment_count = (await session.execute(
+            select(func.count()).select_from(db.Comment)
+        )).scalar_one()
+        change_history_count = (await session.execute(
+            select(func.count()).select_from(db.ChangeHistory)
+        )).scalar_one()
     return {
         "endpoint_rows": int(endpoint_count),
         "event_rows": int(event_count),
@@ -1656,6 +1819,8 @@ async def maintenance_stats() -> dict:
         "mac_rows": int(mac_count),
         "lldp_rows": int(lldp_count),
         "fib_rows": int(fib_count),
+        "comment_rows": int(comment_count),
+        "change_history_rows": int(change_history_count),
         "oldest_event": oldest_event.isoformat() if oldest_event else None,
         "oldest_observation": oldest_observation.isoformat() if oldest_observation else None,
     }

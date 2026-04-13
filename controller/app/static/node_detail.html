@@ -75,25 +75,25 @@
         <div class="filter-bar">
           <input type="text" id="arp-search" placeholder="Filter by IP or MAC...">
         </div>
-        <div id="arp-dt"></div>
+        <div id="arp-dt"><div class="loading-indicator">Loading...</div></div>
       </div>
       <div class="tab-panel" id="panel-mac">
         <div class="filter-bar">
           <input type="text" id="mac-search" placeholder="Filter by MAC or interface...">
         </div>
-        <div id="mac-dt"></div>
+        <div id="mac-dt"><div class="loading-indicator">Loading...</div></div>
       </div>
       <div class="tab-panel" id="panel-routes">
         <div class="filter-bar">
           <input type="text" id="routes-search" placeholder="Filter by prefix, next-hop, or protocol...">
         </div>
-        <div id="routes-dt"></div>
+        <div id="routes-dt"><div class="loading-indicator">Loading...</div></div>
       </div>
       <div class="tab-panel" id="panel-lldp">
-        <div id="lldp-dt"></div>
+        <div id="lldp-dt"><div class="loading-indicator">Loading...</div></div>
       </div>
       <div class="tab-panel" id="panel-bgp">
-        <div id="bgp-dt"></div>
+        <div id="bgp-dt"><div class="loading-indicator">Loading...</div></div>
       </div>
       <div class="tab-panel" id="panel-polls">
         <table>
@@ -102,9 +102,32 @@
         </table>
       </div>
     </div>
+
+    <!-- Comments: operator notebook -->
+    <div class="card">
+      <h2>Comments <span id="comment-count" style="font-size:0.8rem;font-weight:normal;color:var(--text-muted)"></span></h2>
+      <div style="display:flex;gap:8px;align-items:flex-start;margin-bottom:12px">
+        <textarea id="comment-input" rows="2" placeholder="Add a note about this node..." style="flex:1;padding:8px 12px;font-size:0.9rem;resize:vertical;min-height:40px"></textarea>
+        <button id="comment-submit" class="btn primary small" style="align-self:stretch">Add</button>
+      </div>
+      <div id="comment-list"></div>
+    </div>
+
+    <!-- Change History: field-level audit trail -->
+    <div class="card">
+      <h2>
+        <button id="history-toggle" type="button" style="background:none;border:none;color:var(--text-muted);font-size:0.8rem;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;cursor:pointer;padding:0;font-family:var(--font-sans)">
+          &#9658; Change History <span id="history-count"></span>
+        </button>
+      </h2>
+      <div id="history-container" style="display:none">
+        <div id="history-dt"></div>
+      </div>
+    </div>
   </div>
 
   <script src="/static/js/datatable.js"></script>
+  <script src="/static/js/service-urls.js"></script>
   <script src="/static/js/preferences.js"></script>
   <script src="/static/js/node_detail.js"></script>
 </body>

@@ -499,6 +499,44 @@ async def collect() -> dict:
     _state["running"] = False
 
     # Upsert VMs/containers as endpoints (one row per MAC)
+    # Build a subnet→VLAN map from node ARP interfaces for native VLAN inference.
+    # When a Proxmox VM has no tag= in its config (native VLAN on the bridge),
+    # infer the VLAN from the VM's IP address matching a known VLAN subnet.
+    subnet_vlan_map: dict[str, int] = {}
+    try:
+        from sqlalchemy import select as _select
+        async with db.SessionLocal() as session:
+            arp_rows = (await session.execute(
+                _select(db.NodeArpEntry.interface).distinct()
+            )).scalars().all()
+            for iface_str in arp_rows:
+                from app.endpoint_collector import _infer_vlan_from_interface
+                vlan_id = _infer_vlan_from_interface(iface_str or "")
+                if vlan_id:
+                    subnet_vlan_map[vlan_id] = vlan_id  # keyed by VLAN for reverse lookup
+    except Exception:
+        pass
+
+    def _infer_vlan_from_ip(ip_addr: str) -> int:
+        """Infer VLAN from IP by matching against known VLAN subnets.
+
+        Uses the third octet heuristic: if VLANs 110, 120, 130, 140 exist
+        and the IP is 172.21.140.x, the third octet 140 matches VLAN 140.
+        This works for the common pattern where VLAN ID = third octet.
+        Falls back to 0 if no match.
+        """
+        if not ip_addr:
+            return 0
+        try:
+            parts = ip_addr.split(".")
+            if len(parts) == 4:
+                third_octet = int(parts[2])
+                if third_octet in subnet_vlan_map:
+                    return third_octet
+        except (ValueError, IndexError):
+            pass
+        return 0
+
     upserted = 0
     if db.is_ready():
         for guest, kind in ((vms_out, "virtual_machine"), (cts_out, "container")):
@@ -507,17 +545,22 @@ async def collect() -> dict:
                     mac = iface.get("mac")
                     if not mac:
                         continue
+                    vlan = iface.get("vlan") or 0
+                    ip = iface.get("ip") or None
+                    # Infer VLAN from IP when no tag is set in Proxmox config
+                    if not vlan and ip:
+                        vlan = _infer_vlan_from_ip(ip)
                     try:
                         await endpoint_store.upsert_endpoint({
                             "mac": mac,
-                            "ip": iface.get("ip") or None,
+                            "ip": ip,
                             "additional_ips": iface.get("ips") or [],
                             "hostname": g.get("name"),
                             "classification": kind,
                             "device_name": g.get("node"),
                             "switch_port": iface.get("bridge") or "",
-                            "vlan": iface.get("vlan") or 0,
-                        }, source="proxmox")
+                            "vlan": vlan,
+                        }, source="proxmox", change_source="proxmox")
                         upserted += 1
                     except Exception as e:
                         log.debug("proxmox_upsert_failed", "Proxmox endpoint upsert failed",
