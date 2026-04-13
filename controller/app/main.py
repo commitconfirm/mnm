@@ -18,7 +18,7 @@ from app.logging_config import StructuredLogger, setup_logging, get_recent_logs
 # Initialize structured logging before anything else
 setup_logging()
 
-from app import auto_discover, db, discovery, docker_manager, endpoint_store, nautobot_client, polling
+from app import auto_discover, db, discovery, docker_manager, endpoint_store, nautobot_client, polling, probes
 from app.connectors import proxmox as proxmox_connector
 from app.config import (
     DATA_DIR, load_config, load_config_async, save_config, save_config_async,
@@ -1522,6 +1522,104 @@ async def change_history_api(
         change_source=change_source,
         limit=limit,
     )
+
+
+# -------------------------------------------------------------------------
+# Endpoint Probes (Phase 2.9)
+# -------------------------------------------------------------------------
+
+@app.post("/api/probes/run", dependencies=[Depends(require_auth)])
+async def probe_run(request: Request):
+    """Trigger an ICMP/TCP probe sweep. Optionally pass {"macs": [...]} to
+    probe specific endpoints. Runs in background, results available via GET."""
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    macs = body.get("macs")
+    targets = None
+    if macs:
+        eps = await endpoint_store.list_endpoints()
+        targets = []
+        for ep in eps:
+            if ep.get("mac") in macs or ep.get("mac_address") in macs:
+                ip = ep.get("ip") or ep.get("current_ip")
+                if ip:
+                    targets.append({"mac": ep.get("mac", ""), "ip": ip, "open_ports": []})
+    asyncio.create_task(probes.probe_endpoints(targets))
+    return {"status": "started", "targets": len(targets) if targets else "all"}
+
+
+@app.get("/api/probes/status", dependencies=[Depends(require_auth)])
+async def probe_status():
+    """Return current probe run state."""
+    return probes.get_state()
+
+
+@app.get("/api/probes/results", dependencies=[Depends(require_auth)])
+async def probe_results(mac: str = ""):
+    """Latest probe result per endpoint (or for a specific MAC)."""
+    if not db.is_ready():
+        return []
+    from sqlalchemy import select, func
+    async with db.SessionLocal() as session:
+        if mac:
+            row = (await session.execute(
+                select(db.EndpointProbe)
+                .where(db.EndpointProbe.mac == mac.upper())
+                .order_by(db.EndpointProbe.probed_at.desc())
+                .limit(1)
+            )).scalar_one_or_none()
+            return row.to_dict() if row else {}
+        # Latest per MAC via subquery
+        latest = (
+            select(db.EndpointProbe.mac, func.max(db.EndpointProbe.probed_at).label("latest"))
+            .group_by(db.EndpointProbe.mac)
+            .subquery()
+        )
+        rows = (await session.execute(
+            select(db.EndpointProbe).join(
+                latest,
+                (db.EndpointProbe.mac == latest.c.mac) &
+                (db.EndpointProbe.probed_at == latest.c.latest),
+            )
+        )).scalars().all()
+        return [r.to_dict() for r in rows]
+
+
+@app.get("/api/probes/summary", dependencies=[Depends(require_auth)])
+async def probe_summary():
+    """Aggregate probe stats for dashboard."""
+    if not db.is_ready():
+        return {"total": 0, "reachable": 0, "unreachable": 0, "avg_latency_ms": None}
+    from sqlalchemy import select, func
+    async with db.SessionLocal() as session:
+        # Latest probe per MAC
+        latest = (
+            select(db.EndpointProbe.mac, func.max(db.EndpointProbe.probed_at).label("latest"))
+            .group_by(db.EndpointProbe.mac)
+            .subquery()
+        )
+        rows = (await session.execute(
+            select(db.EndpointProbe).join(
+                latest,
+                (db.EndpointProbe.mac == latest.c.mac) &
+                (db.EndpointProbe.probed_at == latest.c.latest),
+            )
+        )).scalars().all()
+        total = len(rows)
+        reachable = sum(1 for r in rows if r.reachable)
+        latencies = [r.latency_ms for r in rows if r.latency_ms is not None]
+        avg_lat = round(sum(latencies) / len(latencies), 2) if latencies else None
+        last_run = max((r.probed_at for r in rows), default=None)
+    return {
+        "total": total,
+        "reachable": reachable,
+        "unreachable": total - reachable,
+        "avg_latency_ms": avg_lat,
+        "last_run": last_run.isoformat() if last_run else None,
+    }
 
 
 @app.get("/api/admin/maintenance", dependencies=[Depends(require_auth)])

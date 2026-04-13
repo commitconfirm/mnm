@@ -223,6 +223,17 @@ async function loadSystemHealth() {
       document.getElementById('sys-arp-rows').textContent = stats.arp_rows || 0;
       document.getElementById('sys-prune').textContent = m.last_run ? timeAgo(m.last_run) : 'never';
     }
+    // Probe summary (only shown if probes have been run)
+    try {
+      var probeResp = await fetch('/api/probes/summary');
+      if (probeResp.ok) {
+        var p = await probeResp.json();
+        if (p.total > 0) {
+          document.getElementById('sys-probes-item').style.display = '';
+          document.getElementById('sys-probes').textContent = p.reachable + '/' + p.total + ' up';
+        }
+      }
+    } catch (e) { /* degrade gracefully */ }
   } catch (e) { console.error('System health load failed:', e); }
 }
 

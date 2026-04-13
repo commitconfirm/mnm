@@ -43,6 +43,7 @@ async function load() {
     ['Port', (ep.current_port && ep.current_port !== '(none)') ? ep.current_port : ''],
     ['VLAN', (ep.current_vlan && ep.current_vlan !== 0) ? ep.current_vlan : ''],
     ['Classification', ep.classification, true],
+    ['Confidence', ep.classification_confidence || ''],
     ['First Seen', ep.first_seen],
     ['Last Seen', ep.last_seen],
     ['Source', ep.source],
@@ -79,10 +80,67 @@ async function load() {
     ).join('');
   }
 
-  // Comments + change history
+  // Probe + comments + change history
+  await loadProbeResult(mac);
   await loadComments(mac);
   await loadChangeHistory(mac);
 }
+
+// ---- Probe ----
+async function loadProbeResult(mac) {
+  try {
+    var r = await fetch('/api/probes/results?mac=' + encodeURIComponent(mac));
+    if (!r.ok) return;
+    var d = await r.json();
+    var el = document.getElementById('probe-result');
+    if (!d || !d.probed_at) {
+      el.innerHTML = '<span style="color:var(--text-muted)">No probe data. Click "Probe Now" to test reachability.</span>';
+      return;
+    }
+    var when = new Date(d.probed_at).toLocaleString();
+    if (d.reachable) {
+      el.innerHTML = '<span class="dot green" style="width:8px;height:8px"></span> '
+        + '<strong>Reachable</strong> &mdash; '
+        + (d.latency_ms != null ? d.latency_ms + ' ms' : '')
+        + ' via ' + escHtml(d.probe_type)
+        + (d.tcp_port ? ':' + d.tcp_port : '')
+        + (d.packet_loss != null ? ', ' + Math.round(d.packet_loss * 100) + '% loss' : '')
+        + ' <span style="color:var(--text-muted);font-size:0.8rem"> &mdash; ' + escHtml(when) + '</span>';
+    } else {
+      el.innerHTML = '<span class="dot red" style="width:8px;height:8px"></span> '
+        + '<strong>Unreachable</strong>'
+        + ' <span style="color:var(--text-muted);font-size:0.8rem"> &mdash; ' + escHtml(when) + '</span>';
+    }
+  } catch (e) { /* ignore */ }
+}
+
+document.getElementById('probe-now-btn').addEventListener('click', async function() {
+  var btn = this;
+  var mac = getMac();
+  btn.disabled = true; btn.textContent = 'Probing...';
+  document.getElementById('probe-result').innerHTML = '<span style="color:var(--text-muted)">Probing...</span>';
+  try {
+    await fetch('/api/probes/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ macs: [mac] }),
+    });
+    // Poll for completion
+    var attempts = 0;
+    var poll = setInterval(async function() {
+      attempts++;
+      var state = await (await fetch('/api/probes/status')).json();
+      if (!state.running || attempts > 15) {
+        clearInterval(poll);
+        await loadProbeResult(mac);
+        btn.disabled = false; btn.textContent = 'Probe Now';
+      }
+    }, 1000);
+  } catch (e) {
+    btn.disabled = false; btn.textContent = 'Probe Now';
+    document.getElementById('probe-result').innerHTML = '<span style="color:var(--red)">Probe failed: ' + escHtml(e.message) + '</span>';
+  }
+});
 
 // ---- Comments ----
 async function loadComments(mac) {

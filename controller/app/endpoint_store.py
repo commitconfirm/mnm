@@ -194,8 +194,10 @@ async def upsert_endpoint(ep_dict: dict, source: str = "infrastructure",
                 exact.mac_vendor = ep_dict["mac_vendor"]
             if new_hostname:
                 exact.hostname = new_hostname
-            if ep_dict.get("classification"):
+            if ep_dict.get("classification") and not exact.classification_override:
                 exact.classification = ep_dict["classification"]
+            if ep_dict.get("classification_confidence") and not exact.classification_override:
+                exact.classification_confidence = ep_dict["classification_confidence"]
             if ep_dict.get("dhcp_server"):
                 exact.dhcp_server = ep_dict["dhcp_server"]
             if ep_dict.get("lease_start"):
@@ -221,6 +223,7 @@ async def upsert_endpoint(ep_dict: dict, source: str = "infrastructure",
                 mac_vendor=ep_dict.get("mac_vendor") or "",
                 hostname=new_hostname or "",
                 classification=ep_dict.get("classification") or "",
+                classification_confidence=ep_dict.get("classification_confidence") or "",
                 dhcp_server=ep_dict.get("dhcp_server") or "",
                 dhcp_lease_start=_parse_dt(ep_dict.get("lease_start")),
                 dhcp_lease_expiry=_parse_dt(ep_dict.get("lease_expiry")),
@@ -1651,6 +1654,20 @@ async def prune_old_change_history(retention_days: int) -> int:
     return n
 
 
+async def prune_old_probes(retention_days: int) -> int:
+    """Delete endpoint_probes rows older than the retention threshold."""
+    cutoff = _now() - timedelta(days=retention_days)
+    async with db.SessionLocal() as session:
+        result = await session.execute(
+            delete(db.EndpointProbe).where(db.EndpointProbe.probed_at < cutoff)
+        )
+        await session.commit()
+        n = result.rowcount or 0
+    _prune_log.info("prune_probes", "Pruned old probe results",
+                    context={"deleted": n, "retention_days": retention_days})
+    return n
+
+
 async def prune_all(retention_days: int) -> dict:
     """Run every prune helper and return a summary dict."""
     events = await prune_old_events(retention_days)
@@ -1664,6 +1681,7 @@ async def prune_all(retention_days: int) -> dict:
     node_mac = await prune_old_node_mac(retention_days)
     node_lldp = await prune_old_node_lldp(retention_days)
     change_history = await prune_old_change_history(retention_days)
+    probe_results = await prune_old_probes(retention_days)
     summary = {
         "events": events,
         "observations": observations,
@@ -1676,6 +1694,7 @@ async def prune_all(retention_days: int) -> dict:
         "node_mac": node_mac,
         "node_lldp": node_lldp,
         "change_history": change_history,
+        "endpoint_probes": probe_results,
     }
     _prune_log.info("prune_complete",
                     f"Daily prune: {events} events, {observations} observations, "
@@ -1743,6 +1762,10 @@ async def prune_preview(retention_days: int) -> dict:
             select(func.count()).select_from(db.ChangeHistory)
             .where(db.ChangeHistory.changed_at < cutoff)
         )).scalar_one()
+        probe_results = (await session.execute(
+            select(func.count()).select_from(db.EndpointProbe)
+            .where(db.EndpointProbe.probed_at < cutoff)
+        )).scalar_one()
     return {
         "events": int(events),
         "observations": int(observations),
@@ -1755,6 +1778,7 @@ async def prune_preview(retention_days: int) -> dict:
         "node_mac": int(node_mac),
         "node_lldp": int(node_lldp),
         "change_history": int(change_history),
+        "endpoint_probes": int(probe_results),
     }
 
 
@@ -1807,6 +1831,9 @@ async def maintenance_stats() -> dict:
         change_history_count = (await session.execute(
             select(func.count()).select_from(db.ChangeHistory)
         )).scalar_one()
+        probe_count = (await session.execute(
+            select(func.count()).select_from(db.EndpointProbe)
+        )).scalar_one()
     return {
         "endpoint_rows": int(endpoint_count),
         "event_rows": int(event_count),
@@ -1821,6 +1848,7 @@ async def maintenance_stats() -> dict:
         "fib_rows": int(fib_count),
         "comment_rows": int(comment_count),
         "change_history_rows": int(change_history_count),
+        "probe_rows": int(probe_count),
         "oldest_event": oldest_event.isoformat() if oldest_event else None,
         "oldest_observation": oldest_observation.isoformat() if oldest_observation else None,
     }

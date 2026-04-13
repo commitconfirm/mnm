@@ -101,6 +101,8 @@ class Endpoint(Base):
     mac_vendor = Column(Text)
     hostname = Column(Text)  # best available: DHCP > DNS > SNMP sysName > LLDP
     classification = Column(Text)
+    classification_confidence = Column(Text)  # high, medium, low
+    classification_override = Column(Boolean, nullable=False, default=False)
     dhcp_server = Column(Text)
     dhcp_lease_start = Column(DateTime(timezone=True))
     dhcp_lease_expiry = Column(DateTime(timezone=True))
@@ -128,6 +130,8 @@ class Endpoint(Base):
             "mac_vendor": self.mac_vendor or "",
             "hostname": self.hostname or "",
             "classification": self.classification or "",
+            "classification_confidence": self.classification_confidence or "",
+            "classification_override": bool(self.classification_override),
             "device_name": self.current_switch or "",
             "current_switch": self.current_switch or "",
             "switch_port": self.current_port or "",
@@ -645,6 +649,34 @@ class ChangeHistory(Base):
         }
 
 
+class EndpointProbe(Base):
+    """ICMP/TCP probe result for an endpoint.
+
+    Stores latency measurements and reachability status. Probes are
+    operator-triggered (not automatic). Pruned at retention threshold.
+    """
+    __tablename__ = "endpoint_probes"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    mac = Column(Text, nullable=False, index=True)
+    ip = Column(Text, nullable=False)
+    probe_type = Column(Text, nullable=False, default="icmp")  # icmp or tcp
+    tcp_port = Column(Integer)  # only for TCP probes
+    latency_ms = Column(Float)  # null if unreachable
+    reachable = Column(Boolean, nullable=False, default=False)
+    packet_loss = Column(Float)  # 0.0–1.0, ICMP only
+    probed_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False, index=True)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id, "mac": self.mac, "ip": self.ip,
+            "probe_type": self.probe_type, "tcp_port": self.tcp_port,
+            "latency_ms": self.latency_ms, "reachable": self.reachable,
+            "packet_loss": self.packet_loss,
+            "probed_at": self.probed_at.isoformat() if self.probed_at else "",
+        }
+
+
 # ---------------------------------------------------------------------------
 # Lifecycle
 # ---------------------------------------------------------------------------
@@ -658,6 +690,18 @@ async def init_db() -> bool:
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            # Add columns to existing tables that create_all won't ALTER
+            from sqlalchemy import text
+            for col, typ in [
+                ("classification_confidence", "TEXT"),
+                ("classification_override", "BOOLEAN NOT NULL DEFAULT false"),
+            ]:
+                try:
+                    await conn.execute(text(
+                        f"ALTER TABLE endpoints ADD COLUMN IF NOT EXISTS {col} {typ}"
+                    ))
+                except Exception:
+                    pass
         _db_ready = True
         log.info("db_init", "Controller database initialized", context={"dsn_host": os.environ.get("MNM_DB_HOST", "postgres")})
         return True
