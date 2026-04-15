@@ -600,6 +600,10 @@ th.sortable.desc::after { content: ' \2193'; opacity: 1; }
 /* Icon + text in table cells */
 .icon-cell { display: inline-flex; align-items: center; gap: 4px; }
 
+/* Interface health: counter highlighting */
+.counter-error { background: rgba(248, 81, 73, 0.15); color: var(--red); font-weight: 600; }
+.counter-discard { background: rgba(210, 153, 34, 0.15); color: var(--yellow); font-weight: 600; }
+
 /* Responsive */
 @media (max-width: 768px) {
   .grid-2, .grid-3 { grid-template-columns: 1fr; }

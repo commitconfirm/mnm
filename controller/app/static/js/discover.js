@@ -212,12 +212,14 @@ function onboardingBlockHtml(state) {
     ? `<div class="field"><div class="field-label">Error Detail</div><div class="field-value" style="white-space:pre-wrap;color:#b71c1c;">${escHtml(state.error)}</div></div>`
     : '';
   const jrLink = state.job_result_id
-    ? `<div class="field"><div class="field-label">Nautobot Job Result</div><div class="field-value"><a target="_blank" href="/job-results/${escHtml(state.job_result_id)}/">${escHtml(state.job_result_id)}</a></div></div>`
+    ? `<div class="field"><div class="field-label">Nautobot Job Result</div><div class="field-value"><a target="_blank" href="${MNMServiceURLs.nautobot()}/extras/job-results/${escHtml(state.job_result_id)}/">${escHtml(state.job_result_id).substring(0,8)}...</a></div></div>`
     : '';
   return `
     <div class="field" style="grid-column: 1 / -1; border-left: 4px solid ${stageColor}; padding-left: 8px; background: #f7f7f7;">
       <div class="field-label">Onboarding Status</div>
-      <div class="field-value"><strong style="color:${stageColor};text-transform:uppercase;">${escHtml(stage)}</strong> &mdash; ${escHtml(state.message || '')}</div>
+      <div class="field-value"><strong style="color:${stageColor};text-transform:uppercase;">${escHtml(stage)}</strong> &mdash; ${escHtml(state.message || '')}${
+        (stage === 'failed' || stage === 'timeout') ? ` <button class="btn small" style="margin-left:8px;" onclick="retryOnboard('${escHtml(state.ip || '')}')">Retry</button>` : ''
+      }</div>
     </div>
     ${jrLink}
     ${errBlock}
@@ -674,3 +676,26 @@ checkAuth().then(() => {
     }
   }).catch(() => {});
 });
+
+// Retry failed onboarding for a single IP
+async function retryOnboard(ip) {
+  if (!ip) return;
+  try {
+    var r = await fetch('/api/discover/onboard', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ip: ip }),
+    });
+    if (r.ok) {
+      var d = await r.json();
+      alert('Onboarding re-submitted for ' + ip);
+      pollStatus();
+    } else {
+      var err = await r.json().catch(function() { return {}; });
+      alert('Retry failed: ' + (err.detail || r.statusText));
+    }
+  } catch (e) {
+    alert('Retry failed: ' + e.message);
+  }
+}
+window.retryOnboard = retryOnboard;

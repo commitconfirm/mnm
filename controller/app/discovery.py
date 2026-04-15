@@ -1339,34 +1339,68 @@ async def _check_known(ip: str) -> bool:
 # Onboarding
 # ---------------------------------------------------------------------------
 
-def _detect_platform(snmp_data: dict) -> str | None:
-    """Detect the Nautobot platform slug from SNMP sysDescr.
+# Platform detection patterns: (substring_to_match, platform_slug)
+# Checked against SNMP sysDescr (lowercased) and SSH banner (lowercased).
+# Order matters — more specific patterns before general ones.
+# Every slug here MUST have a matching Platform in Nautobot (see bootstrap.sh).
+_PLATFORM_PATTERNS: list[tuple[list[str], str]] = [
+    # Juniper
+    (["junos", "juniper"], "juniper_junos"),
+    # Palo Alto
+    (["pan-os", "palo alto", "paloalto"], "paloalto_panos"),
+    # Cisco NX-OS (before generic IOS)
+    (["nx-os", "nxos", "nexus"], "cisco_nxos"),
+    # Cisco IOS-XR (before generic IOS)
+    (["ios-xr", "iosxr", "ios xr"], "cisco_iosxr"),
+    # Cisco IOS / IOS-XE (same NAPALM ios driver)
+    (["cisco ios", "ios-xe", "iosxe", "ios xe", "catalyst"], "cisco_ios"),
+    # Cisco ASA (uses ios driver as best-effort)
+    (["cisco asa", "adaptive security"], "cisco_ios"),
+    # Arista
+    (["arista", "eos"], "arista_eos"),
+    # Fortinet
+    (["fortigate", "fortios", "fortinet"], "fortinet_fortios"),
+    # MikroTik
+    (["routeros", "mikrotik"], "mikrotik_routeros"),
+    # Aruba / HPE
+    (["arubaos-cx", "arubaos", "aruba", "procurve", "comware"], "aruba_aoscx"),
+    # Extreme
+    (["extremexos", "exos", "extreme"], "extreme_exos"),
+    # Ubiquiti (EdgeOS uses Vyatta/VyOS, no dedicated NAPALM driver — use ios as fallback)
+    (["ubiquiti", "edgeos", "unifi"], "ubiquiti_edgeos"),
+    # Huawei
+    (["huawei", "vrp"], "huawei_vrp"),
+]
+
+
+def _detect_platform(snmp_data: dict, fingerprint: dict | None = None) -> str | None:
+    """Detect the Nautobot platform slug from SNMP sysDescr and SSH banner.
 
     Returns a platform network_driver string (e.g. 'juniper_junos') that
-    Nautobot can match to an existing Platform, or None if unrecognized.
+    Nautobot can match to a pre-loaded Platform, or None if unrecognized.
+
+    Checks SNMP sysDescr first (highest confidence), then falls back to
+    SSH banner analysis. All returned slugs must have matching Platform
+    records in Nautobot (created by the bootstrap script).
     """
-    sysdescr = snmp_data.get("sysDescr", "").lower()
-    if not sysdescr:
-        return None
+    fp = fingerprint or {}
+    sources = [
+        snmp_data.get("sysDescr", "").lower(),
+        fp.get("ssh_banner", "").lower(),
+        fp.get("http_title", "").lower(),
+    ]
 
-    platform = None
-    if "juniper" in sysdescr or "junos" in sysdescr:
-        platform = "juniper_junos"
-    elif "cisco" in sysdescr and ("ios-xe" in sysdescr or "ios xe" in sysdescr):
-        platform = "cisco_xe"
-    elif "cisco" in sysdescr and ("nx-os" in sysdescr or "nxos" in sysdescr):
-        platform = "cisco_nxos"
-    elif "cisco" in sysdescr and "ios" in sysdescr:
-        platform = "cisco_ios"
-    elif "arista" in sysdescr or "eos" in sysdescr:
-        platform = "arista_eos"
-    elif "fortigate" in sysdescr or "fortios" in sysdescr:
-        platform = "fortinet_fortios"
-    elif "routeros" in sysdescr or "mikrotik" in sysdescr:
-        platform = "mikrotik_routeros"
+    for source in sources:
+        if not source:
+            continue
+        for keywords, slug in _PLATFORM_PATTERNS:
+            for kw in keywords:
+                if kw in source:
+                    log.debug("detect_platform", "Platform detected",
+                              context={"platform": slug, "matched": kw, "source": source[:80]})
+                    return slug
 
-    log.debug("detect_platform", "Platform detection complete", context={"platform": platform, "sysdescr_snippet": sysdescr[:80]})
-    return platform
+    return None
 
 
 async def _ensure_primary_ip(ip: str) -> None:
@@ -1546,13 +1580,14 @@ async def _onboard_host(
     location_id: str,
     secrets_group_id: str,
     snmp_data: dict | None = None,
+    fingerprint: dict | None = None,
 ) -> bool:
     """Submit onboarding job for a single host and poll for completion.
 
-    If snmp_data is provided, auto-detects the platform from sysDescr
-    and passes it to the onboarding job so Netmiko doesn't have to guess.
+    Auto-detects the platform from SNMP sysDescr and SSH banner, then passes
+    it to the onboarding job so Netmiko doesn't have to guess the driver.
     """
-    platform_slug = _detect_platform(snmp_data or {})
+    platform_slug = _detect_platform(snmp_data or {}, fingerprint=fingerprint)
 
     log.info("onboard_submit", "Submitting onboarding job", context={"ip": ip, "platform": platform_slug})
     _onb_set(ip, "submitting", f"Detected platform {platform_slug or 'unknown'}; submitting onboarding job", platform=platform_slug)
@@ -1991,7 +2026,7 @@ async def sweep(
         cls, confidence, signals = classify_endpoint(open_ports, host["mac_vendor"], host["snmp"], fp)
         host["classification"] = cls
         host["classification_confidence"] = confidence
-        host["onboard_eligible"] = cls in ("network_device", "router", "switch", "firewall")
+        host["onboard_eligible"] = cls in ("network_device", "router", "switch", "firewall", "access_point")
         log.debug("classify_result", "Host classified", context={
             "ip": ip, "classification": cls, "confidence": confidence,
             "signals": signals[:5],
@@ -2016,7 +2051,8 @@ async def sweep(
 
         if host["onboard_eligible"]:
             host["status"] = SweepStatus.ONBOARDING
-            success = await _onboard_host(ip, location_id, secrets_group_id, snmp_data=host.get("snmp"))
+            success = await _onboard_host(ip, location_id, secrets_group_id, snmp_data=host.get("snmp"),
+                                            fingerprint={"ssh_banner": host.get("ssh_banner", ""), "http_title": host.get("http_title", "")})
             if success:
                 host["status"] = SweepStatus.ONBOARDED
                 host["onboarded"] = True

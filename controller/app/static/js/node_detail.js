@@ -94,50 +94,173 @@ document.getElementById('tab-bar').addEventListener('click', function(e) {
   document.getElementById('panel-' + tab).classList.add('active');
 });
 
-// Load data
+// Helpers
+function fmtBytes(n) {
+  if (!n || n <= 0) return '-';
+  var units = ['B','KB','MB','GB','TB'];
+  var i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return n.toFixed(n < 10 ? 1 : 0) + ' ' + units[i];
+}
+
+// Physical interface name prefixes (for "show all" filter)
+// Logical/internal interface prefixes to hide by default.
+// Everything NOT matching this list is shown (physical, aggregate, etc.).
+var _LOGICAL_PREFIXES = [
+  'lo0','loopback','lsi','dsc','gre','ipip','mtun','pimd','pime','tap',
+  'vtep','jsrv','rbeb','bme','pp0','ppd','ppe','fti','irb','vlan',
+  'st0','tunnel','sdwan','lsq-','lt-','mt-','sp-','ip-','gr-',
+  'pfe-','pfh-','esi',
+];
+
+function isLogicalInterface(name) {
+  var lower = name.toLowerCase();
+  // Exact matches
+  if (_LOGICAL_PREFIXES.indexOf(lower) !== -1) return true;
+  // Prefix matches (with subinterface: lo0.0, irb.140, etc.)
+  for (var i = 0; i < _LOGICAL_PREFIXES.length; i++) {
+    if (lower.startsWith(_LOGICAL_PREFIXES[i] + '.') || lower === _LOGICAL_PREFIXES[i]) return true;
+  }
+  return false;
+}
+
+// Load device info header
 async function loadNodeInfo() {
   try {
-    var r = await fetch('/api/nodes/' + encodeURIComponent(nodeName));
-    if (!r.ok) return;
-    var d = await r.json();
-    var dev = d.device || {};
+    // Load both /info (NAPALM facts) and /nodes/{name} (poll jobs) in parallel
+    var [infoResp, nodeResp] = await Promise.all([
+      fetch('/api/nodes/' + encodeURIComponent(nodeName) + '/info'),
+      fetch('/api/nodes/' + encodeURIComponent(nodeName)),
+    ]);
+
     document.getElementById('node-title').textContent = nodeName;
 
-    var platform = (dev.platform || {}).display || '';
-    var location = (dev.location || {}).display || '';
-    var role = ((dev.role || dev.device_role || {}).display) || '';
-    var pip = (dev.primary_ip4 || {}).display || (dev.primary_ip4 || {}).address || '';
+    if (infoResp.ok) {
+      var info = await infoResp.json();
+      var fields = [
+        { l: 'Primary IP', v: (info.primary_ip || '').replace(/\/\d+$/, '') },
+        { l: 'Platform', v: info.platform },
+        { l: 'Model', v: info.model },
+        { l: 'Serial', v: info.serial_number },
+        { l: 'OS Version', v: info.os_version },
+        { l: 'Uptime', v: info.uptime },
+        { l: 'Interfaces', v: info.interfaces_up + '/' + info.interface_count + ' up' },
+        { l: 'Role', v: info.role },
+        { l: 'Location', v: info.location },
+      ];
+      document.getElementById('node-meta').innerHTML = fields.filter(function(f) { return f.v; }).map(function(f) {
+        return '<div class="field"><div class="field-label">' + esc(f.l) + '</div><div class="field-value">' + esc(String(f.v)) + '</div></div>';
+      }).join('');
 
-    var meta = '';
-    if (pip) meta += '<div class="field"><div class="field-label">Primary IP</div><div class="field-value">' + esc(pip) + '</div></div>';
-    if (platform) meta += '<div class="field"><div class="field-label">Platform</div><div class="field-value">' + esc(platform) + '</div></div>';
-    if (role) meta += '<div class="field"><div class="field-label">Role</div><div class="field-value">' + esc(role) + '</div></div>';
-    if (location) meta += '<div class="field"><div class="field-label">Location</div><div class="field-value">' + esc(location) + '</div></div>';
-    document.getElementById('node-meta').innerHTML = meta;
-
-    if (dev.id) {
-      var link = document.getElementById('nautobot-link');
-      link.href = MNMServiceURLs.nautobotDevice(dev.id);
-      link.style.display = 'inline-flex';
+      if (info.device_id) {
+        var link = document.getElementById('nautobot-link');
+        link.href = MNMServiceURLs.nautobotDevice(info.device_id);
+        link.style.display = 'inline-flex';
+      }
     }
 
-    // Poll history
-    var jobs = d.jobs || {};
-    var tbody = document.getElementById('polls-tbody');
-    var jobTypes = Object.keys(jobs).sort();
-    document.getElementById('count-polls').textContent = jobTypes.length;
-    tbody.innerHTML = jobTypes.map(function(jt) {
-      var j = jobs[jt];
-      var dot = j.last_error && !j.last_success ? 'red' : (j.last_success ? 'green' : 'grey');
-      return '<tr><td><strong>' + esc(jt) + '</strong></td>'
-        + '<td><span class="dot ' + dot + '" style="width:8px;height:8px"></span></td>'
-        + '<td>' + (j.last_success ? timeAgo(j.last_success) : '-') + '</td>'
-        + '<td style="font-size:0.8rem;color:var(--red)">' + esc(j.last_error || '') + '</td>'
-        + '<td>' + (j.last_duration != null ? j.last_duration + 's' : '-') + '</td>'
-        + '<td>' + j.interval_sec + 's</td></tr>';
-    }).join('');
+    if (nodeResp.ok) {
+      var d = await nodeResp.json();
+      // Poll history
+      var jobs = d.jobs || {};
+      var tbody = document.getElementById('polls-tbody');
+      var jobTypes = Object.keys(jobs).sort();
+      document.getElementById('count-polls').textContent = jobTypes.length;
+      tbody.innerHTML = jobTypes.map(function(jt) {
+        var j = jobs[jt];
+        var dot = j.last_error && !j.last_success ? 'red' : (j.last_success ? 'green' : 'grey');
+        return '<tr><td><strong>' + esc(jt) + '</strong></td>'
+          + '<td><span class="dot ' + dot + '" style="width:8px;height:8px"></span></td>'
+          + '<td>' + (j.last_success ? timeAgo(j.last_success) : '-') + '</td>'
+          + '<td style="font-size:0.8rem;color:var(--red)">' + esc(j.last_error || '') + '</td>'
+          + '<td>' + (j.last_duration != null ? j.last_duration + 's' : '-') + '</td>'
+          + '<td>' + j.interval_sec + 's</td></tr>';
+      }).join('');
+    }
   } catch (e) { console.error('Failed to load node info:', e); }
 }
+
+// Interfaces DataTable
+var allIfaces = [];
+var ifaceDT = new DataTable({
+  containerId: 'iface-dt',
+  columns: [
+    { key: 'health', label: '', sortable: true, render: function(v) {
+      return '<span class="dot ' + (v || 'grey') + '" style="width:10px;height:10px"></span>';
+    }},
+    { key: 'name', label: 'Interface', sortable: true, render: function(v) { return '<strong>' + esc(v) + '</strong>'; } },
+    { key: 'description', label: 'Description', sortable: true, render: function(v) { return esc(v || ''); } },
+    { key: 'is_up', label: 'Status', sortable: true, render: function(v, row) {
+      if (!row.is_enabled) return '<span style="color:var(--text-muted)">Admin Down</span>';
+      return v ? '<span style="color:var(--green)">Up</span>' : '<span style="color:var(--red)">Down</span>';
+    }},
+    { key: 'speed_display', label: 'Speed', sortable: true },
+    { key: 'mtu', label: 'MTU', sortable: true, render: function(v) { return v || '-'; } },
+    { key: 'errors_in', label: 'Err In', sortable: true, render: function(v) {
+      return v > 0 ? '<span class="counter-error">' + v + '</span>' : '0';
+    }},
+    { key: 'errors_out', label: 'Err Out', sortable: true, render: function(v) {
+      return v > 0 ? '<span class="counter-error">' + v + '</span>' : '0';
+    }},
+    { key: 'discards_in', label: 'Disc In', sortable: true, render: function(v) {
+      return v > 0 ? '<span class="counter-discard">' + v + '</span>' : '0';
+    }},
+    { key: 'discards_out', label: 'Disc Out', sortable: true, render: function(v) {
+      return v > 0 ? '<span class="counter-discard">' + v + '</span>' : '0';
+    }},
+    { key: 'octets_in', label: 'Traffic In', sortable: true, render: function(v) { return fmtBytes(v); } },
+    { key: 'octets_out', label: 'Traffic Out', sortable: true, render: function(v) { return fmtBytes(v); } },
+  ],
+  pageSize: 100, storageKey: 'mnm-node-interfaces',
+});
+
+var _ifaceRetries = 0;
+async function loadInterfaces() {
+  try {
+    if (_ifaceRetries === 0) {
+      document.getElementById('count-interfaces').textContent = '...';
+      document.getElementById('iface-dt').innerHTML = '<div class="loading-indicator">Loading interfaces from device...</div>';
+    }
+    var r = await fetch('/api/nodes/' + encodeURIComponent(nodeName) + '/interfaces');
+    if (!r.ok) {
+      document.getElementById('iface-dt').innerHTML = '<div style="text-align:center;padding:24px;color:var(--text-muted)">Failed to load interfaces — device may be unreachable</div>';
+      return;
+    }
+    allIfaces = await r.json();
+    if (!allIfaces.length && _ifaceRetries < 12) {
+      // Server is fetching data in background — retry
+      _ifaceRetries++;
+      document.getElementById('iface-dt').innerHTML = '<div class="loading-indicator">Querying device via NAPALM (attempt ' + _ifaceRetries + ')...</div>';
+      setTimeout(loadInterfaces, 5000);
+      return;
+    }
+    _ifaceRetries = 0;
+    document.getElementById('count-interfaces').textContent = allIfaces.length;
+    if (!allIfaces.length) {
+      document.getElementById('iface-dt').innerHTML = '<div style="text-align:center;padding:24px;color:var(--text-muted)">No interface data available</div>';
+      return;
+    }
+    applyIfaceFilter();
+  } catch (e) {
+    console.error('Failed to load interfaces:', e);
+    document.getElementById('iface-dt').innerHTML = '<div style="text-align:center;padding:24px;color:var(--text-muted)">Error loading interfaces</div>';
+  }
+}
+
+function applyIfaceFilter() {
+  var q = (document.getElementById('iface-search').value || '').toLowerCase();
+  var showAll = document.getElementById('iface-show-all').checked;
+  ifaceDT.setFilter(function(r) {
+    if (!showAll && isLogicalInterface(r.name)) return false;
+    if (q && (r.name || '').toLowerCase().indexOf(q) === -1 && (r.description || '').toLowerCase().indexOf(q) === -1) return false;
+    return true;
+  });
+  ifaceDT.setData(allIfaces);
+  ifaceDT.render();
+}
+
+document.getElementById('iface-search').addEventListener('input', applyIfaceFilter);
+document.getElementById('iface-show-all').addEventListener('change', applyIfaceFilter);
 
 async function loadArp() {
   try {
@@ -247,8 +370,9 @@ async function checkAuth() {
   if (!d.authenticated) window.location.href = '/login';
 }
 
-function loadAll() {
-  loadNodeInfo();
+async function loadAll() {
+  // Load info first (warms NAPALM cache), then interfaces reuses cached data.
+  // DB-backed tabs (ARP, MAC, routes, etc.) load in parallel — they're fast.
   loadArp();
   loadMac();
   loadRoutes();
@@ -256,6 +380,8 @@ function loadAll() {
   loadBgp();
   loadComments();
   loadChangeHistory();
+  await loadNodeInfo();
+  await loadInterfaces();
 }
 
 // ---- Comments ----

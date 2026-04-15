@@ -63,7 +63,8 @@
     <!-- Tabs -->
     <div class="card">
       <div class="tab-bar" id="tab-bar">
-        <button class="active" data-tab="arp">ARP Table <span class="tab-count" id="count-arp">-</span></button>
+        <button class="active" data-tab="interfaces">Interfaces <span class="tab-count" id="count-interfaces">-</span></button>
+        <button data-tab="arp">ARP Table <span class="tab-count" id="count-arp">-</span></button>
         <button data-tab="mac">MAC Table <span class="tab-count" id="count-mac">-</span></button>
         <button data-tab="routes">Routing Table <span class="tab-count" id="count-routes">-</span></button>
         <button data-tab="lldp">LLDP Neighbors <span class="tab-count" id="count-lldp">-</span></button>
@@ -71,7 +72,16 @@
         <button data-tab="polls">Poll History <span class="tab-count" id="count-polls">-</span></button>
       </div>
 
-      <div class="tab-panel active" id="panel-arp">
+      <div class="tab-panel active" id="panel-interfaces">
+        <div class="filter-bar">
+          <input type="text" id="iface-search" placeholder="Filter by name or description...">
+          <label style="display:inline-flex;align-items:center;gap:4px;font-size:0.82rem;color:var(--text-muted);white-space:nowrap">
+            <input type="checkbox" id="iface-show-all"> Show all interfaces
+          </label>
+        </div>
+        <div id="iface-dt"><div class="loading-indicator">Loading interfaces...</div></div>
+      </div>
+      <div class="tab-panel" id="panel-arp">
         <div class="filter-bar">
           <input type="text" id="arp-search" placeholder="Filter by IP or MAC...">
         </div>

@@ -161,8 +161,9 @@ async def on_startup():
     asyncio.create_task(polling.poll_loop())
     asyncio.create_task(proxmox_connector.scheduled_loop())
     asyncio.create_task(_scheduled_prune_loop())
+    asyncio.create_task(_node_info_warmup_loop())
     log.info("background_tasks",
-             "Background tasks launched: sweep scheduler, modular poller, proxmox connector, prune loop",
+             "Background tasks launched: sweep scheduler, modular poller, proxmox connector, prune loop, node info warmup",
              context={"proxmox_configured": proxmox_connector.is_configured(),
                       "retention_days": _retention_days(),
                       "prune_interval_hours": _prune_interval_hours()})
@@ -352,6 +353,29 @@ async def start_sweep(body: SweepRequest):
         )
     )
     return {"status": "started"}
+
+
+class OnboardRequest(BaseModel):
+    ip: str
+
+
+@app.post("/api/discover/onboard", dependencies=[Depends(require_auth)])
+async def onboard_single(body: OnboardRequest):
+    """Re-submit onboarding for a single IP. Uses the saved sweep schedule's
+    location and credentials. For retrying failed onboarding attempts."""
+    config = await load_config_async()
+    schedules = config.get("sweep_schedules", [])
+    if not schedules:
+        raise HTTPException(status_code=400, detail="No sweep schedule configured — need location and credentials")
+    s = schedules[0]
+    asyncio.create_task(
+        discovery._onboard_host(
+            body.ip,
+            s["location_id"],
+            s["secrets_group_id"],
+        )
+    )
+    return {"status": "submitted", "ip": body.ip}
 
 
 @app.post("/api/discover/stop", dependencies=[Depends(require_auth)])
@@ -1439,6 +1463,75 @@ async def _scheduled_prune_loop() -> None:
         await asyncio.sleep(_prune_interval_hours() * 3600)
 
 
+# Per-node NAPALM failure tracking for warmup backoff.
+# Prevents hammering devices with limited NETCONF capacity (e.g., EX3300
+# with 1GB RAM on Junos 12.3 where stale sessions persist 10-15 minutes).
+_warmup_failures: dict[str, int] = {}  # node_name → consecutive failure count
+_WARMUP_MAX_BACKOFF = 5  # max consecutive failures before skipping for 5 cycles
+
+
+async def _node_info_warmup_loop() -> None:
+    """Background loop: prefetch NAPALM facts/interfaces for all nodes so
+    the node detail page loads instantly from cache.
+
+    Runs every 4 minutes. Processes nodes sequentially to avoid overwhelming
+    Nautobot's NAPALM proxy. Devices with repeated NAPALM failures get
+    exponentially backed off to avoid session exhaustion on constrained
+    platforms (Junos 12.3 on EX3300: 1GB RAM, stale NETCONF sessions).
+    """
+    await asyncio.sleep(10)  # brief pause for startup, then start warming caches
+    cycle = 0
+    while True:
+        cycle += 1
+        try:
+            devices = await nautobot_client.get_devices()
+            for dev in devices:
+                name = dev.get("name")
+                dev_id = dev.get("id")
+                if not name or not dev_id:
+                    continue
+
+                # Exponential backoff: skip devices with repeated NAPALM failures.
+                # After N consecutive failures, skip for N cycles (max 5).
+                fail_count = _warmup_failures.get(name, 0)
+                if fail_count > 0 and (cycle % (fail_count + 1)) != 0:
+                    continue
+
+                try:
+                    now = time.time()
+                    # Warm get_facts + get_interfaces (shared cache)
+                    cached = _node_info_cache.get(name)
+                    if not cached or now - cached[0] >= _NODE_INFO_TTL:
+                        await get_node_info(name)
+                    # Warm counters cache (slow call — only in background)
+                    cc = _node_counters_cache.get(name)
+                    if not cc or now - cc[0] >= _NODE_COUNTERS_TTL:
+                        try:
+                            data = await nautobot_client.napalm_get(dev_id, "get_interfaces_counters")
+                            _node_counters_cache[name] = (time.time(), data.get("get_interfaces_counters", {}))
+                        except Exception:
+                            pass
+                    # Rebuild the merged interfaces list with fresh counters
+                    iface_data = await _get_raw_interfaces(dev_id, name)
+                    counters = (_node_counters_cache.get(name) or (0, {}))[1]
+                    if iface_data:
+                        _node_iface_cache[name] = (time.time(), _build_iface_list(iface_data, counters))
+                    # Success — reset failure counter
+                    if name in _warmup_failures:
+                        del _warmup_failures[name]
+                except Exception:
+                    # Track failure for backoff
+                    _warmup_failures[name] = min(_warmup_failures.get(name, 0) + 1, _WARMUP_MAX_BACKOFF)
+                    log.debug("warmup_backoff", f"NAPALM warmup failed for {name}, backoff={_warmup_failures[name]}",
+                              context={"node": name, "failures": _warmup_failures[name]})
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            log.warning("warmup_error", "Node info warmup failed",
+                        context={"error": str(e)[:200]})
+        await asyncio.sleep(240)  # 4 minutes between cycles
+
+
 # -------------------------------------------------------------------------
 # Comments + Change History (Phase 2.9)
 # -------------------------------------------------------------------------
@@ -2259,6 +2352,228 @@ async def node_lldp_table(node_name: str):
     """LLDP neighbor entries for a specific node."""
     entries = await endpoint_store.list_node_lldp(node_name)
     return {"entries": entries, "count": len(entries), "node_name": node_name}
+
+
+# -------------------------------------------------------------------------
+# Node detail: info, interfaces, health (Phase 2.9 Part 6)
+# -------------------------------------------------------------------------
+
+_node_info_cache: dict[str, tuple[float, dict]] = {}
+_node_iface_cache: dict[str, tuple[float, list]] = {}
+_node_counters_cache: dict[str, tuple[float, dict]] = {}
+_NODE_INFO_TTL = 300  # 5 minutes
+_NODE_IFACE_TTL = 300  # 5 minutes — match info TTL so warmup keeps both hot
+_NODE_COUNTERS_TTL = 300
+
+
+@app.get("/api/nodes/{node_name}/info", dependencies=[Depends(require_auth)])
+async def get_node_info(node_name: str):
+    """Device info from NAPALM get_facts + Nautobot device data. Cached 5 min."""
+    now = time.time()
+    cached = _node_info_cache.get(node_name)
+    if cached and now - cached[0] < _NODE_INFO_TTL:
+        return cached[1]
+
+    devices = await nautobot_client.get_devices()
+    device = next((d for d in devices if d.get("name") == node_name), None)
+    if not device:
+        raise HTTPException(status_code=404, detail="Node not found")
+
+    facts: dict = {}
+    try:
+        data = await nautobot_client.napalm_get(device["id"], "get_facts")
+        facts = data.get("get_facts", {})
+    except Exception as e:
+        log.warning("node_info_facts_failed", "get_facts failed",
+                    context={"node": node_name, "error": str(e)[:200]})
+
+    iface_data = await _get_raw_interfaces(device["id"], node_name)
+
+    uptime_secs = facts.get("uptime", 0) or 0
+    up_days = int(uptime_secs // 86400)
+    up_hours = int((uptime_secs % 86400) // 3600)
+    uptime_str = f"{up_days}d {up_hours}h" if up_days else f"{up_hours}h {int((uptime_secs % 3600) // 60)}m"
+
+    total_ifaces = len(iface_data)
+    up_ifaces = sum(1 for v in iface_data.values() if v.get("is_up"))
+
+    pip = (device.get("primary_ip4") or {})
+    pip_display = pip.get("display") or pip.get("address") or ""
+
+    result = {
+        "name": node_name,
+        "vendor": facts.get("vendor", ""),
+        "model": facts.get("model", ""),
+        "serial_number": facts.get("serial_number", ""),
+        "os_version": facts.get("os_version", ""),
+        "hostname": facts.get("hostname", ""),
+        "fqdn": facts.get("fqdn", ""),
+        "uptime_seconds": uptime_secs,
+        "uptime": uptime_str,
+        "interface_count": total_ifaces,
+        "interfaces_up": up_ifaces,
+        "primary_ip": pip_display,
+        "role": ((device.get("role") or device.get("device_role") or {}).get("display") or ""),
+        "location": ((device.get("location") or {}).get("display") or ""),
+        "platform": ((device.get("platform") or {}).get("display") or ""),
+        "device_id": device.get("id", ""),
+    }
+    _node_info_cache[node_name] = (now, result)
+    return result
+
+
+# Shared raw interface data cache (used by both /info and /interfaces)
+_raw_iface_cache: dict[str, tuple[float, dict]] = {}
+_RAW_IFACE_TTL = 120
+
+
+async def _get_raw_interfaces(device_id: str, node_name: str) -> dict:
+    """Get raw NAPALM get_interfaces data with caching."""
+    now = time.time()
+    cached = _raw_iface_cache.get(node_name)
+    if cached and now - cached[0] < _RAW_IFACE_TTL:
+        return cached[1]
+    try:
+        data = await nautobot_client.napalm_get(device_id, "get_interfaces")
+        result = data.get("get_interfaces", {})
+    except Exception as e:
+        log.warning("node_ifaces_failed", "get_interfaces failed",
+                    context={"node": node_name, "error": str(e)[:200]})
+        result = {}
+    _raw_iface_cache[node_name] = (now, result)
+    return result
+
+
+def _build_iface_list(iface_data: dict, counters: dict) -> list:
+    """Merge get_interfaces + get_interfaces_counters into a flat list."""
+    result = []
+    for name in sorted(iface_data.keys()):
+        ifc = iface_data[name]
+        ctr = counters.get(name, {})
+
+        errors_in = max(ctr.get("rx_errors", 0), 0)
+        errors_out = max(ctr.get("tx_errors", 0), 0)
+        discards_in = max(ctr.get("rx_discards", 0), 0)
+        discards_out = max(ctr.get("tx_discards", 0), 0)
+        octets_in = max(ctr.get("rx_octets", 0), 0)
+        octets_out = max(ctr.get("tx_octets", 0), 0)
+
+        is_up = ifc.get("is_up", False)
+        is_enabled = ifc.get("is_enabled", True)
+
+        if not is_enabled:
+            health = "gray"
+        elif not is_up:
+            health = "red"
+        elif (errors_in + errors_out) > 0:
+            health = "red"
+        elif (discards_in + discards_out) > 0:
+            health = "yellow"
+        else:
+            health = "green"
+
+        speed = ifc.get("speed", 0) or 0
+        if speed >= 1000:
+            speed_str = f"{int(speed / 1000)}G"
+        elif speed > 0:
+            speed_str = f"{int(speed)}M"
+        else:
+            speed_str = ""
+
+        result.append({
+            "name": name,
+            "is_up": is_up,
+            "is_enabled": is_enabled,
+            "health": health,
+            "description": ifc.get("description", ""),
+            "speed": speed,
+            "speed_display": speed_str,
+            "mtu": ifc.get("mtu", 0),
+            "mac_address": ifc.get("mac_address", ""),
+            "last_flapped": ifc.get("last_flapped"),
+            "errors_in": errors_in,
+            "errors_out": errors_out,
+            "discards_in": discards_in,
+            "discards_out": discards_out,
+            "octets_in": octets_in,
+            "octets_out": octets_out,
+        })
+    return result
+
+
+@app.get("/api/nodes/{node_name}/interfaces", dependencies=[Depends(require_auth)])
+async def get_node_interfaces(node_name: str):
+    """Interface details from NAPALM. Returns immediately from cache if
+    available. Counters are included when cached but never block the response —
+    the warmup loop fetches them in the background."""
+    now = time.time()
+    cached = _node_iface_cache.get(node_name)
+    if cached and now - cached[0] < _NODE_IFACE_TTL:
+        return cached[1]
+
+    devices = await nautobot_client.get_devices()
+    device = next((d for d in devices if d.get("name") == node_name), None)
+    if not device:
+        raise HTTPException(status_code=404, detail="Node not found")
+
+    # Get interface status from shared cache. If cache is empty, kick off
+    # a background fetch and return immediately so the page doesn't block.
+    raw_cached = _raw_iface_cache.get(node_name)
+    if raw_cached and time.time() - raw_cached[0] < _RAW_IFACE_TTL:
+        iface_data = raw_cached[1]
+    else:
+        # Not cached — trigger background warmup, return empty with retry hint
+        async def _bg_fetch():
+            try:
+                await _get_raw_interfaces(device["id"], node_name)
+            except Exception:
+                pass
+        asyncio.create_task(_bg_fetch())
+        return JSONResponse(content=[], headers={"X-MNM-Retry-After": "5"})
+
+    # Use cached counters if available, otherwise return without them.
+    # The warmup loop fetches counters in the background — never block here.
+    counters: dict = {}
+    cc = _node_counters_cache.get(node_name)
+    if cc and now - cc[0] < _NODE_COUNTERS_TTL:
+        counters = cc[1]
+
+    result = _build_iface_list(iface_data, counters)
+    _node_iface_cache[node_name] = (now, result)
+    return result
+
+
+@app.get("/api/nodes/{node_name}/health", dependencies=[Depends(require_auth)])
+async def get_node_health(node_name: str):
+    """Combined poll health + interface health summary."""
+    poll_rows = await polling.get_device_poll_status(node_name)
+    jobs = {r["job_type"]: r for r in poll_rows} if poll_rows else {}
+
+    ifaces = []
+    try:
+        ifaces = await get_node_interfaces(node_name)
+    except Exception:
+        pass
+
+    total = len(ifaces)
+    up = sum(1 for i in ifaces if i.get("is_up"))
+    down = sum(1 for i in ifaces if i.get("is_enabled") and not i.get("is_up"))
+    admin_down = sum(1 for i in ifaces if not i.get("is_enabled"))
+    with_errors = sum(1 for i in ifaces if (i.get("errors_in", 0) + i.get("errors_out", 0)) > 0)
+    with_discards = sum(1 for i in ifaces if (i.get("discards_in", 0) + i.get("discards_out", 0)) > 0)
+
+    return {
+        "node_name": node_name,
+        "jobs": jobs,
+        "interface_health": {
+            "total": total,
+            "up": up,
+            "down": down,
+            "admin_down": admin_down,
+            "with_errors": with_errors,
+            "with_discards": with_discards,
+        },
+    }
 
 
 @app.get("/api/nodes/{node_name}", dependencies=[Depends(require_auth)])

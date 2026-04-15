@@ -2,11 +2,49 @@ FROM networktocode/nautobot:3.0-py3.11
 
 # Install NAPALM drivers and device onboarding plugin
 # napalm and junos-eznc are already in the base image but listed explicitly for clarity
+# Install NAPALM core + community drivers for all supported vendors.
+# Base image includes napalm core (eos, ios, iosxr, junos, nxos).
+# Community drivers: napalm-panos (Palo Alto) is well-maintained.
+# Fortinet/MikroTik/Huawei community drivers have NAPALM 5.x compat issues —
+# shim packages are created below so the onboarding plugin can load a driver.
 RUN pip install --no-cache-dir \
     nautobot-device-onboarding \
     nautobot-welcome-wizard \
     napalm \
-    junos-eznc
+    junos-eznc \
+    napalm-panos
+
+# Shim packages for vendors whose community NAPALM drivers don't build on
+# NAPALM 5.x. These wrap the ios driver so the onboarding plugin's
+# get_network_driver() call doesn't crash. Netmiko handles the actual SSH
+# connection using the correct device type (fortinet, mikrotik, huawei).
+# Long-term: replace with vendor REST API connectors.
+USER root
+RUN mkdir -p /usr/local/lib/python3.11/site-packages/napalm_fortios \
+             /usr/local/lib/python3.11/site-packages/napalm_ros \
+             /usr/local/lib/python3.11/site-packages/napalm_ce && \
+    echo 'from napalm.ios import IOSDriver as FortiOSDriver' > /usr/local/lib/python3.11/site-packages/napalm_fortios/__init__.py && \
+    echo 'from napalm.ios import IOSDriver as ROSDriver' > /usr/local/lib/python3.11/site-packages/napalm_ros/__init__.py && \
+    echo 'from napalm.ios import IOSDriver as CEDriver' > /usr/local/lib/python3.11/site-packages/napalm_ce/__init__.py
+
+# Patch 5: Extend NETMIKO_TO_NAPALM_STATIC with vendor mappings missing from
+# the upstream plugin. Without these, SSHDetect identifies the device type
+# (e.g., "fortinet") but the plugin can't find the corresponding NAPALM driver.
+RUN CONSTANTS=$(find /opt/nautobot -path "*/nautobot_device_onboarding/constants.py" -print -quit) && \
+    if [ -n "$CONSTANTS" ]; then \
+        echo '' >> "$CONSTANTS" && \
+        echo '# MNM Patch 5: additional Netmiko-to-NAPALM mappings' >> "$CONSTANTS" && \
+        echo 'NETMIKO_TO_NAPALM_STATIC["fortinet"] = "fortios"' >> "$CONSTANTS" && \
+        echo 'NETMIKO_TO_NAPALM_STATIC["fortinet_ssh"] = "fortios"' >> "$CONSTANTS" && \
+        echo 'NETMIKO_TO_NAPALM_STATIC["mikrotik_routeros"] = "ros"' >> "$CONSTANTS" && \
+        echo 'NETMIKO_TO_NAPALM_STATIC["huawei"] = "ce"' >> "$CONSTANTS" && \
+        echo 'NETMIKO_TO_NAPALM_STATIC["paloalto_panos"] = "panos"' >> "$CONSTANTS" && \
+        echo 'NETMIKO_TO_NAPALM_STATIC["aruba_osswitch"] = "ios"' >> "$CONSTANTS" && \
+        echo 'NETMIKO_TO_NAPALM_STATIC["extreme_exos"] = "ios"' >> "$CONSTANTS" && \
+        echo 'NETMIKO_TO_NAPALM_STATIC["ubiquiti_edgerouter"] = "ios"' >> "$CONSTANTS"; \
+    fi && \
+    find /opt/nautobot -path "*/nautobot_device_onboarding/__pycache__" -exec rm -rf {} + 2>/dev/null || true
+USER nautobot
 
 # Patch 1: Increase Netmiko read_timeout for large Juniper configs.
 # The plugin hardcodes 60s which isn't enough for 'show configuration interfaces'.

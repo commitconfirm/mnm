@@ -202,8 +202,11 @@ api_get_id() {
     local name="$2"
     local filter_field="${3:-name}"
 
+    local encoded_name
+    encoded_name=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${name}'))")
+
     docker exec "$CONTAINER" \
-        curl -sf "${API_BASE}/${endpoint}/?${filter_field}=${name}" \
+        curl -sf "${API_BASE}/${endpoint}/?${filter_field}=${encoded_name}" \
             -H "Authorization: Token ${TOKEN}" \
             -H "Accept: application/json" 2>/dev/null \
     | python3 -c "import sys,json; r=json.load(sys.stdin)['results']; print(r[0]['id'] if r else '')"
@@ -258,10 +261,62 @@ done
 echo ""
 echo "--- Manufacturers ---"
 
-for MFG_NAME in "Juniper" "Cisco" "Fortinet" "Arista" "Palo Alto"; do
+for MFG_NAME in "Juniper" "Cisco" "Cisco Meraki" "Fortinet" "Arista" "Palo Alto Networks" "Aruba" "Extreme Networks" "MikroTik" "Ubiquiti" "Huawei"; do
     api_create "dcim/manufacturers" "$MFG_NAME" "name" \
         "{\"name\":\"${MFG_NAME}\"}" \
         "Manufacturer '${MFG_NAME}'" >/dev/null
+done
+
+# ---------------------------------------------------------------------------
+# 4b. Platforms — NAPALM driver mappings for all supported vendors
+# Every vendor must have a platform pre-loaded so onboarding never fails
+# with "no specified NAPALM driver". The network_driver field is what the
+# onboarding plugin uses to match SSH auto-detection results to a platform.
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- Platforms ---"
+
+# Format: network_driver|napalm_driver|display_name|manufacturer
+# Every NAPALM-supported vendor must be here so onboarding never fails.
+# network_driver = what the onboarding plugin uses to find the platform
+# napalm_driver = which NAPALM driver class to load (must be installed)
+PLATFORMS=(
+    # Juniper (built-in junos driver)
+    "juniper_junos|junos|Juniper Junos|Juniper"
+    # Cisco (built-in ios, nxos, iosxr drivers)
+    "cisco_ios|ios|Cisco IOS/IOS-XE|Cisco"
+    "cisco_nxos|nxos|Cisco NX-OS|Cisco"
+    "cisco_nxos_ssh|nxos_ssh|Cisco NX-OS SSH|Cisco"
+    "cisco_iosxr|iosxr|Cisco IOS-XR|Cisco"
+    # Arista (built-in eos driver)
+    "arista_eos|eos|Arista EOS|Arista"
+    # Palo Alto (community napalm-panos)
+    "paloalto_panos|panos|Palo Alto PAN-OS|Palo Alto Networks"
+    # Fortinet (community napalm-fortios has NAPALM 5.x compat issues — use ios/SSH)
+    "fortinet_fortios|ios|Fortinet FortiOS|Fortinet"
+    # MikroTik (community napalm-ros has dep issues — use ios/SSH)
+    "mikrotik_routeros|ios|MikroTik RouterOS|MikroTik"
+    # Aruba / HPE (use ios driver — AOS-CX has similar CLI to Cisco)
+    "aruba_aoscx|ios|Aruba AOS-CX|Aruba"
+    # Extreme (use ios driver as best-effort)
+    "extreme_exos|ios|Extreme EXOS|Extreme Networks"
+    # Ubiquiti (EdgeOS — Vyatta-based, use ios driver as fallback)
+    "ubiquiti_edgeos|ios|Ubiquiti EdgeOS|Ubiquiti"
+    # Huawei (community napalm-ce has NAPALM 5.x compat issues — use ios/SSH)
+    "huawei_vrp|ios|Huawei VRP|Huawei"
+)
+
+for entry in "${PLATFORMS[@]}"; do
+    IFS='|' read -r NET_DRV NAPALM_DRV DISPLAY MFG_NAME <<< "$entry"
+    MFG_ID=$(api_get_id "dcim/manufacturers" "$MFG_NAME" 2>/dev/null) || MFG_ID=""
+    if [ -n "$MFG_ID" ]; then
+        PAYLOAD="{\"name\":\"${NET_DRV}\",\"napalm_driver\":\"${NAPALM_DRV}\",\"network_driver\":\"${NET_DRV}\",\"manufacturer\":\"${MFG_ID}\"}"
+    else
+        PAYLOAD="{\"name\":\"${NET_DRV}\",\"napalm_driver\":\"${NAPALM_DRV}\",\"network_driver\":\"${NET_DRV}\"}"
+    fi
+    api_create "dcim/platforms" "$NET_DRV" "name" \
+        "$PAYLOAD" \
+        "Platform '${DISPLAY}' (${NET_DRV} → ${NAPALM_DRV})" >/dev/null
 done
 
 # ---------------------------------------------------------------------------
