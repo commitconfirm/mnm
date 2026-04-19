@@ -24,6 +24,8 @@
     .sys-item .sys-label { font-size:0.75rem; color:var(--text-muted); margin-top:2px; }
     /* Interface error banner */
     .iface-ok { padding:12px 16px; background:rgba(63,185,80,0.08); border:1px solid rgba(63,185,80,0.2); border-radius:var(--radius); color:var(--green); font-size:0.85rem; }
+    /* Degraded-mode banner */
+    #degraded-banner { display:none; padding:12px 16px; margin-bottom:16px; background:rgba(248,81,73,0.12); border:1px solid rgba(248,81,73,0.4); border-radius:var(--radius); color:var(--red); font-size:0.88rem; font-weight:500; }
   </style>
 </head>
 <body>
@@ -54,6 +56,7 @@
   </header>
 
   <div class="container">
+    <div id="degraded-banner">&#9888; Controller is running in degraded mode — database not connected. Endpoint correlation, poll history, and sweep history are disabled. Check controller logs and restart the controller container once Nautobot has finished bootstrap.</div>
     <!-- Quick Actions row: three cards, equal height -->
     <div class="grid-3" style="margin-bottom:16px; align-items:stretch;">
       <!-- Investigate -->

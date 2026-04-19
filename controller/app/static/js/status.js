@@ -215,6 +215,8 @@ async function loadSystemHealth() {
       document.getElementById('sys-uptime').textContent = fmtUptime(h.uptime_seconds);
       document.getElementById('sys-endpoints').textContent = h.endpoints_tracked || 0;
       document.getElementById('sys-sweep').textContent = h.last_sweep ? timeAgo(h.last_sweep) : 'never';
+      var banner = document.getElementById('degraded-banner');
+      if (banner) banner.style.display = h.db_connected ? 'none' : 'block';
     }
     if (maintResp.ok) {
       var m = await maintResp.json();
