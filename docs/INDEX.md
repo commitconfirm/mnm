@@ -28,3 +28,4 @@ Start here based on your role:
 
 ### Project
 - [CHANGELOG.md](../CHANGELOG.md) — Version history and release notes
+- [CONTRIBUTING.md](CONTRIBUTING.md) — Testing on mnm-test: SSH setup, snapshot workflow, guardrails
