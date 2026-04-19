@@ -66,6 +66,11 @@ def _mac_from_bytes(raw: Any) -> str | None:
         clean = raw.replace(":", "").replace("-", "").lower()
         if len(clean) == 12 and all(c in "0123456789abcdef" for c in clean):
             return ":".join(clean[i:i+2] for i in range(0, 12, 2))
+        # _convert_value UTF-8 decodes OctetStrings when all bytes are valid
+        # UTF-8. Encoding back with utf-8 recovers the exact original bytes.
+        recovered = raw.encode("utf-8")
+        if len(recovered) == 6:
+            return ":".join(f"{b:02x}" for b in recovered)
         return None
 
     return None

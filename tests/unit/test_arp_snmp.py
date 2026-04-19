@@ -166,6 +166,32 @@ async def test_collect_arp_multiple_entries():
     assert ifaces == {101, 102, 103}
 
 
+async def test_collect_arp_mac_utf8_decoded_string():
+    """MACs where snmp_collector UTF-8 decoded the OctetString are recovered correctly.
+
+    When all 6 MAC bytes are valid UTF-8, _convert_value returns a Python str
+    instead of a hex string. _mac_from_bytes must re-encode with utf-8 to
+    recover the original bytes. Covers the real-world case found on SRX320:
+    MAC 24:2f:d0:b1:35:23 — bytes 0xD0 0xB1 form the UTF-8 sequence for U+0431,
+    yielding a 5-char decoded string instead of a 12-char hex string.
+    """
+    # 24:2f:d0:b1:35:23 → bytes b'\x24\x2f\xd0\xb1\x35\x23'
+    # UTF-8 decoded: '$/' + chr(0x0431) + '5#' = 5 chars (0xD0 0xB1 → U+0431)
+    mac_bytes = b"\x24\x2f\xd0\xb1\x35\x23"
+    mac_as_utf8_str = mac_bytes.decode("utf-8")   # 5-char string
+    assert len(mac_as_utf8_str) == 5              # verify the test premise
+
+    walk_result = [
+        _arp_row("2", 542, "192.0.2.121", mac_as_utf8_str),
+        _arp_row("4", 542, "192.0.2.121", 3),
+    ]
+    with patch("app.snmp_collector.walk_table", AsyncMock(return_value=walk_result)):
+        entries = await collect_arp(DEVICE_IP, COMMUNITY)
+
+    assert len(entries) == 1
+    assert entries[0].mac_address == "24:2f:d0:b1:35:23"
+
+
 async def test_collect_arp_unknown_type_maps_to_other():
     """An unrecognised type integer falls back to 'other'."""
     walk_result = [
