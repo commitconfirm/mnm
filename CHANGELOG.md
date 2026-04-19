@@ -11,6 +11,9 @@ This release includes all completed work through Phase 2.9 (see CLAUDE.md "Compl
 ## [Unreleased]
 
 ### Added
+- Added `docs/CODING_STANDARDS.md` establishing project coding standards. Pre-commit self-check checklist will be applied to all future code-touching work.
+
+### Added
 - **Node/endpoint terminology rework** — introduces the distinction between "nodes" (onboarded infrastructure that feeds MNM data) and "endpoints" (passively-discovered devices). New `GET /api/nodes` endpoint returns onboarded devices with poll health status. `GET /api/devices` now returns a `301` redirect to `/api/nodes` (deprecated).
 - **Nodes page** (`/nodes`) — dedicated page listing all onboarded infrastructure with health dots (green/yellow/red/gray), platform, primary IP, role, location, per-job poll status dots, last polled time, and Poll Now button. Uses DataTable component with search and filtering.
 - **`GET /api/nodes/macs`** — returns MAC addresses belonging to onboarded nodes, used by the endpoints page to filter out infrastructure devices.

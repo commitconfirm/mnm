@@ -22,6 +22,7 @@ Start here based on your role:
 ### Architecture & Design
 - [ARCHITECTURE.md](ARCHITECTURE.md) — Container inventory, data flow, security model, controller database
 - [API.md](API.md) — REST API reference for all controller endpoints
+- [CODING_STANDARDS.md](CODING_STANDARDS.md) — Async patterns, exception handling, logging conventions, dependency rules, pre-commit checklist
 
 ### Troubleshooting
 - [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — Known issues, Nautobot patches, common errors
