@@ -90,7 +90,8 @@ async def test_walk_table_returns_rows():
         result = await walk_table(DEVICE_IP, COMMUNITY, BASE_OID)
 
     assert len(result) == 2
-    assert {"2.1.10.0.0.1": "aabbccddeeff"} in result
+    # OctetString → bytes (raw, uninterpreted)
+    assert {"2.1.10.0.0.1": b"\xaa\xbb\xcc\xdd\xee\xff"} in result
     assert {"3.1.10.0.0.1": "10.0.0.1"} in result
 
 
@@ -171,7 +172,11 @@ def _get_varbinds(oid_str: str, val: object) -> tuple:
 
 
 async def test_get_scalar_returns_value():
-    """getCmd returning a string value yields the decoded string."""
+    """getCmd returning an OctetString (e.g. sysDescr) yields raw bytes.
+
+    Callers that want text must decode explicitly:
+    ``result.decode("utf-8", errors="replace")``.
+    """
     description = "Linux mnm-device 5.15.0 #1 SMP x86_64"
     varbinds = _get_varbinds(
         SCALAR_OID, rfc1902.OctetString(description.encode())
@@ -181,7 +186,10 @@ async def test_get_scalar_returns_value():
     with patch("app.snmp_collector.getCmd", mock_get):
         result = await get_scalar(DEVICE_IP, COMMUNITY, SCALAR_OID)
 
-    assert result == description
+    assert result == description.encode()
+    assert isinstance(result, bytes)
+    # Caller is responsible for text decoding:
+    assert result.decode("utf-8") == description
 
 
 async def test_get_scalar_missing_oid():
@@ -237,11 +245,11 @@ async def test_walk_table_converts_timeticks_to_int():
     assert isinstance(val, int)
 
 
-async def test_walk_table_converts_binary_octetstring_to_hex():
-    """OctetStrings that are not valid UTF-8 are returned as hex strings."""
-    # \xff\xfe are invalid UTF-8 continuation bytes — decode("utf-8") raises.
-    raw_bytes = b"\xff\xfe\xaa\xbb\xcc\xdd"
-    varbinds = [_make_bulk_varbind(BASE_OID + ".1.0", rfc1902.OctetString(raw_bytes))]
+async def test_walk_table_octetstring_returns_raw_bytes():
+    """OctetString values are returned as bytes regardless of content."""
+    # Bytes that are invalid UTF-8 — previously went through hex fallback.
+    binary_mac = b"\xff\xfe\xaa\xbb\xcc\xdd"
+    varbinds = [_make_bulk_varbind(BASE_OID + ".1.0", rfc1902.OctetString(binary_mac))]
     mock_bulk = AsyncMock(side_effect=[
         (None, 0, 0, varbinds),
         (None, 0, 0, []),
@@ -250,4 +258,43 @@ async def test_walk_table_converts_binary_octetstring_to_hex():
     with patch("app.snmp_collector.bulkCmd", mock_bulk):
         result = await walk_table(DEVICE_IP, COMMUNITY, BASE_OID)
 
-    assert result[0]["1.0"] == "fffeaabbccdd"
+    assert result[0]["1.0"] == binary_mac
+    assert isinstance(result[0]["1.0"], bytes)
+
+
+async def test_walk_table_octetstring_text_returns_bytes():
+    """OctetString containing ASCII text also returns bytes (caller decodes)."""
+    text = b"Juniper SRX320"
+    varbinds = [_make_bulk_varbind(BASE_OID + ".1.0", rfc1902.OctetString(text))]
+    mock_bulk = AsyncMock(side_effect=[
+        (None, 0, 0, varbinds),
+        (None, 0, 0, []),
+    ])
+
+    with patch("app.snmp_collector.bulkCmd", mock_bulk):
+        result = await walk_table(DEVICE_IP, COMMUNITY, BASE_OID)
+
+    assert result[0]["1.0"] == text
+    assert isinstance(result[0]["1.0"], bytes)
+
+
+async def test_walk_table_octetstring_utf8_multibyte_bytes_unchanged():
+    """OctetString whose bytes form valid UTF-8 multibyte sequences (e.g. MAC bytes
+    24:2f:d0:b1:35:23 where 0xd0 0xb1 = U+0431) returns the original bytes unchanged.
+
+    This was the root-cause failure: the old eager UTF-8 decode returned a 5-char
+    Python str instead of 6 bytes, breaking MAC parsing downstream.
+    """
+    mac_bytes = b"\x24\x2f\xd0\xb1\x35\x23"
+    varbinds = [_make_bulk_varbind(BASE_OID + ".2.542.192.0.2.121",
+                                   rfc1902.OctetString(mac_bytes))]
+    mock_bulk = AsyncMock(side_effect=[
+        (None, 0, 0, varbinds),
+        (None, 0, 0, []),
+    ])
+
+    with patch("app.snmp_collector.bulkCmd", mock_bulk):
+        result = await walk_table(DEVICE_IP, COMMUNITY, BASE_OID)
+
+    assert result[0]["2.542.192.0.2.121"] == mac_bytes
+    assert len(result[0]["2.542.192.0.2.121"]) == 6

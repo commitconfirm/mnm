@@ -6,6 +6,8 @@ structured ARP entries. Falls back to ipNetToPhysicalTable (RFC 4293:
 devices use the unified IPv4/IPv6 table exclusively.
 
 Uses snmp_collector.walk_table() — no direct pysnmp calls here.
+OctetString values arrive as raw bytes per the snmp_collector contract;
+_mac_from_bytes handles them directly without any decode/re-encode step.
 Integration into the polling loop is handled separately.
 """
 
@@ -49,29 +51,15 @@ class ArpEntry:
 # ---------------------------------------------------------------------------
 
 def _mac_from_bytes(raw: Any) -> str | None:
-    """Convert a raw MAC value (bytes or hex string) to 'aa:bb:cc:dd:ee:ff'.
+    """Convert a 6-byte physAddress value to 'aa:bb:cc:dd:ee:ff'.
 
-    walk_table delivers OctetString values as either a UTF-8 decoded string
-    (if the bytes happen to be valid UTF-8) or a hex string (if not). We
-    handle both cases plus a plain bytes object for robustness.
-    Returns None if the value cannot be parsed as a 6-byte MAC.
+    walk_table returns OctetString as raw bytes (snmp_collector contract).
+    Returns None if raw is not exactly 6 bytes.
     """
     if isinstance(raw, bytes):
         if len(raw) != 6:
             return None
         return ":".join(f"{b:02x}" for b in raw)
-
-    if isinstance(raw, str):
-        # hex string from _convert_value fallback: "aabbccddeeff"
-        clean = raw.replace(":", "").replace("-", "").lower()
-        if len(clean) == 12 and all(c in "0123456789abcdef" for c in clean):
-            return ":".join(clean[i:i+2] for i in range(0, 12, 2))
-        # _convert_value UTF-8 decodes OctetStrings when all bytes are valid
-        # UTF-8. Encoding back with utf-8 recovers the exact original bytes.
-        recovered = raw.encode("utf-8")
-        if len(recovered) == 6:
-            return ":".join(f"{b:02x}" for b in recovered)
-        return None
 
     return None
 

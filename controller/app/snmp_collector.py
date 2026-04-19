@@ -14,7 +14,16 @@ CLAUDE.md Phase 2.8 lessons:
   - varBinds from getCmd is a tuple of ObjectType objects (not wrapped).
 
 This module owns SNMP-to-Python type conversion. All callers receive plain
-Python dicts, ints, and strings — no pysnmp objects leak out.
+Python native types — no pysnmp objects leak out.
+
+OctetString type contract
+-------------------------
+OctetString values are returned as raw ``bytes``. Callers that need text
+(e.g., sysDescr, interface descriptions) must decode explicitly:
+``value.decode("utf-8", errors="replace")``. Callers that need binary
+data (MAC addresses, chassis IDs, cryptographic material) receive it
+unmodified. Never decode OctetString eagerly in this module — doing so
+destroys binary data silently when bytes happen to form valid UTF-8.
 """
 
 from __future__ import annotations
@@ -70,11 +79,21 @@ class SnmpAuthError(SnmpError):
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _convert_value(val: Any) -> Any:
+def _convert_value(val: Any) -> int | str | bytes | None:
     """Convert a pysnmp value object to a Python native type.
 
-    Integer-like SNMP types become int, string-like types become str,
-    IP addresses and OIDs become str. Unknown types fall back to str().
+    Type mapping:
+      - Integer family (Integer32, Counter32, Counter64, Gauge32, Unsigned32,
+        TimeTicks) → int
+      - IpAddress → str (dotted-quad)
+      - ObjectIdentifier → str (dotted OID)
+      - OctetString → bytes (raw, uninterpreted — see module docstring)
+      - NoSuchInstance / NoSuchObject / EndOfMibView → None
+      - Unknown types → str()
+
+    OctetString is always returned as raw bytes. Callers decide whether to
+    decode as text or treat as binary. Eagerly decoding as UTF-8 destroys
+    binary data (MACs, chassis IDs) when bytes happen to be valid UTF-8.
     """
     # NoSuchInstance / NoSuchObject / EndOfMibView → signal absence
     if isinstance(val, (NoSuchInstance, NoSuchObject, EndOfMibView)):
@@ -94,13 +113,9 @@ def _convert_value(val: Any) -> Any:
     if isinstance(val, asn1_univ.ObjectIdentifier):
         return str(val)
 
-    # OctetString: try UTF-8, fall back to hex
+    # OctetString: return raw bytes — caller decodes for text, uses directly for binary
     if isinstance(val, (rfc1902.OctetString, asn1_univ.OctetString)):
-        raw = bytes(val)
-        try:
-            return raw.decode("utf-8")
-        except UnicodeDecodeError:
-            return raw.hex()
+        return bytes(val)
 
     # Fallback
     return str(val)
