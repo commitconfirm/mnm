@@ -2,6 +2,12 @@
 
 All notable changes to MNM are documented in this file. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.9.0] - 2026-04-19
+
+Pre-v1.0 baseline tag. No code changes from prior commit — this tag marks the reference point for the v1.0 architectural rework documented in CLAUDE.md.
+
+This release includes all completed work through Phase 2.9 (see CLAUDE.md "Completed Phases" section for the full list).
+
 ## [Unreleased]
 
 ### Added
