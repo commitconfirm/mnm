@@ -2,7 +2,7 @@
 
 Start here based on your role:
 
-- **Deploying MNM?** Start with the [README](../README.md), then [CONFIGURATION.md](CONFIGURATION.md)
+- **Deploying MNM?** Start with [DEPLOYMENT.md](DEPLOYMENT.md)
 - **Configuring discovery?** Start with [DISCOVERY.md](DISCOVERY.md)
 - **Contributing code?** Start with [ARCHITECTURE.md](ARCHITECTURE.md)
 - **Connecting external systems?** Start with [CONNECTORS.md](CONNECTORS.md)
@@ -12,6 +12,7 @@ Start here based on your role:
 
 ### Getting Started
 - [README](../README.md) — Project overview, quick start, what's included
+- [DEPLOYMENT.md](DEPLOYMENT.md) — Step-by-step installation guide, validated on clean Ubuntu 24.04
 
 ### Configuration & Operations
 - [CONFIGURATION.md](CONFIGURATION.md) — Environment variables, performance tuning, retention
@@ -29,3 +30,4 @@ Start here based on your role:
 ### Project
 - [CHANGELOG.md](../CHANGELOG.md) — Version history and release notes
 - [CONTRIBUTING.md](CONTRIBUTING.md) — Testing on mnm-test: SSH setup, snapshot workflow, guardrails
+- [v0.9-install-issues.md](v0.9-install-issues.md) — Issues found during v0.9.0 installation validation (input for v1.0 stability work)
