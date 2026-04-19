@@ -21,6 +21,7 @@ temporal/event data that Nautobot's model doesn't natively support.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 from datetime import datetime, timezone
@@ -57,6 +58,12 @@ def _build_dsn() -> str:
 DSN = _build_dsn()
 engine = create_async_engine(DSN, pool_pre_ping=True, pool_size=10, max_overflow=20)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+
+# How long to wait for the DB before giving up and falling back to JSON mode.
+# On cold start the controller races Nautobot's bootstrap; 5 minutes is enough
+# for bootstrap to create the mnm_controller database.
+DB_INIT_MAX_WAIT_SEC = 300
+DB_INIT_RETRY_INTERVAL_SEC = 5
 
 
 # ---------------------------------------------------------------------------
@@ -684,32 +691,64 @@ class EndpointProbe(Base):
 _db_ready: bool = False
 
 
+async def _try_init_db() -> bool:
+    """Single connection attempt — create tables if missing. Returns True on success."""
+    from sqlalchemy import text
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+        for col, typ in [
+            ("classification_confidence", "TEXT"),
+            ("classification_override", "BOOLEAN NOT NULL DEFAULT false"),
+        ]:
+            try:
+                await conn.execute(text(
+                    f"ALTER TABLE endpoints ADD COLUMN IF NOT EXISTS {col} {typ}"
+                ))
+            except Exception:
+                pass  # Column already exists — IF NOT EXISTS isn't universally atomic
+    return True
+
+
 async def init_db() -> bool:
-    """Create tables if missing. Returns True if Postgres is reachable."""
+    """Wait up to DB_INIT_MAX_WAIT_SEC for Postgres, then create tables.
+
+    On cold start the controller races Nautobot's bootstrap — the mnm_controller
+    database doesn't exist until bootstrap creates it. This retry loop waits for
+    the database to become available rather than failing immediately and falling
+    back to JSON mode for the entire session.
+
+    Returns True if connected and tables are ready, False if the timeout expired.
+    """
     global _db_ready
-    try:
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-            # Add columns to existing tables that create_all won't ALTER
-            from sqlalchemy import text
-            for col, typ in [
-                ("classification_confidence", "TEXT"),
-                ("classification_override", "BOOLEAN NOT NULL DEFAULT false"),
-            ]:
-                try:
-                    await conn.execute(text(
-                        f"ALTER TABLE endpoints ADD COLUMN IF NOT EXISTS {col} {typ}"
-                    ))
-                except Exception:
-                    pass
-        _db_ready = True
-        log.info("db_init", "Controller database initialized", context={"dsn_host": os.environ.get("MNM_DB_HOST", "postgres")})
-        return True
-    except Exception as e:
-        log.error("db_init_failed", "Controller database init failed — falling back to JSON",
-                  context={"error": str(e)}, exc_info=True)
-        _db_ready = False
-        return False
+    dsn_host = os.environ.get("MNM_DB_HOST", "postgres")
+    elapsed = 0
+
+    while elapsed < DB_INIT_MAX_WAIT_SEC:
+        try:
+            await _try_init_db()
+            _db_ready = True
+            log.info("db_init", "Controller database initialized",
+                     context={"dsn_host": dsn_host, "waited_seconds": elapsed})
+            return True
+        except Exception as e:
+            if elapsed == 0:
+                log.info("db_init_waiting", "Database not ready — retrying",
+                         context={"dsn_host": dsn_host, "error": str(e),
+                                  "retry_interval_sec": DB_INIT_RETRY_INTERVAL_SEC,
+                                  "max_wait_sec": DB_INIT_MAX_WAIT_SEC})
+            else:
+                log.info("db_init_retry", "Waiting for database",
+                         context={"dsn_host": dsn_host, "elapsed_sec": elapsed})
+            await asyncio.sleep(DB_INIT_RETRY_INTERVAL_SEC)
+            elapsed += DB_INIT_RETRY_INTERVAL_SEC
+
+    log.error("db_init_failed",
+              "Controller database unavailable — falling back to JSON mode. "
+              "Endpoint correlation, poll history, and sweep history are disabled. "
+              "Run bootstrap and restart this container.",
+              context={"dsn_host": dsn_host, "waited_sec": DB_INIT_MAX_WAIT_SEC})
+    _db_ready = False
+    return False
 
 
 def is_ready() -> bool:

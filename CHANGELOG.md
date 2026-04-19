@@ -10,6 +10,12 @@ This release includes all completed work through Phase 2.9 (see CLAUDE.md "Compl
 
 ## [Unreleased]
 
+## [0.9.1] - TBD
+
+### Fixed
+- **Controller-DB race on cold start** — controller now retries DB connection for up to 5 minutes (5s intervals) instead of failing immediately and falling back to JSON mode. Eliminates the need to manually restart the controller after bootstrap completes. If the DB is unreachable for the full timeout, a prominent warning banner appears on the dashboard.
+- **Degraded-mode dashboard banner** — dashboard now shows a visible warning when `db_connected` is false, explaining the impact and recovery steps.
+
 ### Added
 - Added `docs/CODING_STANDARDS.md` establishing project coding standards. Pre-commit self-check checklist will be applied to all future code-touching work.
 

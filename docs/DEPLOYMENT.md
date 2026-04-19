@@ -261,29 +261,16 @@ The 190 failed device types are entries in the community library with schema val
 
 Bootstrap is idempotent. Safe to re-run. If you add NAPALM credentials to `.env` later, re-running bootstrap will create the credential set.
 
-### Restart the controller after bootstrap
+### Verify the controller connected to the database
 
-**This step is required.** The controller starts before bootstrap creates its database. If you don't restart it, the controller runs in a degraded JSON fallback mode and polling features won't work.
-
-```bash
-docker restart mnm-controller
-```
-
-Wait for it to come back healthy:
-
-```bash
-until [ "$(docker inspect --format='{{.State.Health.Status}}' mnm-controller)" = "healthy" ]; do
-  sleep 5
-done
-echo "controller ready"
-```
-
-Then verify the health endpoint shows `db_connected: true`:
+The controller waits up to 5 minutes for its database to become available, so it will self-connect once bootstrap creates it — no manual restart needed. Verify:
 
 ```bash
 curl -s http://localhost:9090/api/health | python3 -m json.tool
 # "db_connected": true
 ```
+
+If you see `db_connected: false`, the controller timed out waiting (this means something unexpected prevented database creation). Check controller logs for the `db_init_failed` error, and the dashboard will display a prominent warning banner. Running bootstrap and restarting the controller container will recover it.
 
 ---
 
@@ -387,10 +374,17 @@ See [DISCOVERY.md](DISCOVERY.md) for the sweep pipeline in detail, and [CONNECTO
 
 ### Controller shows `db_connected: false`
 
-The controller started before bootstrap created its database. Run bootstrap, then restart:
+The controller waited 5 minutes for its database and gave up — bootstrap either hasn't run yet, or something prevented the `mnm_controller` database from being created. The dashboard will show a warning banner.
+
+Run bootstrap if you haven't:
 
 ```bash
 bash bootstrap/bootstrap.sh
+```
+
+The controller will not automatically recover once the database becomes available. After bootstrap completes, restart the controller:
+
+```bash
 docker restart mnm-controller
 ```
 
