@@ -8,9 +8,7 @@ Pre-v1.0 baseline tag. No code changes from prior commit — this tag marks the 
 
 This release includes all completed work through Phase 2.9 (see CLAUDE.md "Completed Phases" section for the full list).
 
-## [Unreleased]
-
-## [0.9.1] - TBD
+## [0.9.1] - 2026-04-19
 
 ### Fixed
 - **Controller-DB race on cold start** — controller now retries DB connection for up to 5 minutes (5s intervals) instead of failing immediately and falling back to JSON mode. Eliminates the need to manually restart the controller after bootstrap completes. If the DB is unreachable for the full timeout, a prominent warning banner appears on the dashboard.
