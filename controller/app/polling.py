@@ -21,7 +21,7 @@ import random
 import time
 from datetime import datetime, timezone, timedelta
 
-from app import db, nautobot_client, endpoint_store
+from app import db, nautobot_client, endpoint_store, snmp_collector
 from app.logging_config import StructuredLogger
 
 log = StructuredLogger(__name__, module="polling")
@@ -527,57 +527,6 @@ async def _collect_routes_snmp(device_name: str, device_ip: str) -> list[dict]:
     return routes
 
 
-async def _snmp_walk(device_ip: str, community: str, base_oid: str,
-                     max_rows: int = 5000) -> list[tuple[str, object]]:
-    """Walk an SNMP table via repeated bulkCmd calls.
-
-    pysnmp 6.x bulkCmd returns a single (errI, errS, errIdx, varBinds) tuple
-    per call — not an async iterator. We loop manually, advancing the OID
-    on each call.
-
-    Returns list of (oid_string, value) tuples.
-    """
-    from pysnmp.hlapi.asyncio import (
-        CommunityData, ContextData, ObjectIdentity, ObjectType,
-        SnmpEngine, UdpTransportTarget, bulkCmd,
-    )
-
-    engine = SnmpEngine()
-    target = UdpTransportTarget((device_ip, 161), timeout=10, retries=1)
-    results: list[tuple[str, object]] = []
-    oid_cursor = ObjectType(ObjectIdentity(base_oid))
-
-    for _ in range(max_rows // 25 + 1):
-        errI, errS, errIdx, varBinds = await bulkCmd(
-            engine, CommunityData(community), target, ContextData(),
-            0, 25, oid_cursor,
-        )
-        if errI or errS:
-            break
-        if not varBinds:
-            break
-
-        out_of_scope = False
-        last_ot = None
-        for item in varBinds:
-            # pysnmp 6.x returns [[ObjectType(oid, val)], ...] — each item is a list
-            ot = item[0] if isinstance(item, list) else item
-            oid_str = str(ot[0])
-            if not oid_str.startswith(base_oid + "."):
-                out_of_scope = True
-                break
-            results.append((oid_str, ot[1]))
-            last_ot = ot
-            if len(results) >= max_rows:
-                return results
-
-        if out_of_scope or not varBinds or last_ot is None:
-            break
-        # Advance cursor to last received OID
-        oid_cursor = ObjectType(last_ot[0])
-
-    return results
-
 
 async def _snmp_walk_ip_cidr_route(
     device_name: str, device_ip: str, community: str
@@ -590,19 +539,20 @@ async def _snmp_walk_ip_cidr_route(
     import ipaddress as _ipaddress
 
     BASE_OID = "1.3.6.1.2.1.4.24.4"
-    raw_results = await _snmp_walk(device_ip, community, BASE_OID)
+    raw_results = await snmp_collector.walk_table(device_ip, community, BASE_OID)
     if not raw_results:
         return []
 
-    # Group by index key
+    # Group by index key. walk_table suffixes have the form "1.<col>.<index>"
+    # (the leading "1" is the table-entry subidentifier); strip it to get "<col>.<index>".
     raw: dict[str, dict] = {}
-    for oid_str, val in raw_results:
-        suffix = oid_str[len(BASE_OID) + 3:]  # skip ".1."
-        parts = suffix.split(".", 1)
-        if len(parts) < 2:
-            continue
-        col, index_key = parts[0], parts[1]
-        raw.setdefault(index_key, {})[col] = val
+    for row in raw_results:
+        for oid_suffix, val in row.items():
+            parts = oid_suffix[2:].split(".", 1)  # skip "1."
+            if len(parts) < 2:
+                continue
+            col, index_key = parts[0], parts[1]
+            raw.setdefault(index_key, {})[col] = val
 
     routes = []
     for index_key, cols in raw.items():
@@ -646,18 +596,18 @@ async def _snmp_walk_ip_route(
     import ipaddress as _ipaddress
 
     BASE_OID = "1.3.6.1.2.1.4.21"
-    raw_results = await _snmp_walk(device_ip, community, BASE_OID)
+    raw_results = await snmp_collector.walk_table(device_ip, community, BASE_OID)
     if not raw_results:
         return []
 
     raw: dict[str, dict] = {}
-    for oid_str, val in raw_results:
-        suffix = oid_str[len(BASE_OID) + 3:]
-        parts = suffix.split(".", 1)
-        if len(parts) < 2:
-            continue
-        col, index_key = parts[0], parts[1]
-        raw.setdefault(index_key, {})[col] = val
+    for row in raw_results:
+        for oid_suffix, val in row.items():
+            parts = oid_suffix[2:].split(".", 1)  # skip "1."
+            if len(parts) < 2:
+                continue
+            col, index_key = parts[0], parts[1]
+            raw.setdefault(index_key, {})[col] = val
 
     routes = []
     for index_key, cols in raw.items():
