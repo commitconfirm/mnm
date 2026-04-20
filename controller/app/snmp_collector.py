@@ -95,6 +95,12 @@ OIDS: dict[str, str] = {
     # Interface name tables — ifXTable.ifName preferred, ifTable.ifDescr fallback
     "IF-MIB::ifDescr":                    "1.3.6.1.2.1.2.2.1.2",
     "IF-MIB::ifName":                     "1.3.6.1.2.1.31.1.1.1.1",
+    # System MIB scalars — used by onboarding classifier (sysDescr substring
+    # match + sysObjectID prefix fallback). See
+    # .claude/design/nautobot_rest_schema_notes.md §3 for the captured
+    # signal matrix across the lab vendor set.
+    "SNMPv2-MIB::sysDescr":               "1.3.6.1.2.1.1.1.0",
+    "SNMPv2-MIB::sysObjectID":            "1.3.6.1.2.1.1.2.0",
 }
 
 

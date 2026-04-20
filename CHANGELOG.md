@@ -6,6 +6,7 @@ All notable changes to MNM are documented in this file. Format follows [Keep a C
 
 ### Changed
 - Replaced `nautobot_client.get_status_by_slug` with `get_status_by_name`. `natural_slug` parsing removed — Nautobot's auto-generated `natural_slug` format is internal and not a stable contract; exact name match via the documented `?name=` filter is the correct identifier. `ensure_custom_statuses` now resolves each desired Status via `get_status_by_name(name, content_type="dcim.device")` instead of paging the full Status list client-side.
+- Extracted vendor classification into `controller/app/onboarding/classifier.py`. Added `sysObjectID` prefix fallback as a second independent signal; added two-stage Cisco IOS / IOS-XE platform discrimination (matches `IOSXE`, `IOS-XE`, and `IOS XE` variants); added Arista classifier rule (validated against live vEOS 172.21.140.16 on 2026-04-20). `app.discovery.classify_endpoint` now delegates to the new module so sweep-consumer behaviour is unchanged. `sysDescr` and `sysObjectID` added to the `snmp_collector.OIDS` registry. New operator probe script: `python -m app.scripts.classify_probe --ip <addr> --community <community>`.
 
 ## [0.9.0] - 2026-04-19
 

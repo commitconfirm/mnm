@@ -463,28 +463,9 @@ MAC_OUI: dict[str, str] = {
     "00:1C:7F": "Check Point",
 }
 
-# Vendors whose MACs indicate an access point
-AP_VENDORS = {"Aruba Networks", "Ubiquiti", "Ruckus", "Cisco Meraki", "Cambium Networks"}
-
-# Vendors recognized as network equipment manufacturers
-NETWORK_VENDORS = {
-    "Juniper Networks", "Cisco Systems", "Cisco Meraki", "Arista Networks",
-    "Fortinet", "HPE/Aruba", "Aruba Networks", "Dell", "Palo Alto Networks",
-    "MikroTik", "Brocade", "Extreme Networks", "Nokia/ALU", "TP-Link",
-    "Netgear", "Huawei", "Cambium Networks", "Allied Telesis", "Sophos",
-    "WatchGuard", "SonicWall", "Check Point", "Ruckus",
-}
-
-# sysDescr substrings that identify known network operating systems
-NETWORK_SYSDESCR_KEYWORDS = [
-    "junos", "juniper", "cisco", "ios", "nx-os", "nxos", "asa",
-    "fortigate", "fortios", "arista", "eos", "routeros", "mikrotik",
-    "procurve", "aruba", "comware", "hp ", "hpe ", "dell networking",
-    "powerconnect", "palo alto", "pan-os", "extreme", "exos",
-    "brocade", "fastiron", "icx", "alcatel", "nokia", "sros",
-    "netgear", "sonicwall", "sonicos", "watchguard", "check point",
-    "gaia", "huawei", "vrp", "allied telesis", "alliedware",
-]
+# Vendor / sysDescr-keyword constants moved to
+# app.onboarding.classifier in v1.0 Prompt 3. Import from there if you need
+# the data — discovery.py no longer reasons about them directly.
 
 
 # ---------------------------------------------------------------------------
@@ -1100,41 +1081,13 @@ CLASSIFICATIONS: tuple[str, ...] = (
     "virtual_machine", "container", "hypervisor",
 )
 
-# Specific sysDescr patterns for sub-classification (Tier 1)
-_SYSDESCR_SPECIFIC: list[tuple[str, str]] = [
-    # Firewalls
-    ("srx", "firewall"), ("asa", "firewall"), ("fortigate", "firewall"),
-    ("fortios", "firewall"), ("palo alto", "firewall"), ("pan-os", "firewall"),
-    ("sonicwall", "firewall"), ("sonicos", "firewall"), ("watchguard", "firewall"),
-    ("check point", "firewall"), ("gaia", "firewall"), ("netscreen", "firewall"),
-    ("sophos", "firewall"),
-    # Switches
-    ("ex2", "switch"), ("ex3", "switch"), ("ex4", "switch"), ("ex8", "switch"),
-    ("qfx", "switch"), ("icx", "switch"), ("fastiron", "switch"),
-    ("procurve", "switch"), ("comware", "switch"), ("powerconnect", "switch"),
-    ("catalyst", "switch"), ("nx-os", "switch"), ("nxos", "switch"),
-    ("exos", "switch"), ("alliedware", "switch"),
-    # Routers
-    ("mx", "router"), ("mx5", "router"), ("mx10", "router"), ("mx80", "router"),
-    ("mx104", "router"), ("mx204", "router"), ("mx240", "router"),
-    ("sros", "router"), ("routeros", "router"),
-    # Access points
-    ("aruba ap", "access_point"), ("unifi", "access_point"),
-]
-
-# OUI-based classification (Tier 2)
-PRINTER_VENDORS = {
-    "Hewlett Packard", "HP Inc.", "Ricoh", "Xerox", "Canon", "Brother",
-    "Lexmark", "Konica Minolta", "Kyocera", "Epson", "Samsung Electronics",
-}
-PHONE_VENDORS = {
-    "Polycom", "Yealink", "Grandstream", "Snom", "Mitel Networks",
-    "Avaya", "Fanvil Technology", "Gigaset Communications",
-}
-CAMERA_VENDORS = {
-    "Axis Communications", "Hikvision", "Dahua", "Vivotek",
-    "Hanwha Techwin", "Bosch Security", "FLIR Systems",
-}
+# Classification logic lives in app.onboarding.classifier (v1.0 Prompt 3).
+# The wrappers below preserve the signatures the sweep pipeline and other
+# callers already rely on; they delegate to classify_from_signals in the new
+# module. Vendor / platform detection (SNMP-derived, new in Prompt 3) is
+# available on the ClassifierResult but is not returned here — the sweep
+# consumer only needs the classification string.
+from app.onboarding.classifier import classify_from_signals as _classifier_fuse
 
 
 def classify_endpoint(
@@ -1145,130 +1098,26 @@ def classify_endpoint(
 ) -> tuple[str, str, list[str]]:
     """Classify a discovered host using tiered heuristics.
 
-    Returns: (classification, confidence, signals_matched)
+    Returns: (classification, confidence, signals_matched) — matches the
+    pre-refactor shape so sweep consumers need no changes.
 
-    Tiers (evaluated in order, higher tiers override lower):
-      1. SNMP sysDescr — highest confidence, most specific
-      2. OUI (MAC vendor) — medium confidence
-      3. Open ports — medium confidence
-      4. Banners/headers — lower confidence
-
-    When multiple tiers agree, confidence is "high". Single-tier match is
-    "medium". No match → "unknown" with "low".
+    Now a thin wrapper over :func:`app.onboarding.classifier.classify_from_signals`
+    which owns the full signal-fusion logic.
 
     Sweep-discovered hosts never become virtual_machine/container/hypervisor —
     those are reserved for the Proxmox connector.
     """
-    fp = fingerprint or {}
-    sysdescr_lower = snmp_data.get("sysDescr", "").lower()
-    ssh_banner = fp.get("ssh_banner", "").lower()
-    http_title = fp.get("http_title", "").lower()
-    http_server = fp.get("http_server", "").lower()
-
-    votes: list[tuple[str, str]] = []  # (classification, signal)
-
-    # ---- Tier 1: SNMP sysDescr (highest confidence) ----
-    if sysdescr_lower:
-        # Try specific patterns first (SRX→firewall, EX→switch, etc.)
-        for pattern, cls in _SYSDESCR_SPECIFIC:
-            if pattern in sysdescr_lower:
-                votes.append((cls, f"snmp_sysdescr:{pattern}"))
-                break
-        else:
-            # Fall back to generic network device detection
-            for keyword in NETWORK_SYSDESCR_KEYWORDS:
-                if keyword in sysdescr_lower:
-                    votes.append(("network_device", f"snmp_sysdescr:{keyword}"))
-                    break
-
-    # ---- Tier 1b: SSH/HTTP banner for network devices ----
-    if ssh_banner:
-        for keyword in ("juniper", "junos", "cisco", "fortissl", "fortissh",
-                        "netscreen", "arista", "routeros", "mikrotik",
-                        "comware", "dell force", "extreme", "brocade"):
-            if keyword in ssh_banner:
-                votes.append(("network_device", f"ssh_banner:{keyword}"))
-                break
-
-    if http_title:
-        for keyword in ("fortigate", "juniper", "meraki", "cisco", "aruba",
-                        "netgear", "ubiquiti", "unifi", "mikrotik", "palo alto",
-                        "sonicwall", "watchguard", "checkpoint", "sophos"):
-            if keyword in http_title:
-                votes.append(("network_device", f"http_title:{keyword}"))
-                break
-
-    # ---- Tier 2: OUI / MAC vendor ----
-    if mac_vendor in NETWORK_VENDORS:
-        votes.append(("network_device", f"oui:{mac_vendor}"))
-    if mac_vendor in AP_VENDORS:
-        votes.append(("access_point", f"oui:{mac_vendor}"))
-    if mac_vendor in PRINTER_VENDORS:
-        votes.append(("printer", f"oui:{mac_vendor}"))
-    if mac_vendor in PHONE_VENDORS:
-        votes.append(("phone", f"oui:{mac_vendor}"))
-    if mac_vendor in CAMERA_VENDORS:
-        votes.append(("camera", f"oui:{mac_vendor}"))
-
-    # ---- Tier 3: Open ports ----
-    if _has_port(ports_open, 830):
-        votes.append(("network_device", "port:830/netconf"))
-    if _has_port(ports_open, 9100):
-        votes.append(("printer", "port:9100/jetdirect"))
-    if _has_port(ports_open, 631):
-        votes.append(("printer", "port:631/ipp"))
-    if _has_port(ports_open, 554):
-        votes.append(("camera", "port:554/rtsp"))
-    if _has_any_port(ports_open, [5060, 5061]):
-        votes.append(("phone", "port:5060/sip"))
-
-    # ---- Tier 4: Banner/header content ----
-    if http_title:
-        for kw in ("camera", "webcam", "ipcam"):
-            if kw in http_title:
-                votes.append(("camera", f"http_title:{kw}"))
-                break
-        for kw in ("printer", "laserjet", "ricoh", "xerox", "brother"):
-            if kw in http_title:
-                votes.append(("printer", f"http_title:{kw}"))
-                break
-    if http_server:
-        for kw in ("vivotek", "axis", "hikvision", "dahua"):
-            if kw in http_server:
-                votes.append(("camera", f"http_server:{kw}"))
-                break
-
-    # ---- Score votes ----
-    if not votes:
-        # No signals — fall back to port-based heuristics
-        if _has_any_port(ports_open, [80, 443, 8080, 8443]):
-            if _has_port(ports_open, 22):
-                return ("server", "low", ["port:22+http"])
-            return ("web_service", "low", ["port:http"])
-        if _has_port(ports_open, 22):
-            return ("server", "low", ["port:22/ssh"])
-        if snmp_data:
-            return ("network_device", "low", ["snmp_responds"])
-        tcp_ports = _get_tcp_ports(ports_open)
-        if not tcp_ports:
-            return ("endpoint", "low", [])
-        return ("unknown", "low", [])
-
-    # Count unique classifications voted for
-    from collections import Counter
-    cls_counts = Counter(cls for cls, _ in votes)
-    winner, count = cls_counts.most_common(1)[0]
-    signals = [sig for cls, sig in votes if cls == winner]
-
-    # Confidence: multiple tiers agree = high, single vote = medium
-    # Check how many distinct tiers contributed (snmp vs oui vs port vs banner)
-    tier_prefixes = set()
-    for sig in signals:
-        prefix = sig.split(":")[0]
-        tier_prefixes.add(prefix)
-    confidence = "high" if len(tier_prefixes) >= 2 else "medium"
-
-    return (winner, confidence, signals)
+    result = _classifier_fuse(
+        sysdescr=snmp_data.get("sysDescr") if snmp_data else None,
+        sysobjectid=snmp_data.get("sysObjectID") if snmp_data else None,
+        ports_open=ports_open,
+        mac_vendor=mac_vendor,
+        fingerprint=fingerprint,
+        # Pre-refactor behaviour used "any truthy snmp_data" as the
+        # snmp_responds fallback hint. Preserve that here.
+        snmp_responds=bool(snmp_data),
+    )
+    return (result.classification, result.confidence, result.signals_matched)
 
 
 def _classify(
