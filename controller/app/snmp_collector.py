@@ -4,14 +4,12 @@ Provides walk_table() and get_scalar() — the two building blocks used by
 all SNMP-based collection jobs in v1.0+: ARP, MAC, LLDP, routing, and any
 future MIB walks.
 
-Wraps pysnmp-lextudio 6.3.x async HLAPI. Key quirks documented in
-CLAUDE.md Phase 2.8 lessons:
-  - bulkCmd is a coroutine returning one (errI, errS, errIdx, varBinds) tuple
+Wraps pysnmp 7.x async HLAPI. Key notes:
+  - bulk_cmd is a coroutine returning one (errI, errS, errIdx, varBinds) tuple
     per call, NOT an async iterator. Table walks require a manual cursor loop.
-  - UdpTransportTarget is direct instantiation (no .create()).
-  - varBinds from bulkCmd is [[ObjectType(oid, val)], ...] — a list of
-    single-element lists.
-  - varBinds from getCmd is a tuple of ObjectType objects (not wrapped).
+  - UdpTransportTarget requires async factory: await UdpTransportTarget.create().
+  - varBinds from bulk_cmd is a flat tuple[ObjectType, ...].
+  - varBinds from get_cmd is a tuple of ObjectType objects.
 
 This module owns SNMP-to-Python type conversion. All callers receive plain
 Python native types — no pysnmp objects leak out.
@@ -29,26 +27,21 @@ destroys binary data silently when bytes happen to form valid UTF-8.
 from __future__ import annotations
 
 import time
-import warnings
 from typing import Any
 
-# Suppress the pysnmp-lextudio deprecation warning at import time.
-# The project pins pysnmp-lextudio==6.3.0 intentionally (CLAUDE.md Tech Stack).
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore", RuntimeWarning)
-    from pysnmp.hlapi.asyncio import (
-        CommunityData,
-        ContextData,
-        ObjectIdentity,
-        ObjectType,
-        SnmpEngine,
-        UdpTransportTarget,
-        bulkCmd,
-        getCmd,
-    )
-    from pysnmp.proto import errind, rfc1902
-    from pysnmp.proto.rfc1905 import EndOfMibView, NoSuchInstance, NoSuchObject
-    from pyasn1.type import univ as asn1_univ
+from pysnmp.hlapi.asyncio import (
+    CommunityData,
+    ContextData,
+    ObjectIdentity,
+    ObjectType,
+    SnmpEngine,
+    UdpTransportTarget,
+    bulk_cmd,
+    get_cmd,
+)
+from pysnmp.proto import errind, rfc1902
+from pysnmp.proto.rfc1905 import EndOfMibView, NoSuchInstance, NoSuchObject
+from pyasn1.type import univ as asn1_univ
 
 from app.logging_config import StructuredLogger
 
@@ -245,7 +238,7 @@ async def walk_table(
               context={"device_ip": device_ip, "oid": oid, "version": version})
 
     engine = SnmpEngine()
-    target = UdpTransportTarget(
+    target = await UdpTransportTarget.create(
         (device_ip, port),
         timeout=timeout_sec,
         retries=1,
@@ -259,7 +252,7 @@ async def walk_table(
 
     for _ in range(_WALK_MAX_ROWS // max_repetitions + 1):
         try:
-            errI, errS, errIdx, varBinds = await bulkCmd(
+            errI, errS, errIdx, varBinds = await bulk_cmd(
                 engine, auth, target, ctx,
                 0, max_repetitions, oid_cursor,
             )
@@ -290,7 +283,7 @@ async def walk_table(
         last_ot = None
 
         for item in varBinds:
-            # bulkCmd 6.x: varBinds is [[ObjectType], ...] — unwrap the inner list
+            # pysnmp 6.x returned [[ObjectType], ...]; 7.x returns a flat tuple. Handle both.
             ot = item[0] if isinstance(item, list) else item
             oid_str = str(ot[0])
 
@@ -364,7 +357,7 @@ async def get_scalar(
               context={"device_ip": device_ip, "oid": oid, "version": version})
 
     engine = SnmpEngine()
-    target = UdpTransportTarget(
+    target = await UdpTransportTarget.create(
         (device_ip, port),
         timeout=timeout_sec,
         retries=1,
@@ -373,7 +366,7 @@ async def get_scalar(
     ctx = ContextData()
 
     try:
-        errI, errS, errIdx, varBinds = await getCmd(
+        errI, errS, errIdx, varBinds = await get_cmd(
             engine, auth, target, ctx,
             ObjectType(ObjectIdentity(oid)),
         )
@@ -403,7 +396,7 @@ async def get_scalar(
                            "duration_ms": duration_ms})
         return None
 
-    # getCmd varBinds is a tuple of ObjectType, not [[ObjectType], ...]
+    # get_cmd varBinds is a tuple of ObjectType objects
     ot = varBinds[0]
     value = _convert_value(ot[1])
 

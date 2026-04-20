@@ -1,6 +1,6 @@
 """Unit tests for controller/app/snmp_collector.py.
 
-Mocks at the pysnmp boundary: bulkCmd and getCmd are patched directly.
+Mocks at the pysnmp boundary: bulk_cmd and get_cmd are patched directly.
 No real SNMP traffic is generated. Test per CODING_STANDARDS.md section
 "Testing" — mock at the boundary, not internally.
 
@@ -18,7 +18,6 @@ import pytest
 # Ensure controller/app is importable without installing the package.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "controller"))
 
-# Suppress pysnmp-lextudio deprecation warning in test output.
 import warnings
 warnings.filterwarnings("ignore", category=RuntimeWarning, module="pysnmp")
 
@@ -47,18 +46,18 @@ def _oid(oid_str: str) -> ObjectIdentifier:
 
 
 def _bulk_varbinds(*oid_value_pairs: tuple[str, object]) -> list[list]:
-    """Build the [[ObjectType], ...] structure that bulkCmd 6.x returns.
+    """Build a varBinds list-of-lists for testing the defensive unwrap path.
 
     Each pair is (oid_string, pysnmp_value). The inner list wraps a
-    minimal two-tuple (oid, value) to match the structure that
-    snmp_collector unpacks with ``ot = item[0] if isinstance(item, list) else item``.
+    minimal two-tuple (oid, value) to match the list-of-lists shape that
+    snmp_collector handles via ``ot = item[0] if isinstance(item, list) else item``.
     """
     return [[(oid(s), v)] for s, v in oid_value_pairs
             if (oid := lambda x: _oid(x)) or True]
 
 
 def _make_bulk_varbind(oid_str: str, val: object) -> list:
-    """Single varBind list entry for bulkCmd output."""
+    """Single varBind list entry for bulk_cmd output."""
     return [(_oid(oid_str), val)]
 
 
@@ -72,7 +71,7 @@ COMMUNITY = "test-ro"
 # ---------------------------------------------------------------------------
 
 async def test_walk_table_returns_rows():
-    """bulkCmd returning a two-entry ARP table yields two result dicts."""
+    """bulk_cmd returning a two-entry ARP table yields two result dicts."""
     varbinds_batch1 = [
         _make_bulk_varbind(BASE_OID + ".2.1.10.0.0.1",
                            rfc1902.OctetString(b"\xaa\xbb\xcc\xdd\xee\xff")),
@@ -88,7 +87,7 @@ async def test_walk_table_returns_rows():
         (None, 0, 0, varbinds_batch2),
     ])
 
-    with patch("app.snmp_collector.bulkCmd", mock_bulk):
+    with patch("app.snmp_collector.bulk_cmd", mock_bulk):
         result = await walk_table(DEVICE_IP, COMMUNITY, BASE_OID)
 
     assert len(result) == 2
@@ -98,44 +97,44 @@ async def test_walk_table_returns_rows():
 
 
 async def test_walk_table_empty():
-    """bulkCmd returning no varBinds yields an empty list."""
+    """bulk_cmd returning no varBinds yields an empty list."""
     mock_bulk = AsyncMock(return_value=(None, 0, 0, []))
 
-    with patch("app.snmp_collector.bulkCmd", mock_bulk):
+    with patch("app.snmp_collector.bulk_cmd", mock_bulk):
         result = await walk_table(DEVICE_IP, COMMUNITY, BASE_OID)
 
     assert result == []
 
 
 async def test_walk_table_timeout():
-    """bulkCmd returning requestTimedOut raises SnmpTimeoutError."""
+    """bulk_cmd returning requestTimedOut raises SnmpTimeoutError."""
     mock_bulk = AsyncMock(
         return_value=(errind.requestTimedOut, 0, 0, [])
     )
 
-    with patch("app.snmp_collector.bulkCmd", mock_bulk):
+    with patch("app.snmp_collector.bulk_cmd", mock_bulk):
         with pytest.raises(SnmpTimeoutError):
             await walk_table(DEVICE_IP, COMMUNITY, BASE_OID)
 
 
 async def test_walk_table_auth_failure():
-    """bulkCmd returning authenticationFailure raises SnmpAuthError."""
+    """bulk_cmd returning authenticationFailure raises SnmpAuthError."""
     mock_bulk = AsyncMock(
         return_value=(errind.authenticationFailure, 0, 0, [])
     )
 
-    with patch("app.snmp_collector.bulkCmd", mock_bulk):
+    with patch("app.snmp_collector.bulk_cmd", mock_bulk):
         with pytest.raises(SnmpAuthError):
             await walk_table(DEVICE_IP, COMMUNITY, BASE_OID)
 
 
 async def test_walk_table_generic_error():
-    """bulkCmd returning an unrecognised error indication raises SnmpError."""
+    """bulk_cmd returning an unrecognised error indication raises SnmpError."""
     mock_bulk = AsyncMock(
         return_value=(errind.otherError, 0, 0, [])
     )
 
-    with patch("app.snmp_collector.bulkCmd", mock_bulk):
+    with patch("app.snmp_collector.bulk_cmd", mock_bulk):
         with pytest.raises(SnmpError):
             await walk_table(DEVICE_IP, COMMUNITY, BASE_OID)
 
@@ -151,7 +150,7 @@ async def test_walk_table_stops_at_table_boundary():
 
     mock_bulk = AsyncMock(return_value=(None, 0, 0, [in_scope, out_of_scope]))
 
-    with patch("app.snmp_collector.bulkCmd", mock_bulk):
+    with patch("app.snmp_collector.bulk_cmd", mock_bulk):
         result = await walk_table(DEVICE_IP, COMMUNITY, BASE_OID)
 
     # Only the in-scope row should be returned
@@ -167,14 +166,14 @@ SCALAR_OID = "1.3.6.1.2.1.1.1.0"  # sysDescr.0
 
 
 def _get_varbinds(oid_str: str, val: object) -> tuple:
-    """Build the tuple-of-ObjectType that getCmd 6.x returns."""
-    # getCmd returns varBinds as a tuple of (oid, value) two-tuples,
-    # not wrapped in lists like bulkCmd.
+    """Build the tuple-of-ObjectType that get_cmd returns."""
+    # get_cmd returns varBinds as a tuple of (oid, value) two-tuples,
+    # not wrapped in lists like bulk_cmd.
     return ((_oid(oid_str), val),)
 
 
 async def test_get_scalar_returns_value():
-    """getCmd returning an OctetString (e.g. sysDescr) yields raw bytes.
+    """get_cmd returning an OctetString (e.g. sysDescr) yields raw bytes.
 
     Callers that want text must decode explicitly:
     ``result.decode("utf-8", errors="replace")``.
@@ -185,7 +184,7 @@ async def test_get_scalar_returns_value():
     )
     mock_get = AsyncMock(return_value=(None, 0, 0, varbinds))
 
-    with patch("app.snmp_collector.getCmd", mock_get):
+    with patch("app.snmp_collector.get_cmd", mock_get):
         result = await get_scalar(DEVICE_IP, COMMUNITY, SCALAR_OID)
 
     assert result == description.encode()
@@ -195,31 +194,31 @@ async def test_get_scalar_returns_value():
 
 
 async def test_get_scalar_missing_oid():
-    """getCmd returning NoSuchInstance yields None from get_scalar."""
+    """get_cmd returning NoSuchInstance yields None from get_scalar."""
     varbinds = _get_varbinds(SCALAR_OID, NoSuchInstance())
     mock_get = AsyncMock(return_value=(None, 0, 0, varbinds))
 
-    with patch("app.snmp_collector.getCmd", mock_get):
+    with patch("app.snmp_collector.get_cmd", mock_get):
         result = await get_scalar(DEVICE_IP, COMMUNITY, SCALAR_OID)
 
     assert result is None
 
 
 async def test_get_scalar_timeout():
-    """getCmd returning requestTimedOut raises SnmpTimeoutError."""
+    """get_cmd returning requestTimedOut raises SnmpTimeoutError."""
     mock_get = AsyncMock(return_value=(errind.requestTimedOut, 0, 0, ()))
 
-    with patch("app.snmp_collector.getCmd", mock_get):
+    with patch("app.snmp_collector.get_cmd", mock_get):
         with pytest.raises(SnmpTimeoutError):
             await get_scalar(DEVICE_IP, COMMUNITY, SCALAR_OID)
 
 
 async def test_get_scalar_integer_value():
-    """getCmd returning an Integer32 yields a Python int."""
+    """get_cmd returning an Integer32 yields a Python int."""
     varbinds = _get_varbinds("1.3.6.1.2.1.1.7.0", rfc1902.Integer32(72))
     mock_get = AsyncMock(return_value=(None, 0, 0, varbinds))
 
-    with patch("app.snmp_collector.getCmd", mock_get):
+    with patch("app.snmp_collector.get_cmd", mock_get):
         result = await get_scalar(DEVICE_IP, COMMUNITY, "1.3.6.1.2.1.1.7.0")
 
     assert result == 72
@@ -238,7 +237,7 @@ async def test_walk_table_converts_timeticks_to_int():
         (None, 0, 0, []),  # end
     ])
 
-    with patch("app.snmp_collector.bulkCmd", mock_bulk):
+    with patch("app.snmp_collector.bulk_cmd", mock_bulk):
         result = await walk_table(DEVICE_IP, COMMUNITY, BASE_OID)
 
     assert len(result) == 1
@@ -257,7 +256,7 @@ async def test_walk_table_octetstring_returns_raw_bytes():
         (None, 0, 0, []),
     ])
 
-    with patch("app.snmp_collector.bulkCmd", mock_bulk):
+    with patch("app.snmp_collector.bulk_cmd", mock_bulk):
         result = await walk_table(DEVICE_IP, COMMUNITY, BASE_OID)
 
     assert result[0]["1.0"] == binary_mac
@@ -273,7 +272,7 @@ async def test_walk_table_octetstring_text_returns_bytes():
         (None, 0, 0, []),
     ])
 
-    with patch("app.snmp_collector.bulkCmd", mock_bulk):
+    with patch("app.snmp_collector.bulk_cmd", mock_bulk):
         result = await walk_table(DEVICE_IP, COMMUNITY, BASE_OID)
 
     assert result[0]["1.0"] == text
@@ -295,7 +294,7 @@ async def test_walk_table_octetstring_utf8_multibyte_bytes_unchanged():
         (None, 0, 0, []),
     ])
 
-    with patch("app.snmp_collector.bulkCmd", mock_bulk):
+    with patch("app.snmp_collector.bulk_cmd", mock_bulk):
         result = await walk_table(DEVICE_IP, COMMUNITY, BASE_OID)
 
     assert result[0]["2.542.192.0.2.121"] == mac_bytes
