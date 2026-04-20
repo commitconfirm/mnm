@@ -89,6 +89,12 @@ OIDS: dict[str, str] = {
     # Routing tables
     "IP-FORWARD-MIB::ipCidrRouteEntry":   "1.3.6.1.2.1.4.24.4.1",
     "RFC1213-MIB::ipRouteEntry":          "1.3.6.1.2.1.4.21.1",
+    # LLDP neighbor tables (RFC 2922)
+    "LLDP-MIB::lldpRemEntry":             "1.0.8802.1.1.2.1.4.1.1",
+    "LLDP-MIB::lldpRemManAddrEntry":      "1.0.8802.1.1.2.1.4.2.1",
+    # Interface name tables — ifXTable.ifName preferred, ifTable.ifDescr fallback
+    "IF-MIB::ifDescr":                    "1.3.6.1.2.1.2.2.1.2",
+    "IF-MIB::ifName":                     "1.3.6.1.2.1.31.1.1.1.1",
 }
 
 
@@ -453,3 +459,67 @@ async def get_scalar(
                        "duration_ms": duration_ms})
 
     return value
+
+
+async def collect_ifindex_to_name(
+    device_ip: str,
+    community: str,
+    *,
+    version: str = "2c",
+    timeout_sec: float = 10.0,
+    port: int = 161,
+) -> dict[int, str]:
+    """Build an {ifIndex: interface_name} mapping for a device.
+
+    Walks ifXTable.ifName (1.3.6.1.2.1.31.1.1.1.1) — the short-form name
+    matching operator vocabulary ("ge-0/0/12"). Falls back to
+    ifTable.ifDescr (1.3.6.1.2.1.2.2.1.2) when ifName is empty, which
+    happens on older agents that don't implement ifXTable.
+
+    Used by LLDP collector for local port resolution and reused by any
+    other collector that receives bare ifIndex values.
+
+    Returns:
+        {ifIndex: name} dict. Empty on any SNMP error — callers treat
+        a missing ifIndex as "unresolved" rather than a hard failure.
+    """
+    ifindex_to_name: dict[int, str] = {}
+
+    try:
+        ifname_rows = await walk_table(
+            device_ip, community, OIDS["IF-MIB::ifName"],
+            version=version, timeout_sec=timeout_sec, port=port,
+        )
+    except SnmpError:
+        ifname_rows = []
+
+    for row in ifname_rows:
+        for suffix, val in row.items():
+            try:
+                ifindex = int(suffix)
+            except ValueError:
+                continue
+            if isinstance(val, bytes) and val:
+                ifindex_to_name[ifindex] = val.decode("utf-8", errors="replace").rstrip("\x00")
+
+    # Any ifIndex without an ifName entry — try ifDescr fallback
+    missing = not ifindex_to_name
+    if missing:
+        try:
+            ifdescr_rows = await walk_table(
+                device_ip, community, OIDS["IF-MIB::ifDescr"],
+                version=version, timeout_sec=timeout_sec, port=port,
+            )
+        except SnmpError:
+            return ifindex_to_name
+
+        for row in ifdescr_rows:
+            for suffix, val in row.items():
+                try:
+                    ifindex = int(suffix)
+                except ValueError:
+                    continue
+                if isinstance(val, bytes) and val:
+                    ifindex_to_name[ifindex] = val.decode("utf-8", errors="replace").rstrip("\x00")
+
+    return ifindex_to_name

@@ -32,6 +32,7 @@ from app.snmp_collector import (
     SnmpAuthError,
     SnmpError,
     SnmpTimeoutError,
+    collect_ifindex_to_name,
     get_scalar,
     mac_from_bytes,
     mac_from_dotted_decimal,
@@ -359,7 +360,7 @@ def test_mac_from_dotted_decimal_out_of_range():
 # OID registry tests
 # ---------------------------------------------------------------------------
 
-_NUMERIC_OID_RE = re.compile(r"^1\.3\.6(\.\d+)+$")
+_NUMERIC_OID_RE = re.compile(r"^\d+(\.\d+)+$")
 
 _EXPECTED_OID_NAMES = [
     "IP-MIB::ipNetToMediaEntry",
@@ -370,6 +371,10 @@ _EXPECTED_OID_NAMES = [
     "JUNIPER-L2ALD-MIB::jnxL2aldVlanEntry",
     "IP-FORWARD-MIB::ipCidrRouteEntry",
     "RFC1213-MIB::ipRouteEntry",
+    "LLDP-MIB::lldpRemEntry",
+    "LLDP-MIB::lldpRemManAddrEntry",
+    "IF-MIB::ifDescr",
+    "IF-MIB::ifName",
 ]
 
 
@@ -393,6 +398,69 @@ def test_oid_registry_entries_are_valid_oids():
 
 
 def test_oid_registry_has_expected_entries():
-    """All 7 expected symbolic names are present in the registry."""
+    """All expected symbolic names are present in the registry."""
     for name in _EXPECTED_OID_NAMES:
         assert name in OIDS, f"Expected OID name {name!r} missing from registry"
+
+
+# ---------------------------------------------------------------------------
+# collect_ifindex_to_name tests
+# ---------------------------------------------------------------------------
+
+_OID_IF_NAME = "1.3.6.1.2.1.31.1.1.1.1"
+_OID_IF_DESCR = "1.3.6.1.2.1.2.2.1.2"
+
+
+async def test_collect_ifindex_to_name_prefers_ifname():
+    """When ifName is populated, ifDescr is not consulted."""
+    ifname_rows = [
+        {"526": b"ge-0/0/12"},
+        {"536": b"ge-0/0/22"},
+    ]
+    called = []
+
+    async def mock_walk(device_ip, community, oid, **kwargs):
+        called.append(oid)
+        if oid == _OID_IF_NAME:
+            return ifname_rows
+        return []
+
+    with patch("app.snmp_collector.walk_table", side_effect=mock_walk):
+        result = await collect_ifindex_to_name("198.51.100.1", "test")
+
+    assert result == {526: "ge-0/0/12", 536: "ge-0/0/22"}
+    assert _OID_IF_NAME in called
+    assert _OID_IF_DESCR not in called
+
+
+async def test_collect_ifindex_to_name_falls_back_to_ifdescr():
+    """Empty ifName walk triggers ifDescr fallback."""
+    ifdescr_rows = [
+        {"1": b"eth0 Ethernet interface"},
+        {"2": b"lo loopback"},
+    ]
+    called = []
+
+    async def mock_walk(device_ip, community, oid, **kwargs):
+        called.append(oid)
+        if oid == _OID_IF_DESCR:
+            return ifdescr_rows
+        return []  # ifName empty
+
+    with patch("app.snmp_collector.walk_table", side_effect=mock_walk):
+        result = await collect_ifindex_to_name("198.51.100.1", "test")
+
+    assert result == {1: "eth0 Ethernet interface", 2: "lo loopback"}
+    assert _OID_IF_NAME in called
+    assert _OID_IF_DESCR in called
+
+
+async def test_collect_ifindex_to_name_empty_on_error():
+    """SnmpError during walk yields empty dict, not exception."""
+    async def mock_walk(device_ip, community, oid, **kwargs):
+        raise SnmpError("oid not implemented")
+
+    with patch("app.snmp_collector.walk_table", side_effect=mock_walk):
+        result = await collect_ifindex_to_name("198.51.100.1", "test")
+
+    assert result == {}
