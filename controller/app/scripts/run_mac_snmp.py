@@ -45,7 +45,10 @@ async def _run(device: str, community: str, timeout: float) -> int:
 
     elapsed_ms = round((time.monotonic() - t0) * 1000, 1)
     vlan_aware = any(e.vlan is not None for e in entries)
-    table_src = "dot1qTpFdbTable (VLAN-aware)" if vlan_aware else "dot1dTpFdbTable (BRIDGE-MIB fallback)"
+    if vlan_aware:
+        table_src = "dot1qTpFdbTable (VLAN-aware)"
+    else:
+        table_src = "flat table (VLAN IDs unavailable — BRIDGE-MIB fallback or unresolved FDB IDs)"
 
     print(f"\nResults: {len(entries)} entries in {elapsed_ms} ms  [{table_src}]\n")
 

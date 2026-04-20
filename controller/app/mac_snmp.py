@@ -14,10 +14,20 @@ Integration into the polling loop is handled separately.
 
 Q-BRIDGE-MIB row index structure
 ---------------------------------
-dot1qTpFdbTable index: dot1qFdbId (VLAN/filter-DB integer) followed by
-six MAC bytes in dotted-decimal form. Walk_table suffix for a row:
-  "<col>.<vlan>.<b0>.<b1>.<b2>.<b3>.<b4>.<b5>"
-e.g. "2.100.170.187.204.221.238.255" for VLAN 100, port col, MAC aa:...
+dot1qTpFdbTable index: dot1qFdbId (filter-DB integer, NOT the 802.1Q VLAN
+ID on Junos — see FDB ID resolution below) followed by six MAC bytes in
+dotted-decimal form. Walk_table suffix for a row:
+  "<col>.<fdb_id>.<b0>.<b1>.<b2>.<b3>.<b4>.<b5>"
+e.g. "2.100.170.187.204.221.238.255" for fdb_id 100, port col, MAC aa:...
+
+FDB ID resolution
+-----------------
+RFC 4363 allows dot1qFdbId to be any opaque integer assigned by the
+agent, not necessarily equal to the 802.1Q VLAN ID. Junos, for example,
+uses multiples of 65536 as FDB IDs. After collecting the FDB table,
+collect_mac() walks dot1qVlanCurrentTable (1.3.6.1.2.1.17.7.1.4.2.1)
+column .3 (dot1qVlanFdbId) to build a {fdb_id: vlan_id} map and resolve
+each entry to its real 802.1Q VLAN ID.
 
 BRIDGE-MIB row index structure
 -------------------------------
@@ -49,6 +59,8 @@ log = StructuredLogger(__name__, module="mac_snmp")
 _OID_Q_BRIDGE = "1.3.6.1.2.1.17.7.1.2.2.1"
 # dot1dTpFdbTable (BRIDGE-MIB) — no VLAN, fallback
 _OID_BRIDGE = "1.3.6.1.2.1.17.4.3.1"
+# dot1qVlanCurrentTable — col .3 (dot1qVlanFdbId) maps fdb_id → vlan_id
+_OID_VLAN_CURRENT = "1.3.6.1.2.1.17.7.1.4.2.1"
 
 # dot1qTpFdbStatus / dot1dTpFdbStatus integer → string
 _ENTRY_STATUS = {
@@ -76,11 +88,50 @@ class MacEntry:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _parse_q_bridge_table(rows: list[dict[str, Any]]) -> tuple[list[MacEntry], int]:
+async def _collect_fdb_vlan_map(
+    device_ip: str,
+    community: str,
+    *,
+    version: str,
+    timeout_sec: float,
+    port: int,
+) -> dict[int, int]:
+    """Walk dot1qVlanCurrentTable and return {fdb_id: vlan_id}.
+
+    Column .3 (dot1qVlanFdbId) maps each VLAN's FDB ID to its 802.1Q VLAN ID.
+    Index suffix: "<TimeMark>.<VlanIndex>" — VlanIndex is the 802.1Q VLAN ID.
+    """
+    rows = await snmp_collector.walk_table(
+        device_ip, community, _OID_VLAN_CURRENT,
+        version=version, timeout_sec=timeout_sec, port=port,
+    )
+    fdb_vlan_map: dict[int, int] = {}
+    for row in rows:
+        for oid_suffix, val in row.items():
+            col, _, index_key = oid_suffix.partition(".")
+            if col != "3" or not index_key:
+                continue
+            idx_parts = index_key.split(".", 1)
+            if len(idx_parts) < 2:
+                continue
+            try:
+                vlan_id = int(idx_parts[1])
+                fdb_id = int(val)
+            except (ValueError, TypeError):
+                continue
+            fdb_vlan_map[fdb_id] = vlan_id
+    return fdb_vlan_map
+
+
+def _parse_q_bridge_table(
+    rows: list[dict[str, Any]],
+    fdb_vlan_map: dict[int, int],
+) -> tuple[list[MacEntry], int]:
     """Parse walk_table output from dot1qTpFdbTable into MacEntry list.
 
     Index format: <dot1qFdbId>.<mac_byte0>...<mac_byte5> (7 components).
     Columns: .1=dot1qTpFdbAddress (OctetString MAC), .2=port, .3=status.
+    fdb_vlan_map resolves raw FDB IDs to 802.1Q VLAN IDs.
 
     Returns (entries, skipped_count).
     """
@@ -105,12 +156,14 @@ def _parse_q_bridge_table(rows: list[dict[str, Any]]) -> tuple[list[MacEntry], i
             continue
 
         try:
-            vlan = int(idx_parts[0])
+            fdb_id = int(idx_parts[0])
         except ValueError:
-            log.warning("mac_snmp_skip_row", "Q-bridge row has non-integer VLAN in index",
+            log.warning("mac_snmp_skip_row", "Q-bridge row has non-integer FDB ID in index",
                         context={"index_key": index_key})
             skipped += 1
             continue
+
+        vlan: int | None = fdb_vlan_map.get(fdb_id)
 
         try:
             mac_addr = mac_from_dotted_decimal(idx_parts[1])
@@ -278,8 +331,9 @@ async def collect_mac(
         port: SNMP UDP port (default 161).
 
     Returns:
-        List of MacEntry. vlan is populated from the Q-BRIDGE table;
-        None when the BRIDGE-MIB fallback was used.
+        List of MacEntry. vlan is the resolved 802.1Q VLAN ID from
+        dot1qVlanCurrentTable; None when unresolvable or when the
+        BRIDGE-MIB fallback was used.
 
     Raises:
         SnmpTimeoutError: Device did not respond within timeout_sec.
@@ -307,10 +361,7 @@ async def collect_mac(
                            "duration_ms": duration_ms})
         raise
 
-    entries, skipped = _parse_q_bridge_table(rows)
-    vlan_aware = bool(entries)
-
-    if not entries:
+    if not rows:
         log.debug("mac_snmp_fallback", "Primary MAC table empty — trying dot1dTpFdbTable",
                   context={"device_ip": device_ip, "reason": "primary_table_empty"})
         try:
@@ -329,6 +380,44 @@ async def collect_mac(
                                "duration_ms": duration_ms})
             raise
         entries, skipped = _parse_bridge_table(bridge_rows)
+        vlan_aware = False
+    else:
+        # Walk VLAN table to resolve raw FDB IDs → 802.1Q VLAN IDs
+        try:
+            fdb_vlan_map = await _collect_fdb_vlan_map(
+                device_ip, community,
+                version=version, timeout_sec=timeout_sec, port=port,
+            )
+        except (SnmpTimeoutError, SnmpAuthError, SnmpError):
+            fdb_vlan_map = {}
+
+        if not fdb_vlan_map:
+            log.warning("mac_snmp_vlan_map_empty",
+                        "dot1qVlanCurrentTable returned no entries — VLAN IDs will be None",
+                        context={"device_ip": device_ip})
+
+        entries, skipped = _parse_q_bridge_table(rows, fdb_vlan_map)
+
+        if fdb_vlan_map:
+            seen_fdb_ids: set[int] = set()
+            for row in rows:
+                for oid_suffix in row:
+                    parts = oid_suffix.split(".", 2)
+                    if len(parts) >= 2:
+                        try:
+                            seen_fdb_ids.add(int(parts[1]))
+                        except ValueError:
+                            pass
+            orphan_fdb_ids = seen_fdb_ids - set(fdb_vlan_map.keys())
+            if orphan_fdb_ids:
+                examples = sorted(orphan_fdb_ids)[:5]
+                log.warning("mac_snmp_orphan_fdb_ids",
+                            "FDB IDs not found in VLAN map — affected entries will have vlan=None",
+                            context={"device_ip": device_ip,
+                                     "orphan_count": len(orphan_fdb_ids),
+                                     "examples": examples})
+
+        vlan_aware = bool(entries)
 
     duration_ms = round((time.monotonic() - start) * 1000, 1)
     log.debug("mac_snmp_completed", "MAC SNMP collection complete",

@@ -29,6 +29,7 @@ COMMUNITY = "test-ro"
 
 _OID_Q_BRIDGE = "1.3.6.1.2.1.17.7.1.2.2.1"
 _OID_BRIDGE = "1.3.6.1.2.1.17.4.3.1"
+_OID_VLAN_CURRENT = "1.3.6.1.2.1.17.7.1.4.2.1"
 
 # Dotted-decimal for aa:bb:cc:dd:ee:ff = 170.187.204.221.238.255
 MAC_HEX = "aa:bb:cc:dd:ee:ff"
@@ -56,21 +57,38 @@ def _b_row(col: str, mac_dot: str, val: object) -> dict:
     return {f"{col}.{mac_dot}": val}
 
 
+def _vlan_row(vlan_id: int, fdb_id: int) -> dict:
+    """Build one walk_table dict for dot1qVlanCurrentTable col .3.
+
+    Suffix: "3.0.<vlan_id>" — TimeMark=0, VlanIndex=vlan_id. Value is fdb_id.
+    """
+    return {f"3.0.{vlan_id}": fdb_id}
+
+
 # ---------------------------------------------------------------------------
 # collect_mac — dot1qTpFdbTable (primary / VLAN-aware) tests
 # ---------------------------------------------------------------------------
 
 async def test_collect_mac_primary_table():
-    """Realistic dot1qTpFdbTable data produces MacEntry with vlan populated."""
+    """Realistic dot1qTpFdbTable data produces MacEntry with resolved vlan."""
+    fdb_id = 65536  # Junos-style: not the 802.1Q ID directly
     vlan = 100
     port = 12
-    walk_result = [
-        _q_row("1", vlan, MAC_DOT, MAC_BYTES),  # dot1qTpFdbAddress
-        _q_row("2", vlan, MAC_DOT, port),        # dot1qTpFdbPort
-        _q_row("3", vlan, MAC_DOT, 3),           # dot1qTpFdbStatus=learned
+    fdb_rows = [
+        _q_row("1", fdb_id, MAC_DOT, MAC_BYTES),  # dot1qTpFdbAddress
+        _q_row("2", fdb_id, MAC_DOT, port),        # dot1qTpFdbPort
+        _q_row("3", fdb_id, MAC_DOT, 3),           # dot1qTpFdbStatus=learned
     ]
+    vlan_rows = [_vlan_row(vlan, fdb_id)]
 
-    with patch("app.snmp_collector.walk_table", AsyncMock(return_value=walk_result)):
+    async def mock_walk(device_ip, community, oid, **kwargs):
+        if oid == _OID_Q_BRIDGE:
+            return fdb_rows
+        if oid == _OID_VLAN_CURRENT:
+            return vlan_rows
+        return []
+
+    with patch("app.snmp_collector.walk_table", side_effect=mock_walk):
         entries = await collect_mac(DEVICE_IP, COMMUNITY)
 
     assert len(entries) == 1
@@ -195,16 +213,26 @@ async def test_collect_mac_normalization():
 
 
 async def test_collect_mac_multiple_vlans():
-    """Entries from multiple VLANs are all returned with correct VLAN IDs."""
-    rows = []
+    """Entries from multiple VLANs are all returned with correct resolved VLAN IDs."""
+    fdb_rows = []
+    vlan_rows = []
     for vlan in [10, 20, 30]:
+        fdb_id = vlan * 65536  # Junos-style encoding
         mac_dot = f"170.187.204.221.238.{vlan}"
-        rows += [
-            _q_row("2", vlan, mac_dot, vlan),  # port == vlan for easy verification
-            _q_row("3", vlan, mac_dot, 3),
+        fdb_rows += [
+            _q_row("2", fdb_id, mac_dot, vlan),  # port == vlan for easy verification
+            _q_row("3", fdb_id, mac_dot, 3),
         ]
+        vlan_rows.append(_vlan_row(vlan, fdb_id))
 
-    with patch("app.snmp_collector.walk_table", AsyncMock(return_value=rows)):
+    async def mock_walk(device_ip, community, oid, **kwargs):
+        if oid == _OID_Q_BRIDGE:
+            return fdb_rows
+        if oid == _OID_VLAN_CURRENT:
+            return vlan_rows
+        return []
+
+    with patch("app.snmp_collector.walk_table", side_effect=mock_walk):
         entries = await collect_mac(DEVICE_IP, COMMUNITY)
 
     assert len(entries) == 3
@@ -244,3 +272,134 @@ async def test_collect_mac_missing_port_skipped():
         entries = await collect_mac(DEVICE_IP, COMMUNITY)
 
     assert entries == []
+
+
+# ---------------------------------------------------------------------------
+# FDB ID resolution tests
+# ---------------------------------------------------------------------------
+
+async def test_collect_mac_resolves_junos_fdb_ids():
+    """Junos FDB IDs (multiples of 65536) are resolved to real 802.1Q VLAN IDs."""
+    fdb_id = 65536  # Junos internal ID for VLAN 140
+    vlan = 140
+    fdb_rows = [
+        _q_row("2", fdb_id, MAC_DOT, 5),
+        _q_row("3", fdb_id, MAC_DOT, 3),
+    ]
+    vlan_rows = [_vlan_row(vlan, fdb_id)]
+
+    async def mock_walk(device_ip, community, oid, **kwargs):
+        if oid == _OID_Q_BRIDGE:
+            return fdb_rows
+        if oid == _OID_VLAN_CURRENT:
+            return vlan_rows
+        return []
+
+    with patch("app.snmp_collector.walk_table", side_effect=mock_walk):
+        entries = await collect_mac(DEVICE_IP, COMMUNITY)
+
+    assert len(entries) == 1
+    assert entries[0].vlan == vlan
+
+
+async def test_collect_mac_vlan_matches_fdb_id():
+    """When FDB ID equals VLAN ID (e.g. on non-Junos switches), resolution is transparent."""
+    fdb_id = 10
+    vlan = 10
+    fdb_rows = [
+        _q_row("2", fdb_id, MAC_DOT, 3),
+        _q_row("3", fdb_id, MAC_DOT, 3),
+    ]
+    vlan_rows = [_vlan_row(vlan, fdb_id)]
+
+    async def mock_walk(device_ip, community, oid, **kwargs):
+        if oid == _OID_Q_BRIDGE:
+            return fdb_rows
+        if oid == _OID_VLAN_CURRENT:
+            return vlan_rows
+        return []
+
+    with patch("app.snmp_collector.walk_table", side_effect=mock_walk):
+        entries = await collect_mac(DEVICE_IP, COMMUNITY)
+
+    assert len(entries) == 1
+    assert entries[0].vlan == vlan
+
+
+async def test_collect_mac_vlan_map_empty():
+    """When FDB table has entries but VLAN table is empty, vlan=None and one warning logged."""
+    fdb_rows = [
+        _q_row("2", 65536, MAC_DOT, 5),
+        _q_row("3", 65536, MAC_DOT, 3),
+    ]
+
+    async def mock_walk(device_ip, community, oid, **kwargs):
+        if oid == _OID_Q_BRIDGE:
+            return fdb_rows
+        return []  # VLAN table empty
+
+    with patch("app.snmp_collector.walk_table", side_effect=mock_walk):
+        with patch("app.mac_snmp.log") as mock_log:
+            entries = await collect_mac(DEVICE_IP, COMMUNITY)
+
+    assert len(entries) == 1
+    assert entries[0].vlan is None
+
+    warning_events = [call[0][0] for call in mock_log.warning.call_args_list]
+    assert "mac_snmp_vlan_map_empty" in warning_events
+    assert warning_events.count("mac_snmp_vlan_map_empty") == 1
+
+
+async def test_collect_mac_orphan_fdb_id():
+    """FDB ID with no matching VLAN map entry gets vlan=None; one aggregated warning logged."""
+    orphan_fdb_id = 99999
+    fdb_rows = [
+        _q_row("2", orphan_fdb_id, MAC_DOT, 5),
+        _q_row("3", orphan_fdb_id, MAC_DOT, 3),
+    ]
+    # VLAN map contains a different FDB ID — orphan_fdb_id is absent
+    vlan_rows = [_vlan_row(10, 10)]
+
+    async def mock_walk(device_ip, community, oid, **kwargs):
+        if oid == _OID_Q_BRIDGE:
+            return fdb_rows
+        if oid == _OID_VLAN_CURRENT:
+            return vlan_rows
+        return []
+
+    with patch("app.snmp_collector.walk_table", side_effect=mock_walk):
+        with patch("app.mac_snmp.log") as mock_log:
+            entries = await collect_mac(DEVICE_IP, COMMUNITY)
+
+    assert len(entries) == 1
+    assert entries[0].vlan is None
+
+    warning_events = [call[0][0] for call in mock_log.warning.call_args_list]
+    assert "mac_snmp_orphan_fdb_ids" in warning_events
+    assert warning_events.count("mac_snmp_orphan_fdb_ids") == 1
+
+
+async def test_collect_mac_fallback_path_skips_vlan_walk():
+    """When Q-BRIDGE table is empty, BRIDGE fallback is used and VLAN map is never walked."""
+    call_oids = []
+
+    async def mock_walk(device_ip, community, oid, **kwargs):
+        call_oids.append(oid)
+        if oid == _OID_Q_BRIDGE:
+            return []
+        if oid == _OID_BRIDGE:
+            return [
+                _b_row("2", MAC_DOT, 5),
+                _b_row("3", MAC_DOT, 3),
+            ]
+        return []
+
+    with patch("app.snmp_collector.walk_table", side_effect=mock_walk):
+        entries = await collect_mac(DEVICE_IP, COMMUNITY)
+
+    assert _OID_VLAN_CURRENT not in call_oids
+    assert len(call_oids) == 2
+    assert call_oids[0] == _OID_Q_BRIDGE
+    assert call_oids[1] == _OID_BRIDGE
+    assert len(entries) == 1
+    assert entries[0].vlan is None
