@@ -101,6 +101,19 @@ OIDS: dict[str, str] = {
     # signal matrix across the lab vendor set.
     "SNMPv2-MIB::sysDescr":               "1.3.6.1.2.1.1.1.0",
     "SNMPv2-MIB::sysObjectID":            "1.3.6.1.2.1.1.2.0",
+    "SNMPv2-MIB::sysName":                "1.3.6.1.2.1.1.5.0",
+    # Juniper enterprise chassis scalars (JUNIPER-MIB at 2636.3.1) —
+    # authoritative on Junos EX/SRX/MX; primary source of serial + chassis
+    # model for the onboarding probe.
+    "JUNIPER-MIB::jnxBoxDescr":           "1.3.6.1.4.1.2636.3.1.2.0",
+    "JUNIPER-MIB::jnxBoxSerialNo":        "1.3.6.1.4.1.2636.3.1.3.0",
+    # ENTITY-MIB fallbacks for serial / chassis model on vendors that don't
+    # implement the Juniper scalars. Table columns under entPhysicalTable
+    # (1.3.6.1.2.1.47.1.1.1); the onboarding probe walks for the first row
+    # where entPhysicalClass = chassis(3).
+    "ENTITY-MIB::entPhysicalClass":       "1.3.6.1.2.1.47.1.1.1.1.5",
+    "ENTITY-MIB::entPhysicalSerialNum":   "1.3.6.1.2.1.47.1.1.1.1.11",
+    "ENTITY-MIB::entPhysicalModelName":   "1.3.6.1.2.1.47.1.1.1.1.13",
 }
 
 

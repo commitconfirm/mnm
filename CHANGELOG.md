@@ -4,9 +4,13 @@ All notable changes to MNM are documented in this file. Format follows [Keep a C
 
 ## [Unreleased]
 
+### Added
+- **Phase 1 direct-REST onboarding orchestrator (Junos only, v1.0 Prompt 4).** New `controller/app/onboarding/orchestrator.py` implements the 6-step Nautobot creation sequence from the reality-check doc (§1.3) with proper rollback for the interface-cascades-but-IP-doesn't asymmetry (§4.7). Strict-new refusal (operator Q2) prevents accidental overwrite of existing devices. Step G (polling seed) failure marks the device `Onboarding Incomplete` rather than rolling back a valid device. Vendor probe modules in `controller/app/onboarding/probes/`; `probes/junos.py` collects hostname / serial / chassis model / os_version via SNMP (JUNIPER-MIB scalars with ENTITY-MIB fallback). New operator CLI: `python -m app.scripts.onboard_probe --ip <addr> --community <community> --location-id <uuid> --secrets-group-id <uuid>`. Replaces the nautobot-device-onboarding plugin path for Junos devices invoked via `onboard_probe.py`; plugin path remains the default for the Discover UI until Prompt 8 integrates the new path.
+
 ### Changed
 - Replaced `nautobot_client.get_status_by_slug` with `get_status_by_name`. `natural_slug` parsing removed — Nautobot's auto-generated `natural_slug` format is internal and not a stable contract; exact name match via the documented `?name=` filter is the correct identifier. `ensure_custom_statuses` now resolves each desired Status via `get_status_by_name(name, content_type="dcim.device")` instead of paging the full Status list client-side.
 - Extracted vendor classification into `controller/app/onboarding/classifier.py`. Added `sysObjectID` prefix fallback as a second independent signal; added two-stage Cisco IOS / IOS-XE platform discrimination (matches `IOSXE`, `IOS-XE`, and `IOS XE` variants); added Arista classifier rule (validated against live vEOS 172.21.140.16 on 2026-04-20). `app.discovery.classify_endpoint` now delegates to the new module so sweep-consumer behaviour is unchanged. `sysDescr` and `sysObjectID` added to the `snmp_collector.OIDS` registry. New operator probe script: `python -m app.scripts.classify_probe --ip <addr> --community <community>`.
+- `nautobot_client.create_device` accepts optional `serial=` and a new helper `find_device_at_location(name, location_id)` returns the existing device record or None. `device_exists_at_location` and `find_device_at_location` filter with `?location=<uuid>` — the Nautobot 3.x filter name (`location_id=` returns 400). Added OIDs to the registry: `SNMPv2-MIB::sysName`, `JUNIPER-MIB::jnxBoxDescr`, `JUNIPER-MIB::jnxBoxSerialNo`, `ENTITY-MIB::entPhysicalClass`, `ENTITY-MIB::entPhysicalSerialNum`, `ENTITY-MIB::entPhysicalModelName`.
 
 ## [0.9.0] - 2026-04-19
 

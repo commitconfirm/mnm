@@ -1159,6 +1159,7 @@ async def create_device(
     status_id: str,
     platform_id: "str | None" = None,
     tenant_id: "str | None" = None,
+    serial: "str | None" = None,
 ) -> dict:
     """POST /api/dcim/devices/ — create a new device.
 
@@ -1178,6 +1179,8 @@ async def create_device(
         payload["platform"] = platform_id
     if tenant_id:
         payload["tenant"] = tenant_id
+    if serial:
+        payload["serial"] = serial
 
     t0 = time.monotonic()
     client = _get_client()
@@ -1489,11 +1492,34 @@ async def device_exists_at_location(name: str, location_id: str) -> bool:
     client = _get_client()
     resp = await client.get(
         "/api/dcim/devices/",
-        params={"name": name, "location_id": location_id, "limit": 1},
+        # Nautobot 3.x filter name is `location=`; `location_id=` returns 400.
+        params={"name": name, "location": location_id, "limit": 1},
         headers=_headers(),
     )
     resp.raise_for_status()
     return resp.json().get("count", 0) > 0
+
+
+async def find_device_at_location(name: str, location_id: str) -> "dict | None":
+    """Return the device record for (name, location) or None.
+
+    Companion to :func:`device_exists_at_location` that returns the full
+    record, used by the onboarding orchestrator's strict-new pre-check
+    (operator Q2 decision — reality-check §4.5). The caller typically
+    doesn't need the record body, but having it available lets future
+    UI integration (Prompt 8) surface "device already exists as …" with
+    context instead of a generic refusal.
+    """
+    client = _get_client()
+    resp = await client.get(
+        "/api/dcim/devices/",
+        # Nautobot 3.x filter name is `location=`; `location_id=` returns 400.
+        params={"name": name, "location": location_id, "limit": 1, "depth": 1},
+        headers=_headers(),
+    )
+    resp.raise_for_status()
+    results = resp.json().get("results", [])
+    return results[0] if results else None
 
 
 # ---------------------------------------------------------------------------
