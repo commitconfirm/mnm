@@ -145,6 +145,20 @@ async def on_startup():
         log.warning("primary_ip_repair_error", "Primary IP repair failed at startup",
                     context={"error": str(e)})
 
+    # Ensure custom onboarding Statuses exist in Nautobot (v1.0 onboarding
+    # workstream, Prompt 2; reality-check §2 / operator Q5 decision).
+    # Must tolerate Nautobot briefly unavailable at boot — log a warning and
+    # continue so the controller still comes up.
+    try:
+        slugs = await nautobot_client.ensure_custom_statuses()
+        log.info("custom_statuses_ready",
+                 "Nautobot custom onboarding statuses ready",
+                 context={"slugs": list(slugs.keys())})
+    except Exception as e:
+        log.warning("custom_statuses_unavailable",
+                    "Could not bootstrap custom Statuses — Nautobot not ready",
+                    context={"error": str(e)})
+
     # Seed any missing poll job types for existing devices (e.g. routes, bgp added after initial onboarding)
     try:
         devices = await nautobot_client.get_devices()
