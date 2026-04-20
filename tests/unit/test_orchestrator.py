@@ -42,6 +42,7 @@ class _Ctx:
     primitive call without repeating patch boilerplate."""
     classify: AsyncMock
     probe: AsyncMock
+    arista_probe: AsyncMock
     find_device_at_location: AsyncMock
     get_role_by_name: AsyncMock
     get_devicetype_by_model: AsyncMock
@@ -98,6 +99,7 @@ def orch_mocks():
     patches = {
         "classify": AsyncMock(return_value=cls_result),
         "probe": AsyncMock(return_value=facts),
+        "arista_probe": AsyncMock(return_value=facts),
         "find_device_at_location": AsyncMock(return_value=None),
         "get_role_by_name": AsyncMock(return_value={"id": "role-uuid",
                                                      "name": "Switch"}),
@@ -133,6 +135,8 @@ def orch_mocks():
 
     with patch.object(orch, "classify", patches["classify"]), \
          patch.object(orch._junos_probe, "probe_device_facts", patches["probe"]), \
+         patch.object(orch._arista_probe, "probe_device_facts",
+                      patches["arista_probe"]), \
          patch.object(nautobot_client, "find_device_at_location",
                       patches["find_device_at_location"]), \
          patch.object(nautobot_client, "get_role_by_name",
@@ -251,6 +255,20 @@ async def test_strict_new_refusal_no_writes(orch_mocks):
     assert orch_mocks.ensure_management_interface.await_count == 0
 
 
+async def test_strict_new_raises_returns_clean_failure(orch_mocks):
+    """Bad input (e.g. bogus location UUID triggering a 400 on the pre-check
+    query) must not crash — orchestrator returns a clean OnboardingResult
+    pointing at the likely culprit."""
+    orch_mocks.find_device_at_location.side_effect = RuntimeError(
+        "400 Bad Request from Nautobot"
+    )
+    result = await _call()
+    assert result.success is False
+    assert "strict-new pre-check" in result.error
+    assert "location_id" in result.error
+    assert orch_mocks.create_device.await_count == 0
+
+
 # ---------------------------------------------------------------------------
 # Classification failures (3)
 # ---------------------------------------------------------------------------
@@ -266,9 +284,12 @@ async def test_vendor_none_classification_failed_error(orch_mocks):
     assert orch_mocks.probe.await_count == 0
 
 
-async def test_arista_vendor_raises_unsupported(orch_mocks):
+async def test_cisco_vendor_raises_unsupported(orch_mocks):
+    # Prompt 5 added `arista` to SUPPORTED_VENDORS; cisco is the honest
+    # remaining unsupported vendor (classic IOS still text-sourced; no
+    # cisco probe module yet).
     orch_mocks.classify.return_value = _make_classifier_result(
-        vendor="arista", platform="arista_eos",
+        vendor="cisco", platform="cisco_iosxe",
     )
     result = await _call()
     assert result.success is False
@@ -467,3 +488,45 @@ async def test_unknown_classification_refuses_at_step_A(orch_mocks):
     assert result.success is False
     assert "classification='unknown'" in result.error
     assert orch_mocks.create_device.await_count == 0
+
+
+# ---------------------------------------------------------------------------
+# Prompt 5: Arista dispatch
+# ---------------------------------------------------------------------------
+
+async def test_arista_vendor_dispatches_to_arista_probe(orch_mocks):
+    """Arista is now in SUPPORTED_VENDORS; _probe_vendor must route to the
+    Arista probe module, not the Junos one."""
+    orch_mocks.classify.return_value = _make_classifier_result(
+        vendor="arista", platform="arista_eos",
+    )
+    orch_mocks.get_platform_by_name.return_value = {
+        "id": "plat-arista", "name": "arista_eos",
+    }
+    orch_mocks.get_devicetype_by_model.return_value = {
+        "id": "dt-veos", "model": "vEOS",
+    }
+    result = await _call()
+    assert result.success is True
+    # Arista probe called once; Junos probe not called.
+    assert orch_mocks.arista_probe.await_count == 1
+    assert orch_mocks.probe.await_count == 0
+
+
+async def test_arista_happy_path_uses_management1_interface(orch_mocks):
+    """Arista's MGMT_INTERFACE_NAME entry must resolve to Management1."""
+    orch_mocks.classify.return_value = _make_classifier_result(
+        vendor="arista", platform="arista_eos",
+    )
+    orch_mocks.get_platform_by_name.return_value = {
+        "id": "plat-arista", "name": "arista_eos",
+    }
+    orch_mocks.get_devicetype_by_model.return_value = {
+        "id": "dt-veos", "model": "vEOS",
+    }
+    result = await _call()
+    assert result.success is True
+    # ensure_management_interface called with the Arista mgmt name
+    orch_mocks.ensure_management_interface.assert_awaited_once_with(
+        "dev-uuid", "Management1", "status-active",
+    )

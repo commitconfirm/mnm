@@ -50,6 +50,7 @@ from dataclasses import dataclass, field
 from app import nautobot_client
 from app.logging_config import StructuredLogger
 from app.onboarding.classifier import ClassifierResult, classify
+from app.onboarding.probes import arista as _arista_probe
 from app.onboarding.probes import junos as _junos_probe
 
 log = StructuredLogger(__name__, module="onboarding")
@@ -118,8 +119,9 @@ CLASSIFICATION_TO_ROLE_NAME: dict[str, "str | None"] = {
     "unknown":        None,
 }
 
-# v1.0 Prompt 4 ships Junos only. Add entries as Prompts 5 / 7 / 7.5 land.
-SUPPORTED_VENDORS: set[str] = {"juniper"}
+# Vendor allowlist — extended per-prompt as probe modules land.
+# Prompt 4: juniper. Prompt 5: arista. Prompts 7 / 7.5: palo_alto / fortinet.
+SUPPORTED_VENDORS: set[str] = {"juniper", "arista"}
 
 # Per-platform management interface name — the interface every vendor
 # auto-creates (via device-type template) or that we POST if absent. This
@@ -204,8 +206,10 @@ async def _probe_vendor(
     """
     if vendor == "juniper":
         return await _junos_probe.probe_device_facts(ip, snmp_community)
+    if vendor == "arista":
+        return await _arista_probe.probe_device_facts(ip, snmp_community)
     raise UnsupportedVendorError(
-        f"Phase 1 onboarding for vendor={vendor!r} not implemented in v1.0 Prompt 4"
+        f"Phase 1 onboarding for vendor={vendor!r} not implemented in v1.0"
     )
 
 
@@ -351,9 +355,19 @@ async def onboard_device(
                       "os_version": facts.os_version})
 
     # ---------- Step 0.5: strict-new pre-check (Q2) ----------
-    existing = await nautobot_client.find_device_at_location(
-        facts.hostname, location_id,
-    )
+    try:
+        existing = await nautobot_client.find_device_at_location(
+            facts.hostname, location_id,
+        )
+    except Exception as exc:  # noqa: BLE001 — bad input shouldn't crash
+        return OnboardingResult(
+            success=False,
+            classification=classification,
+            device_name=facts.hostname,
+            phase1_steps_completed=steps_done,
+            error=(f"NautobotWriteError: strict-new pre-check failed — "
+                   f"check location_id is a valid UUID: {exc}"),
+        )
     if existing is not None:
         log.info("onboarding_already_onboarded",
                  "strict-new refusal — device exists at location",
@@ -474,11 +488,16 @@ async def onboard_device(
         )
 
     # ---------- Step C: ensure covering prefix ----------
+    prefix_id: "str | None" = None
     try:
-        await nautobot_client.ensure_prefix(covering_cidr, namespace="Global")
+        prefix_rec = await nautobot_client.ensure_prefix(
+            covering_cidr, namespace="Global",
+        )
+        prefix_id = prefix_rec.get("id") if isinstance(prefix_rec, dict) else None
         steps_done.append("ensure_prefix")
         log.info("onboarding_step_C", "covering prefix ready",
-                 context={**ctx, "prefix": covering_cidr})
+                 context={**ctx, "prefix": covering_cidr,
+                          "prefix_id": prefix_id})
     except Exception as exc:  # noqa: BLE001
         rolled = await _rollback(
             device_id=device_id, ip_id=None, ip_address=None, ctx=ctx,
@@ -493,9 +512,30 @@ async def onboard_device(
         )
 
     # ---------- Step D: POST /api/ipam/ip-addresses/ ----------
+    # Pre-clean any standalone IPAM record for this address. The MNM sweep
+    # pipeline records every alive IP into Nautobot IPAM during discovery,
+    # so by the time we onboard the device, the target IP often already
+    # exists as a standalone record. Step D's POST would 400 on uniqueness.
+    # ``delete_standalone_ip`` only deletes when no device/interface is
+    # assigned, so the strict-new pre-check at Step 0.5 already guarantees
+    # this is safe. (Pattern copied from the legacy plugin path — see
+    # Phase 2.5 "IPAM collision on onboarding" lesson in CLAUDE.md.)
     try:
+        await nautobot_client.delete_standalone_ip(ip)
+    except Exception as exc:  # noqa: BLE001 — pre-clean is best-effort
+        log.debug("onboarding_step_D_preclean_failed",
+                  "standalone IP pre-clean raised (non-fatal)",
+                  context={**ctx, "error": str(exc)})
+
+    try:
+        # Nautobot 3.x requires one of ``parent`` or ``namespace`` on IP
+        # creation (400 "One of parent or namespace must be provided"
+        # otherwise). We always have the covering prefix from Step C —
+        # pass its UUID as parent. Discovered live on vEOS 2026-04-20.
         ip_rec = await nautobot_client.create_ip_address(
-            address=address_with_mask, status_id=active_status_id,
+            address=address_with_mask,
+            status_id=active_status_id,
+            parent_prefix_id=prefix_id,
         )
         ip_id = ip_rec["id"]
         steps_done.append("create_ip")

@@ -28,7 +28,16 @@ async def _run(
     location_id: str,
     secrets_group_id: str,
 ) -> int:
+    from app import db
     from app.onboarding.orchestrator import onboard_device
+
+    # The orchestrator's Step G (polling seed) silently no-ops when the
+    # controller DB isn't initialized — that's by-design for degraded
+    # startup paths, but a standalone ``python -m`` invocation of this
+    # script runs outside the FastAPI lifespan so the DB module never
+    # gets its init_db() call. Initialise here before dispatching so
+    # device_polls rows actually get seeded during live validation.
+    await db.init_db()
 
     result = await onboard_device(
         ip=ip,
