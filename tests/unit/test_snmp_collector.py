@@ -31,6 +31,8 @@ from app.snmp_collector import (
     SnmpError,
     SnmpTimeoutError,
     get_scalar,
+    mac_from_bytes,
+    mac_from_dotted_decimal,
     walk_table,
 )
 
@@ -298,3 +300,53 @@ async def test_walk_table_octetstring_utf8_multibyte_bytes_unchanged():
 
     assert result[0]["2.542.192.0.2.121"] == mac_bytes
     assert len(result[0]["2.542.192.0.2.121"]) == 6
+
+
+# ---------------------------------------------------------------------------
+# mac_from_bytes tests
+# ---------------------------------------------------------------------------
+
+def test_mac_from_bytes_valid():
+    """Exactly 6 bytes are converted to lowercase colon-separated form."""
+    assert mac_from_bytes(b"\xaa\xbb\xcc\xdd\xee\xff") == "aa:bb:cc:dd:ee:ff"
+    assert mac_from_bytes(b"\x00\x00\x00\x00\x00\x00") == "00:00:00:00:00:00"
+    assert mac_from_bytes(b"\x24\x2f\xd0\xb1\x35\x23") == "24:2f:d0:b1:35:23"
+
+
+def test_mac_from_bytes_wrong_length():
+    """Input shorter or longer than 6 bytes raises ValueError."""
+    with pytest.raises(ValueError):
+        mac_from_bytes(b"\xaa\xbb\xcc\xdd\xee")       # 5 bytes
+    with pytest.raises(ValueError):
+        mac_from_bytes(b"\xaa\xbb\xcc\xdd\xee\xff\x00")  # 7 bytes
+    with pytest.raises(ValueError):
+        mac_from_bytes(b"")
+
+
+# ---------------------------------------------------------------------------
+# mac_from_dotted_decimal tests
+# ---------------------------------------------------------------------------
+
+def test_mac_from_dotted_decimal_valid():
+    """Six dot-separated decimal byte values convert to colon-separated hex."""
+    assert mac_from_dotted_decimal("170.187.204.221.238.255") == "aa:bb:cc:dd:ee:ff"
+    assert mac_from_dotted_decimal("0.0.0.0.0.0") == "00:00:00:00:00:00"
+    assert mac_from_dotted_decimal("36.47.208.177.53.35") == "24:2f:d0:b1:35:23"
+
+
+def test_mac_from_dotted_decimal_wrong_count():
+    """Input with wrong number of dot-separated parts raises ValueError."""
+    with pytest.raises(ValueError):
+        mac_from_dotted_decimal("170.187.204.221.238")       # 5 parts
+    with pytest.raises(ValueError):
+        mac_from_dotted_decimal("170.187.204.221.238.255.0")  # 7 parts
+    with pytest.raises(ValueError):
+        mac_from_dotted_decimal("")
+
+
+def test_mac_from_dotted_decimal_out_of_range():
+    """A byte value outside 0–255 raises ValueError."""
+    with pytest.raises(ValueError):
+        mac_from_dotted_decimal("170.187.256.221.238.255")  # 256 > 255
+    with pytest.raises(ValueError):
+        mac_from_dotted_decimal("170.187.abc.221.238.255")  # non-integer

@@ -121,6 +121,60 @@ def _convert_value(val: Any) -> int | str | bytes | None:
     return str(val)
 
 
+# ---------------------------------------------------------------------------
+# MAC address utilities (public helpers used by ARP, MAC, and LLDP collectors)
+# ---------------------------------------------------------------------------
+
+def mac_from_bytes(value: bytes) -> str:
+    """Normalize 6 raw bytes into a lowercase colon-separated MAC string.
+
+    Args:
+        value: Exactly 6 bytes representing a MAC address.
+
+    Returns:
+        Lowercase colon-separated string, e.g. ``"aa:bb:cc:dd:ee:ff"``.
+
+    Raises:
+        ValueError: If ``value`` is not exactly 6 bytes.
+    """
+    if len(value) != 6:
+        raise ValueError(f"MAC address must be 6 bytes, got {len(value)}")
+    return ":".join(f"{b:02x}" for b in value)
+
+
+def mac_from_dotted_decimal(value: str) -> str:
+    """Parse a dotted-decimal MAC from an OID index into colon-separated form.
+
+    OID indices encode MAC addresses as six decimal byte values separated by
+    dots, e.g. ``"170.187.204.221.238.255"`` for ``aa:bb:cc:dd:ee:ff``.
+
+    Args:
+        value: Six dot-separated decimal integers, each 0–255.
+
+    Returns:
+        Lowercase colon-separated string, e.g. ``"aa:bb:cc:dd:ee:ff"``.
+
+    Raises:
+        ValueError: If ``value`` does not contain exactly 6 parts, or any
+            part is not an integer in the range 0–255.
+    """
+    parts = value.split(".")
+    if len(parts) != 6:
+        raise ValueError(
+            f"Dotted-decimal MAC must have 6 parts, got {len(parts)}: {value!r}"
+        )
+    octets: list[int] = []
+    for part in parts:
+        try:
+            octet = int(part)
+        except ValueError:
+            raise ValueError(f"Non-integer byte in dotted-decimal MAC: {part!r}")
+        if not 0 <= octet <= 255:
+            raise ValueError(f"Byte out of range in dotted-decimal MAC: {octet}")
+        octets.append(octet)
+    return ":".join(f"{b:02x}" for b in octets)
+
+
 def _make_error(error_indication: Any, error_status: Any) -> SnmpError:
     """Map a pysnmp error indication to one of our three exception types."""
     if isinstance(error_indication, errind.RequestTimedOut):

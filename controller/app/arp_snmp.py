@@ -6,8 +6,9 @@ structured ARP entries. Falls back to ipNetToPhysicalTable (RFC 4293:
 devices use the unified IPv4/IPv6 table exclusively.
 
 Uses snmp_collector.walk_table() — no direct pysnmp calls here.
-OctetString values arrive as raw bytes per the snmp_collector contract;
-_mac_from_bytes handles them directly without any decode/re-encode step.
+OctetString values arrive as raw bytes per the snmp_collector contract.
+MAC normalization uses snmp_collector.mac_from_bytes — shared with
+mac_snmp and lldp_snmp to avoid duplicating the same utility.
 Integration into the polling loop is handled separately.
 """
 
@@ -18,7 +19,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app import snmp_collector
-from app.snmp_collector import SnmpAuthError, SnmpError, SnmpTimeoutError
+from app.snmp_collector import SnmpAuthError, SnmpError, SnmpTimeoutError, mac_from_bytes
 from app.logging_config import StructuredLogger
 
 log = StructuredLogger(__name__, module="arp_snmp")
@@ -49,20 +50,6 @@ class ArpEntry:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
-
-def _mac_from_bytes(raw: Any) -> str | None:
-    """Convert a 6-byte physAddress value to 'aa:bb:cc:dd:ee:ff'.
-
-    walk_table returns OctetString as raw bytes (snmp_collector contract).
-    Returns None if raw is not exactly 6 bytes.
-    """
-    if isinstance(raw, bytes):
-        if len(raw) != 6:
-            return None
-        return ":".join(f"{b:02x}" for b in raw)
-
-    return None
-
 
 def _parse_arp_table(rows: list[dict[str, Any]]) -> tuple[list[ArpEntry], int]:
     """Parse walk_table output from ipNetToMediaTable into ArpEntry list.
@@ -114,8 +101,9 @@ def _parse_arp_table(rows: list[dict[str, Any]]) -> tuple[list[ArpEntry], int]:
             skipped += 1
             continue
 
-        mac = _mac_from_bytes(mac_raw)
-        if mac is None:
+        try:
+            mac = mac_from_bytes(mac_raw)
+        except (ValueError, TypeError):
             log.warning("arp_snmp_skip_row", "Skipping row with malformed MAC",
                         context={"index_key": index_key, "ip": ip_str,
                                  "mac_raw": repr(mac_raw)})
@@ -166,8 +154,9 @@ def _parse_phys_table(rows: list[dict[str, Any]]) -> tuple[list[ArpEntry], int]:
             skipped += 1
             continue
 
-        mac = _mac_from_bytes(mac_raw)
-        if mac is None:
+        try:
+            mac = mac_from_bytes(mac_raw)
+        except (ValueError, TypeError):
             log.warning("arp_snmp_skip_row", "Skipping phys table row with malformed MAC",
                         context={"index_key": index_key, "mac_raw": repr(mac_raw)})
             skipped += 1
