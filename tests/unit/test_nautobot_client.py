@@ -120,15 +120,52 @@ async def test_get_devicetype_by_model_found(mock_nautobot):
     assert kwargs["params"]["model"] == "EX2300-24P"
 
 
-async def test_get_status_by_slug_found(mock_nautobot):
+async def test_get_status_by_name_found(mock_nautobot):
+    client, nc = mock_nautobot
+    rec = {"id": "inc-uuid", "name": "Onboarding Incomplete"}
+    client.get.return_value = _response(200, {"results": [rec]})
+    got = await nc.get_status_by_name("Onboarding Incomplete")
+    assert got == rec
+    args, kwargs = client.get.call_args
+    assert args[0] == "/api/extras/statuses/"
+    assert kwargs["params"]["name"] == "Onboarding Incomplete"
+
+
+async def test_get_status_by_name_miss_returns_none(mock_nautobot):
+    client, nc = mock_nautobot
+    client.get.return_value = _response(200, {"results": []})
+    assert await nc.get_status_by_name("Nonesuch") is None
+
+
+async def test_get_status_by_name_content_type_filter_in_url(mock_nautobot):
+    """URL-pin test: content_type argument is forwarded as ?content_types=."""
     client, nc = mock_nautobot
     client.get.return_value = _response(200, {"results": [
-        {"id": "other", "name": "Active", "natural_slug": "active_0176"},
-        {"id": "inc-uuid", "name": "Onboarding Incomplete",
-         "natural_slug": "onboarding-incomplete_24a6"},
+        {"id": "active-uuid", "name": "Active"},
     ]})
-    got = await nc.get_status_by_slug("onboarding-incomplete")
-    assert got is not None and got["id"] == "inc-uuid"
+    await nc.get_status_by_name("Active", content_type="dcim.device")
+    _, kwargs = client.get.call_args
+    assert kwargs["params"]["content_types"] == "dcim.device"
+    assert kwargs["params"]["name"] == "Active"
+
+
+async def test_get_status_by_name_ambiguous_logs_warning_returns_first(
+    mock_nautobot,
+):
+    client, nc = mock_nautobot
+    first = {"id": "first-uuid", "name": "Shared"}
+    second = {"id": "second-uuid", "name": "Shared"}
+    client.get.return_value = _response(200, {"results": [first, second]})
+    # Spy on the module's StructuredLogger directly — caplog is unreliable
+    # once another test file has triggered setup_logging() because it clears
+    # the root handler set. Patching the logger's warning method is the
+    # stable equivalent.
+    with patch.object(nc.log, "warning") as mock_warn:
+        got = await nc.get_status_by_name("Shared")
+    assert got == first
+    assert mock_warn.called, "ambiguous-match should log a warning"
+    event_arg = mock_warn.call_args.args[0] if mock_warn.call_args.args else ""
+    assert event_arg == "status_name_ambiguous"
 
 
 # ---------------------------------------------------------------------------
@@ -340,9 +377,11 @@ async def test_device_exists_at_location_false(mock_nautobot):
 
 async def test_ensure_custom_statuses_creates_both_when_absent(mock_nautobot):
     client, nc = mock_nautobot
-    # GET returns no matching statuses
-    client.get.return_value = _response(200, {"results": []})
-    # POST returns a new UUID per call
+    # Each desired status triggers one get_status_by_name GET; both miss.
+    client.get.side_effect = [
+        _response(200, {"results": []}),
+        _response(200, {"results": []}),
+    ]
     client.post.side_effect = [
         _response(201, {"id": "uuid-incomplete", "name": "Onboarding Incomplete"}),
         _response(201, {"id": "uuid-failed", "name": "Onboarding Failed"}),
@@ -357,10 +396,13 @@ async def test_ensure_custom_statuses_creates_both_when_absent(mock_nautobot):
 
 async def test_ensure_custom_statuses_skips_both_when_present(mock_nautobot):
     client, nc = mock_nautobot
-    client.get.return_value = _response(200, {"results": [
-        {"id": "uuid-incomplete", "name": "Onboarding Incomplete"},
-        {"id": "uuid-failed", "name": "Onboarding Failed"},
-    ]})
+    # Each desired status triggers one get_status_by_name GET; both hit.
+    client.get.side_effect = [
+        _response(200, {"results": [
+            {"id": "uuid-incomplete", "name": "Onboarding Incomplete"}]}),
+        _response(200, {"results": [
+            {"id": "uuid-failed", "name": "Onboarding Failed"}]}),
+    ]
     out = await nc.ensure_custom_statuses()
     assert out == {
         "onboarding-incomplete": "uuid-incomplete",
@@ -372,9 +414,12 @@ async def test_ensure_custom_statuses_skips_both_when_present(mock_nautobot):
 
 async def test_ensure_custom_statuses_partial_state_creates_only_missing(mock_nautobot):
     client, nc = mock_nautobot
-    client.get.return_value = _response(200, {"results": [
-        {"id": "uuid-incomplete", "name": "Onboarding Incomplete"},
-    ]})
+    # First desired status exists; second does not.
+    client.get.side_effect = [
+        _response(200, {"results": [
+            {"id": "uuid-incomplete", "name": "Onboarding Incomplete"}]}),
+        _response(200, {"results": []}),
+    ]
     client.post.return_value = _response(
         201, {"id": "uuid-failed", "name": "Onboarding Failed"})
     out = await nc.ensure_custom_statuses()

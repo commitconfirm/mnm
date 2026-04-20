@@ -2,6 +2,11 @@
 
 All notable changes to MNM are documented in this file. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Changed
+- Replaced `nautobot_client.get_status_by_slug` with `get_status_by_name`. `natural_slug` parsing removed — Nautobot's auto-generated `natural_slug` format is internal and not a stable contract; exact name match via the documented `?name=` filter is the correct identifier. `ensure_custom_statuses` now resolves each desired Status via `get_status_by_name(name, content_type="dcim.device")` instead of paging the full Status list client-side.
+
 ## [0.9.0] - 2026-04-19
 
 Pre-v1.0 baseline tag. No code changes from prior commit — this tag marks the reference point for the v1.0 architectural rework documented in CLAUDE.md.

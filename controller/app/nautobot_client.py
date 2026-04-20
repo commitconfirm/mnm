@@ -1104,30 +1104,44 @@ async def get_platform_by_name(name: str) -> "dict | None":
     return results[0] if results else None
 
 
-async def get_status_by_slug(slug: str) -> "dict | None":
-    """Look up a Status by its natural slug (e.g. ``onboarding-incomplete``).
+async def get_status_by_name(
+    name: str,
+    content_type: "str | None" = None,
+) -> "dict | None":
+    """Exact-name lookup against ``/api/extras/statuses/``.
 
-    Nautobot exposes the slug as ``natural_slug`` on the response record but
-    does not accept ``natural_slug=`` as a filter. We filter by ``name``
-    equivalent-to-slug (canonical form: replace '-' with ' ', titlecase)
-    and then verify the returned record's natural_slug matches.
+    Optionally filter by ``content_type`` (e.g. ``"dcim.device"``) to
+    disambiguate same-named Statuses that exist across multiple content
+    types — Nautobot ships an ``Active`` Status attached to both
+    ``dcim.device`` and ``dcim.interface``, for example.
 
-    Reality-check §1.1 and §2 (custom Status bootstrap).
+    Reality-check §1.1 (the ``?name=`` filter is supported) and §2
+    (custom Status bootstrap).
     """
+    params: dict = {"name": name, "limit": 2}
+    if content_type:
+        params["content_types"] = content_type
     client = _get_client()
-    # Nautobot does accept filtering by ``slug=`` on some models but Status
-    # in Nautobot 3.x uses the ``natural_slug`` auto-field. Safest path is to
-    # fetch a page and match client-side — Status objects are few (<30).
     resp = await client.get(
         "/api/extras/statuses/",
-        params={"limit": 100},
+        params=params,
         headers=_headers(),
     )
     resp.raise_for_status()
-    for s in resp.json().get("results", []):
-        if s.get("natural_slug", "").split("_")[0] == slug:
-            return s
-    return None
+    results = resp.json().get("results", [])
+    if not results:
+        log.debug("status_lookup_miss", "status not found",
+                  context={"name": name, "content_type": content_type})
+        return None
+    if len(results) > 1:
+        log.warning("status_name_ambiguous",
+                    "multiple statuses matched exact name filter",
+                    context={"name": name, "content_type": content_type,
+                             "count": len(results)})
+    log.info("status_lookup_hit", "status resolved by name",
+             context={"name": name, "content_type": content_type,
+                      "status_id": results[0].get("id")})
+    return results[0]
 
 
 # ---------------------------------------------------------------------------
@@ -1523,26 +1537,15 @@ async def ensure_custom_statuses() -> dict[str, str]:
     them and logs a warning so the controller still comes up.
     """
     client = _get_client()
-    # Fetch all device-scoped statuses in one round trip to avoid a per-name
-    # GET; there are typically <30 statuses.
-    resp = await client.get(
-        "/api/extras/statuses/",
-        params={"content_types": "dcim.device", "limit": 100},
-        headers=_headers(),
-    )
-    resp.raise_for_status()
-    existing = {s["name"]: s for s in resp.json().get("results", [])}
-    # Invalidate any cached statuses list so downstream callers see the new
-    # ones on their next request.
-    clear_cache()
 
     out: dict[str, str] = {}
     actions: list[str] = []
     for desired in _CUSTOM_STATUSES:
         slug = desired["slug"]
         name = desired["name"]
-        if name in existing:
-            out[slug] = existing[name]["id"]
+        existing = await get_status_by_name(name, content_type="dcim.device")
+        if existing is not None:
+            out[slug] = existing["id"]
             actions.append(f"{slug}=verified")
             continue
         payload = {k: v for k, v in desired.items() if k != "slug"}
@@ -1556,6 +1559,9 @@ async def ensure_custom_statuses() -> dict[str, str]:
         body = post_resp.json()
         out[slug] = body["id"]
         actions.append(f"{slug}=created")
+        # Invalidate any cached statuses list so downstream callers see the
+        # new Status on their next request.
+        clear_cache()
         log.info("nautobot_write", "ensure_custom_status ok", context={
             "slug": slug, "status_id": body["id"],
             "status_code": post_resp.status_code,
