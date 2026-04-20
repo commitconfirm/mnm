@@ -29,6 +29,18 @@ collect_mac() walks dot1qVlanCurrentTable (1.3.6.1.2.1.17.7.1.4.2.1)
 column .3 (dot1qVlanFdbId) to build a {fdb_id: vlan_id} map and resolve
 each entry to its real 802.1Q VLAN ID.
 
+Junos enterprise fallback
+-------------------------
+Junos (EX, SRX, MX) does not implement dot1qVlanCurrentTable — snmpwalk
+returns "No Such Object" at 1.3.6.1.2.1.17.7.1.4.2. When the standard
+VLAN map walk returns empty, collect_mac() falls back to walking
+JUNIPER-L2ALD-MIB::jnxL2aldVlanTable (1.3.6.1.4.1.2636.3.48.1.3.1.1).
+That enterprise table exposes the same fdb_id → 802.1Q VLAN mapping
+via column .5 (vlanFdbId) and column .3 (vlanTag). The fallback is
+unconditional when the standard path is empty (no vendor detection) —
+on non-Junos devices without this MIB, the walk returns empty and
+entries retain vlan=None as before.
+
 BRIDGE-MIB row index structure
 -------------------------------
 dot1dTpFdbTable index: six MAC bytes in dotted-decimal form only (no VLAN).
@@ -59,6 +71,7 @@ log = StructuredLogger(__name__, module="mac_snmp")
 _OID_Q_BRIDGE = oid("Q-BRIDGE-MIB::dot1qTpFdbEntry")       # dot1qTpFdbTable — VLAN-aware, primary
 _OID_BRIDGE = oid("BRIDGE-MIB::dot1dTpFdbEntry")            # dot1dTpFdbTable — no VLAN, fallback
 _OID_VLAN_CURRENT = oid("Q-BRIDGE-MIB::dot1qVlanCurrentEntry")  # col .3 maps fdb_id → vlan_id
+_OID_JUNOS_VLAN = oid("JUNIPER-L2ALD-MIB::jnxL2aldVlanEntry")  # Junos fallback, col .5→.3 maps fdb_id → vlan_id
 
 # dot1qTpFdbStatus / dot1dTpFdbStatus integer → string
 _ENTRY_STATUS = {
@@ -119,6 +132,44 @@ async def _collect_fdb_vlan_map(
                 continue
             fdb_vlan_map[fdb_id] = vlan_id
     return fdb_vlan_map
+
+
+def _parse_junos_fdb_to_vlan(rows: list[dict[str, Any]]) -> dict[int, int]:
+    """Build {fdb_id: vlan_id} from jnxL2aldVlanTable walk output.
+
+    Table structure (per JUNIPER-L2ALD-MIB::jnxL2aldVlanEntry):
+        Index: internal VLAN sequence number (single integer).
+        Column 2: vlanName (OctetString).
+        Column 3: vlanTag (Integer — the 802.1Q VLAN ID, 0 for Juniper
+            internal VLANs that should not surface to operators).
+        Column 4: vlanType (Integer — 1=user, 2=internal).
+        Column 5: vlanFdbId (Gauge32 — matches dot1qFdbId seen in the
+            standard dot1qTpFdbTable index).
+
+    Skips:
+        - Rows with vlanTag=0 (Juniper internal entries, e.g. ``____juniper_private1____``)
+        - Rows with vlanTag outside 1..4094 (defensive per 802.1Q spec)
+        - Rows with fdb_id=0 (no FDB mapping)
+        - Rows missing required columns or with non-integer values
+    """
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        for suffix, val in row.items():
+            col, _, idx = suffix.partition(".")
+            if idx:
+                grouped.setdefault(idx, {})[col] = val
+
+    mapping: dict[int, int] = {}
+    for cols in grouped.values():
+        try:
+            vlan_id = int(cols.get("3", 0) or 0)
+            fdb_id = int(cols.get("5", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if fdb_id > 0 and 1 <= vlan_id <= 4094:
+            mapping[fdb_id] = vlan_id
+
+    return mapping
 
 
 def _parse_q_bridge_table(
@@ -328,10 +379,15 @@ async def collect_mac(
         timeout_sec: Per-PDU response timeout in seconds.
         port: SNMP UDP port (default 161).
 
+    When dot1qVlanCurrentTable returns empty (Junos does not implement it),
+    falls back to JUNIPER-L2ALD-MIB::jnxL2aldVlanTable for the FDB-ID-to-
+    802.1Q-VLAN mapping. The fallback is unconditional on an empty standard
+    map — harmless on non-Junos devices (walk returns empty).
+
     Returns:
         List of MacEntry. vlan is the resolved 802.1Q VLAN ID from
-        dot1qVlanCurrentTable; None when unresolvable or when the
-        BRIDGE-MIB fallback was used.
+        dot1qVlanCurrentTable or from the Junos L2ALD-MIB fallback; None
+        when unresolvable or when the BRIDGE-MIB fallback was used.
 
     Raises:
         SnmpTimeoutError: Device did not respond within timeout_sec.
@@ -389,9 +445,45 @@ async def collect_mac(
         except (SnmpTimeoutError, SnmpAuthError, SnmpError):
             fdb_vlan_map = {}
 
+        # Junos fallback: standard dot1qVlanCurrentTable returns No Such
+        # Object on Junos. Try the enterprise jnxL2aldVlanTable path.
+        # Harmless on non-Junos devices that also lack this MIB — walk
+        # returns empty and we carry on with vlan=None.
+        if not fdb_vlan_map:
+            log.debug("mac_snmp_junos_fallback",
+                      "Standard VLAN map empty — trying JUNIPER-L2ALD-MIB",
+                      context={"device_ip": device_ip})
+            try:
+                junos_rows = await snmp_collector.walk_table(
+                    device_ip, community, _OID_JUNOS_VLAN,
+                    version=version, timeout_sec=timeout_sec, port=port,
+                )
+                fdb_vlan_map = _parse_junos_fdb_to_vlan(junos_rows)
+            except SnmpTimeoutError:
+                log.debug("mac_snmp_junos_fallback_empty",
+                          "Junos fallback walk timed out",
+                          context={"device_ip": device_ip, "reason": "timeout"})
+                fdb_vlan_map = {}
+            except (SnmpAuthError, SnmpError) as exc:
+                log.debug("mac_snmp_junos_fallback_empty",
+                          "Junos fallback walk raised SNMP error",
+                          context={"device_ip": device_ip, "reason": "snmp_error",
+                                   "error": str(exc)})
+                fdb_vlan_map = {}
+
+            if fdb_vlan_map:
+                log.info("mac_snmp_junos_fallback_resolved",
+                         "JUNIPER-L2ALD-MIB resolved FDB IDs to VLAN IDs",
+                         context={"device_ip": device_ip,
+                                  "fdb_mapping_count": len(fdb_vlan_map)})
+            else:
+                log.debug("mac_snmp_junos_fallback_empty",
+                          "Junos fallback returned no mapping",
+                          context={"device_ip": device_ip, "reason": "empty_walk"})
+
         if not fdb_vlan_map:
             log.warning("mac_snmp_vlan_map_empty",
-                        "dot1qVlanCurrentTable returned no entries — VLAN IDs will be None",
+                        "No FDB-to-VLAN mapping available — VLAN IDs will be None",
                         context={"device_ip": device_ip})
 
         entries, skipped = _parse_q_bridge_table(rows, fdb_vlan_map)

@@ -81,6 +81,11 @@ OIDS: dict[str, str] = {
     "Q-BRIDGE-MIB::dot1qTpFdbEntry":      "1.3.6.1.2.1.17.7.1.2.2.1",
     "BRIDGE-MIB::dot1dTpFdbEntry":        "1.3.6.1.2.1.17.4.3.1",
     "Q-BRIDGE-MIB::dot1qVlanCurrentEntry":"1.3.6.1.2.1.17.7.1.4.2.1",
+    # Junos enterprise fallback for FDB-ID → 802.1Q VLAN mapping.  Used when
+    # dot1qVlanCurrentTable returns No Such Object — Junos does not implement
+    # it.  Table jnxL2aldVlanTable: col .3 = vlanTag (802.1Q ID),
+    # col .5 = vlanFdbId (matches dot1qFdbId from dot1qTpFdbTable index).
+    "JUNIPER-L2ALD-MIB::jnxL2aldVlanEntry":"1.3.6.1.4.1.2636.3.48.1.3.1.1",
     # Routing tables
     "IP-FORWARD-MIB::ipCidrRouteEntry":   "1.3.6.1.2.1.4.24.4.1",
     "RFC1213-MIB::ipRouteEntry":          "1.3.6.1.2.1.4.21.1",

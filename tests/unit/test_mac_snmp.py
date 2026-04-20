@@ -21,8 +21,8 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "controller"))
 
-from app.mac_snmp import MacEntry, collect_mac
-from app.snmp_collector import SnmpTimeoutError
+from app.mac_snmp import MacEntry, _parse_junos_fdb_to_vlan, collect_mac
+from app.snmp_collector import SnmpError, SnmpTimeoutError
 
 DEVICE_IP = "198.51.100.1"
 COMMUNITY = "test-ro"
@@ -30,6 +30,7 @@ COMMUNITY = "test-ro"
 _OID_Q_BRIDGE = "1.3.6.1.2.1.17.7.1.2.2.1"
 _OID_BRIDGE = "1.3.6.1.2.1.17.4.3.1"
 _OID_VLAN_CURRENT = "1.3.6.1.2.1.17.7.1.4.2.1"
+_OID_JUNOS_VLAN = "1.3.6.1.4.1.2636.3.48.1.3.1.1"
 
 # Dotted-decimal for aa:bb:cc:dd:ee:ff = 170.187.204.221.238.255
 MAC_HEX = "aa:bb:cc:dd:ee:ff"
@@ -63,6 +64,21 @@ def _vlan_row(vlan_id: int, fdb_id: int) -> dict:
     Suffix: "3.0.<vlan_id>" — TimeMark=0, VlanIndex=vlan_id. Value is fdb_id.
     """
     return {f"3.0.{vlan_id}": fdb_id}
+
+
+def _junos_vlan_rows(entries: list[tuple[int, str, int, int, int]]) -> list[dict]:
+    """Build walk_table rows for jnxL2aldVlanTable.
+
+    Each entry tuple: (idx, name, vlan_tag, vlan_type, fdb_id).
+    Columns: .2=name, .3=vlan_tag, .4=type, .5=fdb_id.
+    """
+    rows: list[dict] = []
+    for idx, name, tag, vtype, fdb_id in entries:
+        rows.append({f"2.{idx}": name.encode()})
+        rows.append({f"3.{idx}": tag})
+        rows.append({f"4.{idx}": vtype})
+        rows.append({f"5.{idx}": fdb_id})
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -401,5 +417,180 @@ async def test_collect_mac_fallback_path_skips_vlan_walk():
     assert len(call_oids) == 2
     assert call_oids[0] == _OID_Q_BRIDGE
     assert call_oids[1] == _OID_BRIDGE
+    assert len(entries) == 1
+    assert entries[0].vlan is None
+
+
+# ---------------------------------------------------------------------------
+# _parse_junos_fdb_to_vlan (pure-parser tests)
+# ---------------------------------------------------------------------------
+
+def test_parse_junos_fdb_to_vlan_valid_rows():
+    """Three well-formed rows produce the expected fdb_id → vlan_id mapping."""
+    rows = _junos_vlan_rows([
+        (2, "borgGrid_120",      120, 1, 131072),
+        (3, "default",             1, 1, 196608),
+        (4, "ferengiMarket_130", 130, 1, 262144),
+    ])
+    assert _parse_junos_fdb_to_vlan(rows) == {131072: 120, 196608: 1, 262144: 130}
+
+
+def test_parse_junos_fdb_to_vlan_skips_vlan_tag_zero():
+    """Row with vlanTag=0 (Juniper internal) is skipped."""
+    rows = _junos_vlan_rows([
+        (1, "____juniper_private1____", 0, 2, 65536),
+        (2, "user_vlan",              100, 1, 131072),
+    ])
+    assert _parse_junos_fdb_to_vlan(rows) == {131072: 100}
+
+
+def test_parse_junos_fdb_to_vlan_skips_out_of_range_vlan():
+    """Rows with vlanTag outside 1..4094 are skipped."""
+    rows = _junos_vlan_rows([
+        (1, "too_high",    5000, 1, 131072),
+        (2, "negative",      -1, 1, 196608),
+        (3, "valid",        120, 1, 262144),
+        (4, "edge_top",    4095, 1, 327680),  # 4095 is reserved, out of user range
+    ])
+    assert _parse_junos_fdb_to_vlan(rows) == {262144: 120}
+
+
+def test_parse_junos_fdb_to_vlan_skips_zero_fdb_id():
+    """Row with fdb_id=0 is skipped."""
+    rows = _junos_vlan_rows([
+        (1, "no_fdb",    100, 1, 0),
+        (2, "has_fdb",   120, 1, 131072),
+    ])
+    assert _parse_junos_fdb_to_vlan(rows) == {131072: 120}
+
+
+def test_parse_junos_fdb_to_vlan_empty_input():
+    """Empty row list yields empty mapping."""
+    assert _parse_junos_fdb_to_vlan([]) == {}
+
+
+def test_parse_junos_fdb_to_vlan_missing_columns():
+    """Rows missing vlanTag (.3) or vlanFdbId (.5) are skipped silently."""
+    rows = [
+        # idx 2: only name column, nothing else
+        {"2.2": b"orphan_name_only"},
+        # idx 3: has vlan_tag but no fdb_id → treated as fdb_id=0, skipped
+        {"3.3": 50},
+        # idx 4: has fdb_id but no vlan_tag → treated as vlan=0, skipped
+        {"5.4": 131072},
+        # idx 5: complete valid row
+        {"2.5": b"complete"},
+        {"3.5": 130},
+        {"5.5": 262144},
+    ]
+    assert _parse_junos_fdb_to_vlan(rows) == {262144: 130}
+
+
+# ---------------------------------------------------------------------------
+# collect_mac — Junos fallback integration tests
+# ---------------------------------------------------------------------------
+
+async def test_collect_mac_junos_fallback_triggered():
+    """Standard VLAN map empty and FDB has unresolved IDs → Junos walk used."""
+    fdb_id = 131072
+    vlan = 120
+    fdb_rows = [
+        _q_row("2", fdb_id, MAC_DOT, 7),
+        _q_row("3", fdb_id, MAC_DOT, 3),
+    ]
+    junos_rows = _junos_vlan_rows([(2, "borgGrid_120", vlan, 1, fdb_id)])
+    called_oids: list[str] = []
+
+    async def mock_walk(device_ip, community, oid, **kwargs):
+        called_oids.append(oid)
+        if oid == _OID_Q_BRIDGE:
+            return fdb_rows
+        if oid == _OID_VLAN_CURRENT:
+            return []            # standard path empty → triggers Junos
+        if oid == _OID_JUNOS_VLAN:
+            return junos_rows
+        return []
+
+    with patch("app.snmp_collector.walk_table", side_effect=mock_walk):
+        entries = await collect_mac(DEVICE_IP, COMMUNITY)
+
+    assert _OID_JUNOS_VLAN in called_oids
+    assert len(entries) == 1
+    assert entries[0].vlan == vlan
+
+
+async def test_collect_mac_junos_fallback_not_triggered_when_standard_works():
+    """Standard VLAN map has data → Junos walk is NOT attempted."""
+    fdb_id = 10
+    vlan = 10
+    fdb_rows = [
+        _q_row("2", fdb_id, MAC_DOT, 3),
+        _q_row("3", fdb_id, MAC_DOT, 3),
+    ]
+    vlan_rows = [_vlan_row(vlan, fdb_id)]
+    called_oids: list[str] = []
+
+    async def mock_walk(device_ip, community, oid, **kwargs):
+        called_oids.append(oid)
+        if oid == _OID_Q_BRIDGE:
+            return fdb_rows
+        if oid == _OID_VLAN_CURRENT:
+            return vlan_rows
+        return []
+
+    with patch("app.snmp_collector.walk_table", side_effect=mock_walk):
+        entries = await collect_mac(DEVICE_IP, COMMUNITY)
+
+    assert _OID_JUNOS_VLAN not in called_oids
+    assert len(entries) == 1
+    assert entries[0].vlan == vlan
+
+
+async def test_collect_mac_junos_fallback_empty_returns_vlan_none():
+    """Standard empty and Junos empty → entries have vlan=None (today's behavior)."""
+    fdb_id = 131072
+    fdb_rows = [
+        _q_row("2", fdb_id, MAC_DOT, 5),
+        _q_row("3", fdb_id, MAC_DOT, 3),
+    ]
+    called_oids: list[str] = []
+
+    async def mock_walk(device_ip, community, oid, **kwargs):
+        called_oids.append(oid)
+        return fdb_rows if oid == _OID_Q_BRIDGE else []
+
+    with patch("app.snmp_collector.walk_table", side_effect=mock_walk):
+        with patch("app.mac_snmp.log") as mock_log:
+            entries = await collect_mac(DEVICE_IP, COMMUNITY)
+
+    assert _OID_JUNOS_VLAN in called_oids        # fallback was attempted
+    assert len(entries) == 1
+    assert entries[0].vlan is None               # but no mapping found
+
+    warning_events = [c[0][0] for c in mock_log.warning.call_args_list]
+    assert "mac_snmp_vlan_map_empty" in warning_events
+
+
+async def test_collect_mac_junos_fallback_handles_snmp_error():
+    """Junos walk raising SnmpError is caught; entries get vlan=None."""
+    fdb_id = 131072
+    fdb_rows = [
+        _q_row("2", fdb_id, MAC_DOT, 5),
+        _q_row("3", fdb_id, MAC_DOT, 3),
+    ]
+
+    async def mock_walk(device_ip, community, oid, **kwargs):
+        if oid == _OID_Q_BRIDGE:
+            return fdb_rows
+        if oid == _OID_VLAN_CURRENT:
+            return []
+        if oid == _OID_JUNOS_VLAN:
+            raise SnmpError("enterprise MIB not implemented")
+        return []
+
+    with patch("app.snmp_collector.walk_table", side_effect=mock_walk):
+        entries = await collect_mac(DEVICE_IP, COMMUNITY)
+
+    # No exception propagates; entry returned with vlan=None
     assert len(entries) == 1
     assert entries[0].vlan is None

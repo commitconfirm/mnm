@@ -367,6 +367,7 @@ _EXPECTED_OID_NAMES = [
     "Q-BRIDGE-MIB::dot1qTpFdbEntry",
     "BRIDGE-MIB::dot1dTpFdbEntry",
     "Q-BRIDGE-MIB::dot1qVlanCurrentEntry",
+    "JUNIPER-L2ALD-MIB::jnxL2aldVlanEntry",
     "IP-FORWARD-MIB::ipCidrRouteEntry",
     "RFC1213-MIB::ipRouteEntry",
 ]
