@@ -22,6 +22,14 @@ OctetString values are returned as raw ``bytes``. Callers that need text
 data (MAC addresses, chassis IDs, cryptographic material) receive it
 unmodified. Never decode OctetString eagerly in this module — doing so
 destroys binary data silently when bytes happen to form valid UTF-8.
+
+OID registry
+------------
+This module exports an ``OIDS`` dict and ``oid()`` helper mapping symbolic
+``"MIB-NAME::objectName"`` strings to numeric OID strings.  Collectors
+call ``oid("IP-MIB::ipNetToMediaEntry")`` instead of embedding numeric
+strings directly.  A typo in the symbolic name raises ``KeyError`` at
+import time rather than silently querying the wrong OID at runtime.
 """
 
 from __future__ import annotations
@@ -50,6 +58,41 @@ log = StructuredLogger(__name__, module="snmp_collector")
 # Maximum rows fetched in a single walk to prevent unbounded memory use on
 # very large tables (e.g., a full FDB on a core switch).
 _WALK_MAX_ROWS = 10_000
+
+
+# ---------------------------------------------------------------------------
+# OID registry
+# ---------------------------------------------------------------------------
+
+#: Symbolic OID name → numeric OID string for every MIB object MNM queries.
+#:
+#: Convention: keys are ``"MIB-NAME::objectName"``; values are the dotted-
+#: decimal numeric OID string.  Collectors use ``oid("MIB-NAME::object")``
+#: rather than embedding numeric strings.  A typo raises KeyError at import
+#: time rather than silently walking the wrong OID at runtime.
+#:
+#: Scope: only OIDs used by MNM collectors.  Add entries here when building
+#: new collectors — this is not a general MIB database.
+OIDS: dict[str, str] = {
+    # ARP / neighbour tables
+    "IP-MIB::ipNetToMediaEntry":          "1.3.6.1.2.1.4.22.1",
+    "IP-MIB::ipNetToPhysicalEntry":       "1.3.6.1.2.1.4.35.1",
+    # MAC / FDB tables (Q-BRIDGE-MIB and BRIDGE-MIB)
+    "Q-BRIDGE-MIB::dot1qTpFdbEntry":      "1.3.6.1.2.1.17.7.1.2.2.1",
+    "BRIDGE-MIB::dot1dTpFdbEntry":        "1.3.6.1.2.1.17.4.3.1",
+    "Q-BRIDGE-MIB::dot1qVlanCurrentEntry":"1.3.6.1.2.1.17.7.1.4.2.1",
+    # Routing tables
+    "IP-FORWARD-MIB::ipCidrRouteEntry":   "1.3.6.1.2.1.4.24.4.1",
+    "RFC1213-MIB::ipRouteEntry":          "1.3.6.1.2.1.4.21.1",
+}
+
+
+def oid(name: str) -> str:
+    """Resolve a symbolic OID name to its numeric string.
+
+    Raises KeyError if the name is not registered in OIDS.
+    """
+    return OIDS[name]
 
 
 # ---------------------------------------------------------------------------

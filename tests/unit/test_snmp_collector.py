@@ -25,13 +25,17 @@ from pyasn1.type.univ import ObjectIdentifier
 from pysnmp.proto import rfc1902, errind
 from pysnmp.proto.rfc1905 import NoSuchInstance
 
+import re
+
 from app.snmp_collector import (
+    OIDS,
     SnmpAuthError,
     SnmpError,
     SnmpTimeoutError,
     get_scalar,
     mac_from_bytes,
     mac_from_dotted_decimal,
+    oid,
     walk_table,
 )
 
@@ -349,3 +353,45 @@ def test_mac_from_dotted_decimal_out_of_range():
         mac_from_dotted_decimal("170.187.256.221.238.255")  # 256 > 255
     with pytest.raises(ValueError):
         mac_from_dotted_decimal("170.187.abc.221.238.255")  # non-integer
+
+
+# ---------------------------------------------------------------------------
+# OID registry tests
+# ---------------------------------------------------------------------------
+
+_NUMERIC_OID_RE = re.compile(r"^1\.3\.6(\.\d+)+$")
+
+_EXPECTED_OID_NAMES = [
+    "IP-MIB::ipNetToMediaEntry",
+    "IP-MIB::ipNetToPhysicalEntry",
+    "Q-BRIDGE-MIB::dot1qTpFdbEntry",
+    "BRIDGE-MIB::dot1dTpFdbEntry",
+    "Q-BRIDGE-MIB::dot1qVlanCurrentEntry",
+    "IP-FORWARD-MIB::ipCidrRouteEntry",
+    "RFC1213-MIB::ipRouteEntry",
+]
+
+
+def test_oid_registry_resolves_known_name():
+    """oid() returns the correct numeric string for a registered name."""
+    assert oid("IP-MIB::ipNetToMediaEntry") == "1.3.6.1.2.1.4.22.1"
+
+
+def test_oid_registry_raises_on_unknown_name():
+    """oid() raises KeyError for a name not in the registry."""
+    with pytest.raises(KeyError):
+        oid("NONEXISTENT::fake")
+
+
+def test_oid_registry_entries_are_valid_oids():
+    """Every value in OIDS looks like a valid dotted-decimal numeric OID."""
+    for name, numeric in OIDS.items():
+        assert _NUMERIC_OID_RE.match(numeric), (
+            f"OIDS[{name!r}] = {numeric!r} does not look like a numeric OID"
+        )
+
+
+def test_oid_registry_has_expected_entries():
+    """All 7 expected symbolic names are present in the registry."""
+    for name in _EXPECTED_OID_NAMES:
+        assert name in OIDS, f"Expected OID name {name!r} missing from registry"

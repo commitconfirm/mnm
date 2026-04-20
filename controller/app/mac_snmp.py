@@ -50,17 +50,15 @@ from app.snmp_collector import (
     SnmpTimeoutError,
     mac_from_bytes,
     mac_from_dotted_decimal,
+    oid,
 )
 from app.logging_config import StructuredLogger
 
 log = StructuredLogger(__name__, module="mac_snmp")
 
-# dot1qTpFdbTable (Q-BRIDGE-MIB) — VLAN-aware, primary
-_OID_Q_BRIDGE = "1.3.6.1.2.1.17.7.1.2.2.1"
-# dot1dTpFdbTable (BRIDGE-MIB) — no VLAN, fallback
-_OID_BRIDGE = "1.3.6.1.2.1.17.4.3.1"
-# dot1qVlanCurrentTable — col .3 (dot1qVlanFdbId) maps fdb_id → vlan_id
-_OID_VLAN_CURRENT = "1.3.6.1.2.1.17.7.1.4.2.1"
+_OID_Q_BRIDGE = oid("Q-BRIDGE-MIB::dot1qTpFdbEntry")       # dot1qTpFdbTable — VLAN-aware, primary
+_OID_BRIDGE = oid("BRIDGE-MIB::dot1dTpFdbEntry")            # dot1dTpFdbTable — no VLAN, fallback
+_OID_VLAN_CURRENT = oid("Q-BRIDGE-MIB::dot1qVlanCurrentEntry")  # col .3 maps fdb_id → vlan_id
 
 # dot1qTpFdbStatus / dot1dTpFdbStatus integer → string
 _ENTRY_STATUS = {

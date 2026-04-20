@@ -19,15 +19,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from app import snmp_collector
-from app.snmp_collector import SnmpAuthError, SnmpError, SnmpTimeoutError, mac_from_bytes
+from app.snmp_collector import SnmpAuthError, SnmpError, SnmpTimeoutError, mac_from_bytes, oid
 from app.logging_config import StructuredLogger
 
 log = StructuredLogger(__name__, module="arp_snmp")
 
-# ipNetToMediaTable (RFC 2011)
-_OID_ARP_TABLE = "1.3.6.1.2.1.4.22.1"
-# ipNetToPhysicalTable (RFC 4293) — fallback for newer devices
-_OID_ARP_PHYSICAL = "1.3.6.1.2.1.4.35.1"
+_OID_ARP_TABLE = oid("IP-MIB::ipNetToMediaEntry")        # ipNetToMediaTable (RFC 2011)
+_OID_ARP_PHYSICAL = oid("IP-MIB::ipNetToPhysicalEntry")  # ipNetToPhysicalTable (RFC 4293) fallback
 
 # ipNetToMediaType integer → string (RFC 2011)
 _ENTRY_TYPE = {1: "other", 2: "invalid", 3: "dynamic", 4: "static"}
