@@ -43,6 +43,7 @@ class _Ctx:
     classify: AsyncMock
     probe: AsyncMock
     arista_probe: AsyncMock
+    paloalto_probe: AsyncMock
     find_device_at_location: AsyncMock
     get_role_by_name: AsyncMock
     get_devicetype_by_model: AsyncMock
@@ -100,6 +101,7 @@ def orch_mocks():
         "classify": AsyncMock(return_value=cls_result),
         "probe": AsyncMock(return_value=facts),
         "arista_probe": AsyncMock(return_value=facts),
+        "paloalto_probe": AsyncMock(return_value=facts),
         "find_device_at_location": AsyncMock(return_value=None),
         "get_role_by_name": AsyncMock(return_value={"id": "role-uuid",
                                                      "name": "Switch"}),
@@ -133,44 +135,37 @@ def orch_mocks():
         "clear_cache": MagicMock(return_value=None),
     }
 
-    with patch.object(orch, "classify", patches["classify"]), \
-         patch.object(orch._junos_probe, "probe_device_facts", patches["probe"]), \
-         patch.object(orch._arista_probe, "probe_device_facts",
-                      patches["arista_probe"]), \
-         patch.object(nautobot_client, "find_device_at_location",
-                      patches["find_device_at_location"]), \
-         patch.object(nautobot_client, "get_role_by_name",
-                      patches["get_role_by_name"]), \
-         patch.object(nautobot_client, "get_devicetype_by_model",
-                      patches["get_devicetype_by_model"]), \
-         patch.object(nautobot_client, "get_platform_by_name",
-                      patches["get_platform_by_name"]), \
-         patch.object(nautobot_client, "get_status_by_name",
-                      patches["get_status_by_name"]), \
-         patch.object(nautobot_client, "create_device",
-                      patches["create_device"]), \
-         patch.object(nautobot_client, "ensure_management_interface",
-                      patches["ensure_management_interface"]), \
-         patch.object(nautobot_client, "ensure_prefix",
-                      patches["ensure_prefix"]), \
-         patch.object(nautobot_client, "create_ip_address",
-                      patches["create_ip_address"]), \
-         patch.object(nautobot_client, "link_ip_to_interface",
-                      patches["link_ip_to_interface"]), \
-         patch.object(nautobot_client, "set_device_primary_ip4",
-                      patches["set_device_primary_ip4"]), \
-         patch.object(nautobot_client, "set_device_status",
-                      patches["set_device_status"]), \
-         patch.object(polling, "ensure_device_polls",
-                      patches["ensure_device_polls"]), \
-         patch.object(nautobot_client, "delete_device",
-                      patches["delete_device"]), \
-         patch.object(nautobot_client, "delete_ip_address",
-                      patches["delete_ip_address"]), \
-         patch.object(nautobot_client, "delete_standalone_ip",
-                      patches["delete_standalone_ip"]), \
-         patch.object(nautobot_client, "clear_cache",
-                      patches["clear_cache"]):
+    # ExitStack avoids Python's "too many statically nested blocks"
+    # limit once the patch list grows past ~20 (triggered at Prompt 7
+    # when paloalto_probe was added).
+    from contextlib import ExitStack
+    targets: list[tuple[object, str, object]] = [
+        (orch, "classify", patches["classify"]),
+        (orch._junos_probe, "probe_device_facts", patches["probe"]),
+        (orch._arista_probe, "probe_device_facts", patches["arista_probe"]),
+        (orch._paloalto_probe, "probe_device_facts", patches["paloalto_probe"]),
+        (nautobot_client, "find_device_at_location", patches["find_device_at_location"]),
+        (nautobot_client, "get_role_by_name", patches["get_role_by_name"]),
+        (nautobot_client, "get_devicetype_by_model", patches["get_devicetype_by_model"]),
+        (nautobot_client, "get_platform_by_name", patches["get_platform_by_name"]),
+        (nautobot_client, "get_status_by_name", patches["get_status_by_name"]),
+        (nautobot_client, "create_device", patches["create_device"]),
+        (nautobot_client, "ensure_management_interface",
+         patches["ensure_management_interface"]),
+        (nautobot_client, "ensure_prefix", patches["ensure_prefix"]),
+        (nautobot_client, "create_ip_address", patches["create_ip_address"]),
+        (nautobot_client, "link_ip_to_interface", patches["link_ip_to_interface"]),
+        (nautobot_client, "set_device_primary_ip4", patches["set_device_primary_ip4"]),
+        (nautobot_client, "set_device_status", patches["set_device_status"]),
+        (polling, "ensure_device_polls", patches["ensure_device_polls"]),
+        (nautobot_client, "delete_device", patches["delete_device"]),
+        (nautobot_client, "delete_ip_address", patches["delete_ip_address"]),
+        (nautobot_client, "delete_standalone_ip", patches["delete_standalone_ip"]),
+        (nautobot_client, "clear_cache", patches["clear_cache"]),
+    ]
+    with ExitStack() as stack:
+        for obj, attr, mock in targets:
+            stack.enter_context(patch.object(obj, attr, mock))
         yield _Ctx(**patches)
 
 
@@ -529,4 +524,47 @@ async def test_arista_happy_path_uses_management1_interface(orch_mocks):
     # ensure_management_interface called with the Arista mgmt name
     orch_mocks.ensure_management_interface.assert_awaited_once_with(
         "dev-uuid", "Management1", "status-active",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Prompt 7: PAN-OS dispatch
+# ---------------------------------------------------------------------------
+
+async def test_palo_alto_vendor_dispatches_to_paloalto_probe(orch_mocks):
+    """PAN-OS is now in SUPPORTED_VENDORS; _probe_vendor must route to the
+    PAN-OS probe module, not Junos or Arista."""
+    orch_mocks.classify.return_value = _make_classifier_result(
+        vendor="palo_alto", platform="paloalto_panos", classification="firewall",
+    )
+    orch_mocks.get_platform_by_name.return_value = {
+        "id": "plat-panos", "name": "paloalto_panos",
+    }
+    orch_mocks.get_devicetype_by_model.return_value = {
+        "id": "dt-pa440", "model": "PA-440",
+    }
+    orch_mocks.get_role_by_name.return_value = {"id": "role-fw", "name": "Firewall"}
+    result = await _call()
+    assert result.success is True
+    assert orch_mocks.paloalto_probe.await_count == 1
+    assert orch_mocks.probe.await_count == 0        # Junos not called
+    assert orch_mocks.arista_probe.await_count == 0  # Arista not called
+
+
+async def test_palo_alto_happy_path_uses_mgmt_interface(orch_mocks):
+    """PAN-OS MGMT_INTERFACE_NAME entry must resolve to 'mgmt'."""
+    orch_mocks.classify.return_value = _make_classifier_result(
+        vendor="palo_alto", platform="paloalto_panos", classification="firewall",
+    )
+    orch_mocks.get_platform_by_name.return_value = {
+        "id": "plat-panos", "name": "paloalto_panos",
+    }
+    orch_mocks.get_devicetype_by_model.return_value = {
+        "id": "dt-pa440", "model": "PA-440",
+    }
+    orch_mocks.get_role_by_name.return_value = {"id": "role-fw", "name": "Firewall"}
+    result = await _call()
+    assert result.success is True
+    orch_mocks.ensure_management_interface.assert_awaited_once_with(
+        "dev-uuid", "mgmt", "status-active",
     )

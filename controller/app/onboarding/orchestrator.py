@@ -52,6 +52,7 @@ from app.logging_config import StructuredLogger
 from app.onboarding.classifier import ClassifierResult, classify
 from app.onboarding.probes import arista as _arista_probe
 from app.onboarding.probes import junos as _junos_probe
+from app.onboarding.probes import paloalto as _paloalto_probe
 
 log = StructuredLogger(__name__, module="onboarding")
 
@@ -120,8 +121,8 @@ CLASSIFICATION_TO_ROLE_NAME: dict[str, "str | None"] = {
 }
 
 # Vendor allowlist — extended per-prompt as probe modules land.
-# Prompt 4: juniper. Prompt 5: arista. Prompts 7 / 7.5: palo_alto / fortinet.
-SUPPORTED_VENDORS: set[str] = {"juniper", "arista"}
+# Prompt 4: juniper. Prompt 5: arista. Prompt 7: palo_alto. Prompt 7.5: fortinet.
+SUPPORTED_VENDORS: set[str] = {"juniper", "arista", "palo_alto"}
 
 # Per-platform management interface name — the interface every vendor
 # auto-creates (via device-type template) or that we POST if absent. This
@@ -208,6 +209,8 @@ async def _probe_vendor(
         return await _junos_probe.probe_device_facts(ip, snmp_community)
     if vendor == "arista":
         return await _arista_probe.probe_device_facts(ip, snmp_community)
+    if vendor == "palo_alto":
+        return await _paloalto_probe.probe_device_facts(ip, snmp_community)
     raise UnsupportedVendorError(
         f"Phase 1 onboarding for vendor={vendor!r} not implemented in v1.0"
     )

@@ -122,6 +122,11 @@ OIDS: dict[str, str] = {
     "ENTITY-MIB::entPhysicalClass":       "1.3.6.1.2.1.47.1.1.1.1.5",
     "ENTITY-MIB::entPhysicalSerialNum":   "1.3.6.1.2.1.47.1.1.1.1.11",
     "ENTITY-MIB::entPhysicalModelName":   "1.3.6.1.2.1.47.1.1.1.1.13",
+    # PAN-OS enterprise scalars (PAN-COMMON-MIB at 25461.2.1.2.1) — analogue
+    # to Juniper's jnxBoxSerialNo. PAN-OS sysDescr doesn't embed the PAN-OS
+    # version string, so we read panSysSwVersion directly.
+    "PAN-COMMON-MIB::panSysSwVersion":    "1.3.6.1.4.1.25461.2.1.2.1.1.0",
+    "PAN-COMMON-MIB::panSysSerialNumber": "1.3.6.1.4.1.25461.2.1.2.1.3.0",
 }
 
 
