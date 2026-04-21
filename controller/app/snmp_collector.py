@@ -93,8 +93,16 @@ OIDS: dict[str, str] = {
     "LLDP-MIB::lldpRemEntry":             "1.0.8802.1.1.2.1.4.1.1",
     "LLDP-MIB::lldpRemManAddrEntry":      "1.0.8802.1.1.2.1.4.2.1",
     # Interface name tables — ifXTable.ifName preferred, ifTable.ifDescr fallback
+    "IF-MIB::ifIndex":                    "1.3.6.1.2.1.2.2.1.1",
     "IF-MIB::ifDescr":                    "1.3.6.1.2.1.2.2.1.2",
     "IF-MIB::ifName":                     "1.3.6.1.2.1.31.1.1.1.1",
+    # IP address tables — ipAddressTable (modern, v4+v6) preferred with
+    # legacy ipAddrTable fallback for older firmware (e.g. EX3300 12.3
+    # returns empty for the modern table).
+    "IP-MIB::ipAddressIfIndex":           "1.3.6.1.2.1.4.34.1.3",
+    "IP-MIB::ipAddressPrefix":            "1.3.6.1.2.1.4.34.1.5",
+    "RFC1213-MIB::ipAdEntIfIndex":        "1.3.6.1.2.1.4.20.1.2",
+    "RFC1213-MIB::ipAdEntNetMask":        "1.3.6.1.2.1.4.20.1.3",
     # System MIB scalars — used by onboarding classifier (sysDescr substring
     # match + sysObjectID prefix fallback). See
     # .claude/design/nautobot_rest_schema_notes.md §3 for the captured

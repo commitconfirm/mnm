@@ -231,9 +231,15 @@ async def get_devices() -> list[dict]:
     return results
 
 
-async def get_device(device_id: str) -> dict:
+async def get_device(device_id: str, *, depth: int = 0) -> dict:
+    """GET a single device by UUID. ``depth=1`` nests primary_ip4,
+    platform, role, location, status with their display/address fields —
+    required when the caller needs e.g. the primary_ip4 address string."""
     client = _get_client()
-    resp = await client.get(f"/api/dcim/devices/{device_id}/", headers=_headers())
+    url = f"/api/dcim/devices/{device_id}/"
+    if depth:
+        url = f"{url}?depth={depth}"
+    resp = await client.get(url, headers=_headers())
     resp.raise_for_status()
     return resp.json()
 
@@ -588,8 +594,17 @@ async def delete_standalone_ip(ip: str) -> bool:
     for ipo in resp.json().get("results", []):
         if not (ipo.get("address") or "").startswith(ip):
             continue
-        interfaces = ipo.get("interfaces") or []
-        if interfaces:
+        # Check assignment via the IPAddressToInterface through model.
+        # The ``interfaces`` attribute on the IP record isn't reliably
+        # populated without ?depth=1 — using the through-model endpoint
+        # is authoritative. (Caught live during Prompt 6 Phase 2 where a
+        # depth=0 interfaces-null check caused delete of a primary IP.)
+        link_resp = await client.get(
+            "/api/ipam/ip-address-to-interface/",
+            params={"ip_address": ipo["id"], "limit": 1},
+            headers=_headers(),
+        )
+        if link_resp.status_code == 200 and link_resp.json().get("count", 0) > 0:
             # Already on a device interface — leave it alone.
             continue
         del_resp = await client.delete(
@@ -1273,6 +1288,90 @@ async def create_interface(
         "duration_ms": round((time.monotonic() - t0) * 1000, 1),
     })
     return body
+
+
+async def create_interfaces_bulk(interfaces: list[dict]) -> list[dict]:
+    """POST /api/dcim/interfaces/ with a JSON array body for bulk creation.
+
+    Nautobot 3.x accepts an array body on list endpoints for one-shot
+    multi-record creation; response is a matching array of created
+    records. Empty input returns ``[]`` without a round trip.
+
+    Each element of ``interfaces`` must already be a well-formed POST
+    payload (``device``, ``name``, ``type``, ``status`` at minimum per
+    reality-check §1.2). The caller filters out duplicates against the
+    device's existing interface set — Nautobot rejects the whole batch
+    on a single ``(device, name)`` collision (reality-check Test 6).
+    """
+    if not interfaces:
+        return []
+    t0 = time.monotonic()
+    client = _get_client()
+    resp = await client.post(
+        "/api/dcim/interfaces/",
+        headers={**_headers(), "Content-Type": "application/json"},
+        json=interfaces,
+    )
+    _raise_for_write(resp, operation="create_interfaces_bulk")
+    body = resp.json()
+    log.info("nautobot_write", "create_interfaces_bulk ok", context={
+        "count": len(body) if isinstance(body, list) else 1,
+        "status_code": resp.status_code,
+        "duration_ms": round((time.monotonic() - t0) * 1000, 1),
+    })
+    return body if isinstance(body, list) else [body]
+
+
+async def create_ip_addresses_bulk(ip_addresses: list[dict]) -> list[dict]:
+    """POST /api/ipam/ip-addresses/ with an array body.
+
+    Reality-check §1.2: ``address``, ``status`` are required; Nautobot 3.x
+    also requires ``parent`` or ``namespace`` per-entry (surfaced live
+    during Prompt 5 vEOS validation).  Empty input returns ``[]``.
+    """
+    if not ip_addresses:
+        return []
+    t0 = time.monotonic()
+    client = _get_client()
+    resp = await client.post(
+        "/api/ipam/ip-addresses/",
+        headers={**_headers(), "Content-Type": "application/json"},
+        json=ip_addresses,
+    )
+    _raise_for_write(resp, operation="create_ip_addresses_bulk")
+    body = resp.json()
+    log.info("nautobot_write", "create_ip_addresses_bulk ok", context={
+        "count": len(body) if isinstance(body, list) else 1,
+        "status_code": resp.status_code,
+        "duration_ms": round((time.monotonic() - t0) * 1000, 1),
+    })
+    return body if isinstance(body, list) else [body]
+
+
+async def link_ips_to_interfaces_bulk(links: list[dict]) -> list[dict]:
+    """POST /api/ipam/ip-address-to-interface/ with an array body.
+
+    Reality-check §1.4 through-model endpoint. Each element must be
+    ``{"ip_address": <uuid>, "interface": <uuid>, "is_primary": bool}``.
+    Empty input returns ``[]``.
+    """
+    if not links:
+        return []
+    t0 = time.monotonic()
+    client = _get_client()
+    resp = await client.post(
+        "/api/ipam/ip-address-to-interface/",
+        headers={**_headers(), "Content-Type": "application/json"},
+        json=links,
+    )
+    _raise_for_write(resp, operation="link_ips_to_interfaces_bulk")
+    body = resp.json()
+    log.info("nautobot_write", "link_ips_to_interfaces_bulk ok", context={
+        "count": len(body) if isinstance(body, list) else 1,
+        "status_code": resp.status_code,
+        "duration_ms": round((time.monotonic() - t0) * 1000, 1),
+    })
+    return body if isinstance(body, list) else [body]
 
 
 async def ensure_management_interface(

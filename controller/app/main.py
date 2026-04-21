@@ -430,6 +430,73 @@ async def sweep_history():
     return {"history": state.get("history", [])}
 
 
+@app.get("/api/onboarding/phase2-status/{device_name}",
+         dependencies=[Depends(require_auth)])
+async def phase2_status(device_name: str):
+    """Return the Phase 2 onboarding status for a device.
+
+    Derives a coarse ``state`` from the ``device_polls`` row for
+    ``job_type="phase2_populate"``:
+
+      * ``pending`` — row exists, never attempted (``last_attempt IS NULL``).
+      * ``running`` — row is enabled AND a dispatch is underway; we
+        approximate this by ``last_attempt`` being newer than
+        ``last_success`` within the last 60 s.
+      * ``completed`` — ``enabled=False`` and ``last_success IS NOT NULL``.
+      * ``failed`` — enabled, ``last_attempt`` newer than
+        ``last_success``, not within the running window.
+
+    Returns 404 when no row exists for the device.
+    """
+    from datetime import datetime, timezone, timedelta
+    from sqlalchemy import select as sa_select
+    from app import db as app_db
+
+    if not app_db.is_ready():
+        raise HTTPException(status_code=503, detail="controller DB not ready")
+
+    async with app_db.SessionLocal() as session:
+        row = (await session.execute(
+            sa_select(app_db.DevicePoll).where(
+                app_db.DevicePoll.device_name == device_name,
+                app_db.DevicePoll.job_type == "phase2_populate",
+            )
+        )).scalar_one_or_none()
+
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no phase2_populate row for device {device_name!r}",
+        )
+
+    now = datetime.now(timezone.utc)
+    last_attempt = row.last_attempt
+    last_success = row.last_success
+    enabled = bool(row.enabled)
+
+    if not enabled and last_success is not None:
+        state = "completed"
+    elif last_attempt is None:
+        state = "pending"
+    elif (last_success is None or last_attempt > last_success) \
+            and last_attempt > now - timedelta(seconds=60):
+        state = "running"
+    elif last_success is None or (last_attempt and last_attempt > last_success):
+        state = "failed"
+    else:
+        state = "pending"
+
+    return {
+        "device_name": device_name,
+        "state": state,
+        "enabled": enabled,
+        "last_attempt": last_attempt.isoformat() if last_attempt else None,
+        "last_success": last_success.isoformat() if last_success else None,
+        "next_due": row.next_due.isoformat() if row.next_due else None,
+        "last_error": row.last_error,
+    }
+
+
 # In-memory state for the sync-incomplete progress tracker (Rule 9 — every
 # operator action gets a visible progress indicator). Single-run state since
 # multiple concurrent runs are not allowed.

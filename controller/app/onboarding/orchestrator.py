@@ -607,6 +607,13 @@ async def onboard_device(
         steps_done.append("ensure_device_polls")
         log.info("onboarding_step_G", "device_polls seeded",
                  context={**ctx, "device_name": facts.hostname})
+        # Step G.5 — seed the one-shot phase2_populate row. Phase 2
+        # (walk ifTable + ipAddressTable → bulk-create in Nautobot)
+        # runs on the next polling-loop tick (≤ POLL_CHECK_INTERVAL).
+        await polling.ensure_phase2_populate_row(facts.hostname)
+        steps_done.append("ensure_phase2_populate")
+        log.info("onboarding_step_G5", "phase2_populate row seeded",
+                 context={**ctx, "device_name": facts.hostname})
     except Exception as exc:  # noqa: BLE001
         incomplete_status_id = await _resolve_incomplete_status_id()
         set_ok = False

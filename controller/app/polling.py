@@ -32,9 +32,19 @@ log = StructuredLogger(__name__, module="polling")
 
 JOB_TYPES = ("arp", "mac", "dhcp", "lldp", "routes", "bgp")
 
+# One-shot job types are scheduled individually (not seeded by
+# ensure_device_polls) and disable themselves on success. ``phase2_populate``
+# is seeded by the onboarding orchestrator at Step G.5 and disabled by the
+# dispatch branch below once run_phase2 returns success.
+ONE_SHOT_JOB_TYPES = ("phase2_populate",)
+
+
 def _default_interval(job_type: str) -> int:
     defaults = {"arp": 300, "mac": 300, "dhcp": 600, "lldp": 3600,
-                "routes": 3600, "bgp": 3600}
+                "routes": 3600, "bgp": 3600,
+                # Retry interval for phase2 (only used after a failure —
+                # on success the row is disabled).
+                "phase2_populate": 300}
     env_key = f"MNM_POLL_{job_type.upper()}_INTERVAL"
     # Fall back to old MNM_COLLECTION_INTERVAL (minutes) converted to seconds
     old_fallback = int(os.environ.get("MNM_COLLECTION_INTERVAL", "0")) * 60
@@ -77,6 +87,87 @@ async def ensure_device_polls(device_name: str) -> None:
                     next_due=_utcnow(),  # due immediately on first appearance
                 ))
         await session.commit()
+
+
+async def ensure_phase2_populate_row(device_name: str) -> None:
+    """Seed a one-shot ``phase2_populate`` poll row for a freshly-onboarded
+    device. Idempotent — re-enables and resets ``next_due`` if a disabled
+    row from a previous onboarding still exists.
+
+    Called from the onboarding orchestrator's Step G.5 (Prompt 6). The
+    poll loop picks the row up on its next tick (≤ ``MNM_POLL_CHECK_INTERVAL``
+    seconds), runs :func:`app.onboarding.network_sync.run_phase2`, and
+    disables the row on success.
+    """
+    if not db.is_ready():
+        return
+    async with db.SessionLocal() as session:
+        from sqlalchemy import select as sa_select
+        existing = (await session.execute(
+            sa_select(db.DevicePoll).where(
+                db.DevicePoll.device_name == device_name,
+                db.DevicePoll.job_type == "phase2_populate",
+            )
+        )).scalar_one_or_none()
+        now = _utcnow()
+        if existing is None:
+            session.add(db.DevicePoll(
+                device_name=device_name,
+                job_type="phase2_populate",
+                interval_sec=_default_interval("phase2_populate"),
+                enabled=True,
+                next_due=now,
+            ))
+        else:
+            existing.enabled = True
+            existing.next_due = now
+            existing.last_error = None
+        await session.commit()
+
+
+async def disable_device_poll(device_name: str, job_type: str) -> None:
+    """Mark a poll row disabled — used for one-shot jobs on success."""
+    if not db.is_ready():
+        return
+    async with db.SessionLocal() as session:
+        from sqlalchemy import select as sa_select
+        row = (await session.execute(
+            sa_select(db.DevicePoll).where(
+                db.DevicePoll.device_name == device_name,
+                db.DevicePoll.job_type == job_type,
+            )
+        )).scalar_one_or_none()
+        if row:
+            row.enabled = False
+            row.last_success = _utcnow()
+            row.last_attempt = _utcnow()
+            row.last_error = None
+            await session.commit()
+
+
+async def defer_device_poll(
+    device_name: str, job_type: str, retry_in_seconds: int,
+    *, error: "str | None" = None,
+) -> None:
+    """Push a poll row's ``next_due`` forward — used for one-shot job
+    retry backoff on failure. ``error`` is persisted into ``last_error``
+    for surfacing via the phase2-status endpoint / operator log search."""
+    if not db.is_ready():
+        return
+    async with db.SessionLocal() as session:
+        from sqlalchemy import select as sa_select
+        row = (await session.execute(
+            sa_select(db.DevicePoll).where(
+                db.DevicePoll.device_name == device_name,
+                db.DevicePoll.job_type == job_type,
+            )
+        )).scalar_one_or_none()
+        if row:
+            row.last_attempt = _utcnow()
+            row.next_due = _utcnow() + timedelta(seconds=retry_in_seconds)
+            if error:
+                row.last_error = error[:500]
+            await session.commit()
 
 
 async def populate_from_nautobot() -> int:
@@ -758,7 +849,84 @@ async def poll_device(device_name: str, device_id: str,
             results.append(await collect_routes(device_name, device_id, device_ip=device_ip))
         elif jt == "bgp":
             results.append(await collect_bgp(device_name, device_id))
+        elif jt == "phase2_populate":
+            results.append(await _run_phase2_populate(
+                device_name, device_id, device_ip,
+            ))
     return results
+
+
+async def _run_phase2_populate(
+    device_name: str, device_id: str, device_ip: "str | None",
+) -> dict:
+    """Dispatch the one-shot Phase 2 network sync for a device.
+
+    On success: disable the poll row (one-shot semantic). On failure:
+    defer ``next_due`` by 5 minutes for retry and transition the device
+    status to ``Onboarding Incomplete`` so Prompt 9's status-gated
+    polling will skip the core collectors until Phase 2 succeeds.
+    """
+    from app.onboarding import network_sync
+
+    if not device_ip:
+        await defer_device_poll(device_name, "phase2_populate", 300)
+        return {"device_name": device_name, "job_type": "phase2_populate",
+                "success": False, "error": "no primary_ip4 on device",
+                "count": 0, "duration": 0.0}
+
+    community = os.environ.get("SNMP_COMMUNITY", "public")
+    t0 = time.monotonic()
+    result = await network_sync.run_phase2(
+        device_id=device_id,
+        device_name=device_name,
+        device_ip=device_ip,
+        snmp_community=community,
+    )
+    duration = time.monotonic() - t0
+
+    if result.success:
+        await disable_device_poll(device_name, "phase2_populate")
+        # Transition device status back to Active if a prior failed
+        # attempt had flipped it to Onboarding Incomplete. Best-effort.
+        try:
+            active = await nautobot_client.get_status_by_name(
+                "Active", content_type="dcim.device",
+            )
+            if active and active.get("id"):
+                await nautobot_client.set_device_status(
+                    device_id, active["id"],
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("phase2_status_restore_failed",
+                        "could not restore device status to Active",
+                        context={"device_id": device_id, "error": str(exc)})
+    else:
+        await defer_device_poll(
+            device_name, "phase2_populate", 300,
+            error=result.error,
+        )
+        # Transition device status so Prompt 9's gate short-circuits the
+        # core collectors. Best-effort: if the status flip itself fails,
+        # log and continue — the retry mechanism still drives toward
+        # eventual success.
+        try:
+            incomplete = await nautobot_client.get_status_by_name(
+                "Onboarding Incomplete", content_type="dcim.device",
+            )
+            if incomplete and incomplete.get("id"):
+                await nautobot_client.set_device_status(
+                    device_id, incomplete["id"],
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("phase2_status_flip_failed",
+                        "could not mark device Onboarding Incomplete",
+                        context={"device_id": device_id, "error": str(exc)})
+
+    return {"device_name": device_name, "job_type": "phase2_populate",
+            "success": result.success,
+            "error": result.error,
+            "count": result.interfaces_added + result.ips_added,
+            "duration": round(duration, 2)}
 
 
 # ---------------------------------------------------------------------------
