@@ -44,6 +44,7 @@ class _Ctx:
     probe: AsyncMock
     arista_probe: AsyncMock
     paloalto_probe: AsyncMock
+    fortinet_probe: AsyncMock
     find_device_at_location: AsyncMock
     get_role_by_name: AsyncMock
     get_devicetype_by_model: AsyncMock
@@ -102,6 +103,7 @@ def orch_mocks():
         "probe": AsyncMock(return_value=facts),
         "arista_probe": AsyncMock(return_value=facts),
         "paloalto_probe": AsyncMock(return_value=facts),
+        "fortinet_probe": AsyncMock(return_value=facts),
         "find_device_at_location": AsyncMock(return_value=None),
         "get_role_by_name": AsyncMock(return_value={"id": "role-uuid",
                                                      "name": "Switch"}),
@@ -144,6 +146,7 @@ def orch_mocks():
         (orch._junos_probe, "probe_device_facts", patches["probe"]),
         (orch._arista_probe, "probe_device_facts", patches["arista_probe"]),
         (orch._paloalto_probe, "probe_device_facts", patches["paloalto_probe"]),
+        (orch._fortinet_probe, "probe_device_facts", patches["fortinet_probe"]),
         (nautobot_client, "find_device_at_location", patches["find_device_at_location"]),
         (nautobot_client, "get_role_by_name", patches["get_role_by_name"]),
         (nautobot_client, "get_devicetype_by_model", patches["get_devicetype_by_model"]),
@@ -561,6 +564,51 @@ async def test_palo_alto_happy_path_uses_mgmt_interface(orch_mocks):
     }
     orch_mocks.get_devicetype_by_model.return_value = {
         "id": "dt-pa440", "model": "PA-440",
+    }
+    orch_mocks.get_role_by_name.return_value = {"id": "role-fw", "name": "Firewall"}
+    result = await _call()
+    assert result.success is True
+    orch_mocks.ensure_management_interface.assert_awaited_once_with(
+        "dev-uuid", "mgmt", "status-active",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Prompt 7.5: FortiGate dispatch
+# ---------------------------------------------------------------------------
+
+async def test_fortinet_vendor_dispatches_to_fortinet_probe(orch_mocks):
+    """FortiGate is now in SUPPORTED_VENDORS; _probe_vendor must route to
+    the FortiGate probe module, not any other vendor probe."""
+    orch_mocks.classify.return_value = _make_classifier_result(
+        vendor="fortinet", platform="fortinet_fortios", classification="firewall",
+    )
+    orch_mocks.get_platform_by_name.return_value = {
+        "id": "plat-fortios", "name": "fortinet_fortios",
+    }
+    orch_mocks.get_devicetype_by_model.return_value = {
+        "id": "dt-fgt40f", "model": "FortiGate-40F",
+    }
+    orch_mocks.get_role_by_name.return_value = {"id": "role-fw", "name": "Firewall"}
+    result = await _call()
+    assert result.success is True
+    assert orch_mocks.fortinet_probe.await_count == 1
+    # No other vendor probe called.
+    assert orch_mocks.probe.await_count == 0         # Junos
+    assert orch_mocks.arista_probe.await_count == 0
+    assert orch_mocks.paloalto_probe.await_count == 0
+
+
+async def test_fortinet_happy_path_uses_mgmt_interface(orch_mocks):
+    """FortiGate MGMT_INTERFACE_NAME entry must resolve to 'mgmt'."""
+    orch_mocks.classify.return_value = _make_classifier_result(
+        vendor="fortinet", platform="fortinet_fortios", classification="firewall",
+    )
+    orch_mocks.get_platform_by_name.return_value = {
+        "id": "plat-fortios", "name": "fortinet_fortios",
+    }
+    orch_mocks.get_devicetype_by_model.return_value = {
+        "id": "dt-fgt40f", "model": "FortiGate-40F",
     }
     orch_mocks.get_role_by_name.return_value = {"id": "role-fw", "name": "Firewall"}
     result = await _call()

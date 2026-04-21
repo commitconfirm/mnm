@@ -127,6 +127,10 @@ OIDS: dict[str, str] = {
     # version string, so we read panSysSwVersion directly.
     "PAN-COMMON-MIB::panSysSwVersion":    "1.3.6.1.4.1.25461.2.1.2.1.1.0",
     "PAN-COMMON-MIB::panSysSerialNumber": "1.3.6.1.4.1.25461.2.1.2.1.3.0",
+    # FortiGate enterprise scalar (FORTINET-CORE-MIB) — chassis serial.
+    # No enterprise scalar for chassis model name; ENTITY-MIB walk is the
+    # fallback for product-name discovery.
+    "FORTINET-CORE-MIB::fnSysSerial":     "1.3.6.1.4.1.12356.1.2.0",
 }
 
 
