@@ -435,66 +435,116 @@ async def sweep_history():
 async def phase2_status(device_name: str):
     """Return the Phase 2 onboarding status for a device.
 
-    Derives a coarse ``state`` from the ``device_polls`` row for
-    ``job_type="phase2_populate"``:
-
-      * ``pending`` — row exists, never attempted (``last_attempt IS NULL``).
-      * ``running`` — row is enabled AND a dispatch is underway; we
-        approximate this by ``last_attempt`` being newer than
-        ``last_success`` within the last 60 s.
-      * ``completed`` — ``enabled=False`` and ``last_success IS NOT NULL``.
-      * ``failed`` — enabled, ``last_attempt`` newer than
-        ``last_success``, not within the running window.
-
-    Returns 404 when no row exists for the device.
+    State-derivation logic is shared with the ``/api/nodes`` list via
+    :func:`app.polling.get_phase2_state`. Returns 404 when no
+    ``phase2_populate`` row exists (legacy plugin-onboarded devices).
     """
-    from datetime import datetime, timezone, timedelta
-    from sqlalchemy import select as sa_select
     from app import db as app_db
-
     if not app_db.is_ready():
         raise HTTPException(status_code=503, detail="controller DB not ready")
-
-    async with app_db.SessionLocal() as session:
-        row = (await session.execute(
-            sa_select(app_db.DevicePoll).where(
-                app_db.DevicePoll.device_name == device_name,
-                app_db.DevicePoll.job_type == "phase2_populate",
-            )
-        )).scalar_one_or_none()
-
-    if row is None:
+    state = await polling.get_phase2_state(device_name)
+    if state is None:
         raise HTTPException(
             status_code=404,
             detail=f"no phase2_populate row for device {device_name!r}",
         )
+    return state
 
-    now = datetime.now(timezone.utc)
-    last_attempt = row.last_attempt
-    last_success = row.last_success
-    enabled = bool(row.enabled)
 
-    if not enabled and last_success is not None:
-        state = "completed"
-    elif last_attempt is None:
-        state = "pending"
-    elif (last_success is None or last_attempt > last_success) \
-            and last_attempt > now - timedelta(seconds=60):
-        state = "running"
-    elif last_success is None or (last_attempt and last_attempt > last_success):
-        state = "failed"
-    else:
-        state = "pending"
+# ---------------------------------------------------------------------------
+# Direct-REST onboarding (v1.0 Prompt 8).
+#
+# ``/api/onboarding/direct-rest`` is now the default onboarding path from
+# the Discover UI and the Nodes "Add Node" form. The legacy plugin-based
+# path at ``/api/nautobot/onboard`` + ``/api/nautobot/sync-network-data``
+# is retained per operator Q1 (plugin stays installed during v1.0) but
+# is no longer reachable from the UI. Prompt 10 (deferred) removes it.
+# ---------------------------------------------------------------------------
+
+
+class DirectRESTOnboardRequest(BaseModel):
+    ip: str
+    snmp_community: str
+    secrets_group_id: str
+    location_id: str
+
+
+@app.post("/api/onboarding/direct-rest",
+          dependencies=[Depends(require_auth)])
+async def onboarding_direct_rest(body: DirectRESTOnboardRequest):
+    """Invoke the direct-REST Phase 1 orchestrator synchronously.
+
+    Returns after Phase 1 completes (seconds). Phase 2 is scheduled by
+    Step G.5 as a one-shot polling-job row; the frontend polls
+    ``/api/onboarding/phase2-status/{device_name}`` to observe progress.
+
+    Credential hygiene: ``snmp_community`` is sensitive. Never logged;
+    only its presence (``snmp_community_set: bool``) is recorded.
+    """
+    from app.onboarding import orchestrator
+
+    log.info("onboarding_api_called",
+             "Direct-REST onboarding invoked via API",
+             context={"ip": body.ip,
+                      "location_id": body.location_id,
+                      "secrets_group_id": body.secrets_group_id,
+                      "snmp_community_set": bool(body.snmp_community)})
+
+    try:
+        result = await orchestrator.onboard_device(
+            ip=body.ip,
+            snmp_community=body.snmp_community,
+            secrets_group_id=body.secrets_group_id,
+            location_id=body.location_id,
+        )
+    except Exception as exc:
+        log.error("onboarding_api_exception",
+                  "Direct-REST orchestrator raised unexpectedly",
+                  context={"ip": body.ip, "error": str(exc)}, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    # Derive error_type from the orchestrator's error string prefix for
+    # UI-side dispatch (AlreadyOnboardedError vs ClassificationFailedError
+    # vs UnsupportedVendorError vs NautobotWriteError vs ProbeFailedError).
+    error_type: "str | None" = None
+    if result.error:
+        prefix = result.error.split(":", 1)[0].strip()
+        error_type = prefix or None
 
     return {
-        "device_name": device_name,
-        "state": state,
-        "enabled": enabled,
-        "last_attempt": last_attempt.isoformat() if last_attempt else None,
-        "last_success": last_success.isoformat() if last_success else None,
-        "next_due": row.next_due.isoformat() if row.next_due else None,
-        "last_error": row.last_error,
+        "success": result.success,
+        "device_id": result.device_id,
+        "device_name": result.device_name,
+        "phase1_steps_completed": result.phase1_steps_completed,
+        "error": result.error,
+        "error_type": error_type,
+        "rollback_performed": result.rollback_performed,
     }
+
+
+@app.post("/api/onboarding/retry-phase2/{device_name}",
+          dependencies=[Depends(require_auth)])
+async def onboarding_retry_phase2(device_name: str):
+    """Re-enable the ``phase2_populate`` row for a device.
+
+    Operator-triggered retry for devices stuck in Onboarding Incomplete.
+    Uses :func:`polling.ensure_phase2_populate_row`, which is idempotent —
+    re-enables a disabled row and resets ``next_due`` to now so the next
+    polling-loop tick picks it up.
+    """
+    if not db.is_ready():
+        raise HTTPException(status_code=503, detail="controller DB not ready")
+
+    try:
+        await polling.ensure_phase2_populate_row(device_name)
+    except Exception as exc:
+        log.error("phase2_retry_failed",
+                  "ensure_phase2_populate_row raised",
+                  context={"device_name": device_name, "error": str(exc)},
+                  exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    return {"success": True, "device_name": device_name, "error": None}
 
 
 # In-memory state for the sync-incomplete progress tracker (Rule 9 — every
@@ -856,9 +906,16 @@ class OnboardRequest(BaseModel):
     secrets_group_id: str
 
 
+# LEGACY plugin-based onboarding path (v1.0 Q1: plugin stays installed
+# during v1.0 release). As of Prompt 8 this endpoint is no longer called
+# from the Discover UI or the Nodes UI — both route through
+# ``/api/onboarding/direct-rest`` instead. Prompt 10 (deferred out of
+# v1.0 scope per Q1) removes this handler and its ``submit_onboarding_job``
+# dependency entirely.
 @app.post("/api/discover/onboard", dependencies=[Depends(require_auth)])
 async def onboard_single(body: OnboardRequest):
-    """Onboard a single device (e.g., from LLDP neighbor advisory)."""
+    """LEGACY plugin-based onboarding — retained for API callers, not
+    reachable from the UI."""
     try:
         result = await nautobot_client.submit_onboarding_job(
             ip=body.ip,
@@ -1020,9 +1077,14 @@ class SyncNetworkDataRequest(BaseModel):
     dryrun: bool = False
 
 
+# LEGACY plugin Phase 2 wrapper. As of Prompt 8 Phase 2 network sync is
+# driven automatically by the polling-loop one-shot ``phase2_populate``
+# job (see ``onboarding/network_sync.py``). This endpoint is retained
+# per Q1 but is no longer called from the UI. Prompt 10 removes it.
 @app.post("/api/nautobot/sync-network-data", dependencies=[Depends(require_auth)])
 async def sync_network_data(body: SyncNetworkDataRequest):
-    """Trigger 'Sync Network Data From Network' job for specified or all devices."""
+    """LEGACY plugin 'Sync Network Data From Network' job wrapper —
+    retained for API callers, not reachable from the UI."""
     try:
         result = await nautobot_client.submit_sync_network_data(
             device_ids=body.device_ids,
@@ -2058,6 +2120,14 @@ async def list_nodes():
         primary_ip = dev.get("primary_ip4") or dev.get("primary_ip") or {}
         ip_display = primary_ip.get("display", "") if isinstance(primary_ip, dict) else ""
 
+        # Prompt 8: expose Nautobot ``status`` and derived Phase 2 state
+        # so the Nodes UI can surface onboarding progress + Retry Phase 2
+        # button without per-row /api/onboarding/phase2-status polling.
+        status_obj = dev.get("status") or {}
+        status_name = status_obj.get("display", "") if isinstance(status_obj, dict) else ""
+        phase2 = await polling.get_phase2_state(name)
+        phase2_state = phase2["state"] if phase2 else None
+
         nodes.append({
             "name": name,
             "id": dev.get("id", ""),
@@ -2065,6 +2135,8 @@ async def list_nodes():
             "primary_ip": ip_display,
             "role": role_name,
             "location": location_name,
+            "status_name": status_name,
+            "phase2_state": phase2_state,
             "health": health,
             "health_label": health_label,
             "last_polled": last_polled,

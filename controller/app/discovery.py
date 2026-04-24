@@ -1424,6 +1424,70 @@ sys.stderr.write('SUMMARY: fixed=' + str(fixed) + ' skipped=' + str(skipped) + '
         return {"fixed": 0, "skipped": 0, "failed": 0, "error": str(exc)}
 
 
+async def _onboard_host_direct(
+    ip: str,
+    location_id: str,
+    secrets_group_id: str,
+    snmp_community: str,
+) -> bool:
+    """Onboard a single host via the direct-REST orchestrator (v1.0 Prompt 8).
+
+    Replaces the legacy :func:`_onboard_host` plugin-based path for all
+    UI-initiated onboarding (sweep, auto-discover, retry buttons, Nodes
+    Add Node form). Updates the in-memory ``_onboarding_state`` progress
+    tracker so the Discover UI's existing polling of
+    ``/api/discover/onboarding/{ip}`` still works.
+
+    Phase 2 is scheduled by the orchestrator itself (Step G.5) as a
+    one-shot polling-job row; the UI polls
+    ``/api/onboarding/phase2-status/{device_name}`` for Phase 2 progress
+    independently. We return ``True`` as soon as Phase 1 succeeds —
+    sweep-side callers only care whether the device is usable in
+    Nautobot after Phase 1, and Phase 2 populating the full interface
+    set happens asynchronously.
+
+    The legacy :func:`_onboard_host` below is retained per operator Q1
+    (plugin stays installed during v1.0) but is no longer called from
+    any UI path after Prompt 8. Prompt 10 removes it.
+    """
+    from app.onboarding.orchestrator import onboard_device
+
+    _onb_set(ip, "submitting", "Invoking direct-REST orchestrator (Phase 1)")
+
+    try:
+        result = await onboard_device(
+            ip=ip,
+            snmp_community=snmp_community,
+            secrets_group_id=secrets_group_id,
+            location_id=location_id,
+        )
+    except Exception as exc:
+        log.error("onboard_direct_exception",
+                  "direct-REST orchestrator raised",
+                  context={"ip": ip, "error": str(exc)}, exc_info=True)
+        _onb_set(ip, "failed", f"Orchestrator raised: {exc}", error=str(exc))
+        return False
+
+    classification = result.classification
+    platform = classification.platform if classification else None
+
+    if result.success:
+        _onb_set(ip, "succeeded",
+                 f"Phase 1 complete ({result.device_name}); Phase 2 scheduled",
+                 platform=platform, device_id=result.device_id,
+                 device_name=result.device_name)
+        return True
+
+    # Failure cases: surface error_type in the message for UI dispatch.
+    # error_type is the exception class prefix in the orchestrator's
+    # error string (e.g. "AlreadyOnboardedError: device ...").
+    err = result.error or "Unknown orchestrator failure"
+    error_type = err.split(":", 1)[0].strip() if err else ""
+    _onb_set(ip, "failed", err, error=err, platform=platform,
+             device_id=result.device_id, error_type=error_type)
+    return False
+
+
 async def _onboard_host(
     ip: str,
     location_id: str,
@@ -1431,7 +1495,9 @@ async def _onboard_host(
     snmp_data: dict | None = None,
     fingerprint: dict | None = None,
 ) -> bool:
-    """Submit onboarding job for a single host and poll for completion.
+    """LEGACY plugin-based onboarding — kept per operator Q1 for API
+    back-compat, NOT called from the UI after Prompt 8. All UI-initiated
+    onboarding flows through :func:`_onboard_host_direct` instead.
 
     Auto-detects the platform from SNMP sysDescr and SSH banner, then passes
     it to the onboarding job so Netmiko doesn't have to guess the driver.
@@ -1900,8 +1966,9 @@ async def sweep(
 
         if host["onboard_eligible"]:
             host["status"] = SweepStatus.ONBOARDING
-            success = await _onboard_host(ip, location_id, secrets_group_id, snmp_data=host.get("snmp"),
-                                            fingerprint={"ssh_banner": host.get("ssh_banner", ""), "http_title": host.get("http_title", "")})
+            success = await _onboard_host_direct(
+                ip, location_id, secrets_group_id, snmp_community,
+            )
             if success:
                 host["status"] = SweepStatus.ONBOARDED
                 host["onboarded"] = True

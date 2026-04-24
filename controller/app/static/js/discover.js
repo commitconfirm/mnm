@@ -677,23 +677,67 @@ checkAuth().then(() => {
   }).catch(() => {});
 });
 
-// Retry failed onboarding for a single IP
+// Retry onboarding for a single IP via the direct-REST orchestrator
+// (v1.0 Prompt 8). The sweep's inline onboarding already uses the new
+// path; this button is the manual retry affordance for operator-
+// initiated retries after a sweep attempt failed.
+//
+// The orchestrator returns synchronously after Phase 1 (seconds). Phase 2
+// runs asynchronously via the polling loop; the sweep-status poll picks
+// up the eventual state transition. We also poll the dedicated Phase 2
+// endpoint on success so the operator sees progress without waiting for
+// the next sweep-status tick.
+//
+// Note the cache-timing race flagged in Prompt 7.5: the first polling-
+// loop dispatch of Phase 2 may return "Device not found in Nautobot"
+// because get_devices is cached. If the operator sees "failed" state
+// immediately after a successful Phase 1, the same retry button here
+// (or the Retry Phase 2 button on the Nodes page) will drive it to
+// success. Prompt 9 fixes at the polling layer.
 async function retryOnboard(ip) {
   if (!ip) return;
   try {
-    var r = await fetch('/api/discover/onboard', {
+    // Pull location / secrets / community from the sweep form — the
+    // operator already configured these to run the sweep, so they're
+    // the same credentials we want for the retry.
+    var locEl = document.getElementById('location-select');
+    var sgEl = document.getElementById('creds-select');
+    var commEl = document.getElementById('snmp-community');
+    var location_id = locEl ? locEl.value : '';
+    var secrets_group_id = sgEl ? sgEl.value : '';
+    var snmp_community = commEl ? commEl.value : '';
+    if (!location_id || !secrets_group_id || !snmp_community) {
+      alert('Retry needs Location, SecretsGroup, and SNMP Community from the sweep form — configure them and try again.');
+      return;
+    }
+    var r = await fetch('/api/onboarding/direct-rest', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ip: ip }),
+      body: JSON.stringify({
+        ip: ip,
+        snmp_community: snmp_community,
+        secrets_group_id: secrets_group_id,
+        location_id: location_id,
+      }),
     });
-    if (r.ok) {
-      var d = await r.json();
-      alert('Onboarding re-submitted for ' + ip);
-      pollStatus();
-    } else {
+    if (!r.ok) {
       var err = await r.json().catch(function() { return {}; });
       alert('Retry failed: ' + (err.detail || r.statusText));
+      return;
     }
+    var d = await r.json();
+    if (!d.success) {
+      if (d.error_type === 'AlreadyOnboardedError') {
+        alert('Already onboarded as "' + (d.device_name || 'unknown') + '". Go to Nodes to manage.');
+      } else {
+        alert('Onboarding failed (' + (d.error_type || 'unknown') + '): ' + (d.error || ''));
+      }
+      pollStatus();
+      return;
+    }
+    // Phase 1 succeeded. Sweep-status poll will show "succeeded"
+    // momentarily; Phase 2 runs in the background via the polling loop.
+    pollStatus();
   } catch (e) {
     alert('Retry failed: ' + e.message);
   }

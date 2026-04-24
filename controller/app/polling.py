@@ -145,6 +145,60 @@ async def disable_device_poll(device_name: str, job_type: str) -> None:
             await session.commit()
 
 
+async def get_phase2_state(device_name: str) -> "dict | None":
+    """Compute the Phase 2 state for one device.
+
+    Returns ``None`` when no ``phase2_populate`` row exists (legacy
+    plugin-onboarded devices). Otherwise returns a dict suitable for
+    both the ``GET /api/onboarding/phase2-status/{device_name}`` endpoint
+    and the ``/api/nodes`` list response. ``state`` is one of:
+
+      * ``pending`` — row exists, never attempted (``last_attempt`` is
+        ``None``).
+      * ``running`` — row enabled, ``last_attempt`` is newer than
+        ``last_success`` within the last 60 s.
+      * ``completed`` — ``enabled=False`` and ``last_success`` populated.
+      * ``failed`` — row enabled, ``last_attempt`` newer than
+        ``last_success``, outside the running window.
+    """
+    if not db.is_ready():
+        return None
+    async with db.SessionLocal() as session:
+        from sqlalchemy import select as sa_select
+        row = (await session.execute(
+            sa_select(db.DevicePoll).where(
+                db.DevicePoll.device_name == device_name,
+                db.DevicePoll.job_type == "phase2_populate",
+            )
+        )).scalar_one_or_none()
+    if row is None:
+        return None
+    now = _utcnow()
+    last_attempt = row.last_attempt
+    last_success = row.last_success
+    enabled = bool(row.enabled)
+    if not enabled and last_success is not None:
+        state = "completed"
+    elif last_attempt is None:
+        state = "pending"
+    elif (last_success is None or last_attempt > last_success) \
+            and last_attempt > now - timedelta(seconds=60):
+        state = "running"
+    elif last_success is None or (last_attempt and last_attempt > last_success):
+        state = "failed"
+    else:
+        state = "pending"
+    return {
+        "device_name": device_name,
+        "state": state,
+        "enabled": enabled,
+        "last_attempt": last_attempt.isoformat() if last_attempt else None,
+        "last_success": last_success.isoformat() if last_success else None,
+        "next_due": row.next_due.isoformat() if row.next_due else None,
+        "last_error": row.last_error,
+    }
+
+
 async def defer_device_poll(
     device_name: str, job_type: str, retry_in_seconds: int,
     *, error: "str | None" = None,
