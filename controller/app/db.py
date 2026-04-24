@@ -494,6 +494,14 @@ class NodeLldpEntry(Base):
     remote_port = Column(Text, nullable=False, default="")
     remote_chassis_id = Column(Text)
     remote_management_ip = Column(Text)
+    # Block C expansion columns (migration c3208527926f). Populated by the
+    # SNMP-based LLDP collector landing in Block C P5; NULL for rows from
+    # the NAPALM path still in use until then.
+    local_port_ifindex = Column(Integer, nullable=True)
+    local_port_name = Column(Text, nullable=True)
+    remote_chassis_id_subtype = Column(Text, nullable=True)
+    remote_port_id_subtype = Column(Text, nullable=True)
+    remote_system_description = Column(Text, nullable=True)
     collected_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False, index=True)
 
     __table_args__ = (
@@ -509,6 +517,11 @@ class NodeLldpEntry(Base):
             "remote_port": self.remote_port or "",
             "remote_chassis_id": self.remote_chassis_id or "",
             "remote_management_ip": self.remote_management_ip or "",
+            "local_port_ifindex": self.local_port_ifindex,
+            "local_port_name": self.local_port_name or "",
+            "remote_chassis_id_subtype": self.remote_chassis_id_subtype or "",
+            "remote_port_id_subtype": self.remote_port_id_subtype or "",
+            "remote_system_description": self.remote_system_description or "",
             "collected_at": self.collected_at.isoformat() if self.collected_at else "",
         }
 

@@ -168,6 +168,155 @@ async def test_baseline_migration_downgradeable(throwaway_db):
     assert app_tables == set(), f"unexpected leftover tables: {app_tables}"
 
 
+async def test_lldp_expansion_columns_present_at_head(throwaway_db):
+    """After upgrade head, node_lldp_entries has the 5 Block C expansion
+    columns with the expected types and nullability."""
+    import asyncio
+    import asyncpg
+    from alembic import command
+
+    cfg = _alembic_config_for(throwaway_db)
+    await asyncio.to_thread(command.upgrade, cfg, "head")
+
+    conn = await asyncpg.connect(
+        host=os.environ["MNM_DB_HOST"],
+        port=int(os.environ.get("MNM_DB_PORT", "5432")),
+        user=os.environ.get("MNM_DB_USER", "nautobot"),
+        password=os.environ.get("MNM_DB_PASSWORD", ""),
+        database=throwaway_db,
+    )
+    try:
+        rows = await conn.fetch(
+            "SELECT column_name, data_type, is_nullable "
+            "FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = 'node_lldp_entries'"
+        )
+    finally:
+        await conn.close()
+    cols = {r["column_name"]: (r["data_type"], r["is_nullable"]) for r in rows}
+
+    assert cols["local_port_ifindex"] == ("integer", "YES")
+    assert cols["local_port_name"] == ("text", "YES")
+    assert cols["remote_chassis_id_subtype"] == ("text", "YES")
+    assert cols["remote_port_id_subtype"] == ("text", "YES")
+    assert cols["remote_system_description"] == ("text", "YES")
+
+
+async def test_lldp_expansion_roundtrip(throwaway_db):
+    """upgrade head → downgrade -1 removes the 5 columns;
+    upgrade head again re-adds them. Exercises both directions of the
+    c3208527926f migration without data on the table."""
+    import asyncio
+    import asyncpg
+    from alembic import command
+
+    cfg = _alembic_config_for(throwaway_db)
+    await asyncio.to_thread(command.upgrade, cfg, "head")
+    await asyncio.to_thread(command.downgrade, cfg, "-1")
+
+    async def _columns():
+        conn = await asyncpg.connect(
+            host=os.environ["MNM_DB_HOST"],
+            port=int(os.environ.get("MNM_DB_PORT", "5432")),
+            user=os.environ.get("MNM_DB_USER", "nautobot"),
+            password=os.environ.get("MNM_DB_PASSWORD", ""),
+            database=throwaway_db,
+        )
+        try:
+            rows = await conn.fetch(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema='public' AND table_name='node_lldp_entries'"
+            )
+            return {r["column_name"] for r in rows}
+        finally:
+            await conn.close()
+
+    after_down = await _columns()
+    expansion = {"local_port_ifindex", "local_port_name",
+                 "remote_chassis_id_subtype", "remote_port_id_subtype",
+                 "remote_system_description"}
+    assert not (expansion & after_down), \
+        f"expansion columns still present after downgrade: {expansion & after_down}"
+    # Pre-existing columns must survive the downgrade.
+    for col in ("local_interface", "remote_system_name", "remote_port"):
+        assert col in after_down, f"pre-expansion column {col} dropped unexpectedly"
+
+    await asyncio.to_thread(command.upgrade, cfg, "head")
+    after_up = await _columns()
+    assert expansion.issubset(after_up), \
+        f"expansion columns missing after re-upgrade: {expansion - after_up}"
+
+
+async def test_lldp_expansion_preserves_existing_rows(throwaway_db):
+    """Data-preservation check: a row inserted at baseline (before the
+    c3208527926f upgrade) survives the upgrade with NULL in all 5 new
+    columns and unchanged values in the pre-existing columns."""
+    import asyncio
+    import asyncpg
+    from alembic import command
+    from datetime import datetime, timezone
+
+    cfg = _alembic_config_for(throwaway_db)
+    # Stop at the baseline revision so the new columns don't yet exist.
+    await asyncio.to_thread(command.upgrade, cfg, "a1c5c8bbad37")
+
+    conn = await asyncpg.connect(
+        host=os.environ["MNM_DB_HOST"],
+        port=int(os.environ.get("MNM_DB_PORT", "5432")),
+        user=os.environ.get("MNM_DB_USER", "nautobot"),
+        password=os.environ.get("MNM_DB_PASSWORD", ""),
+        database=throwaway_db,
+    )
+    try:
+        await conn.execute(
+            "INSERT INTO node_lldp_entries "
+            "(node_name, local_interface, remote_system_name, remote_port, "
+            " remote_chassis_id, remote_management_ip, collected_at) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "ex2300-24p", "ge-0/0/5", "srx320", "ge-0/0/0",
+            "aa:bb:cc:dd:ee:ff", "192.0.2.1",
+            datetime.now(timezone.utc),
+        )
+    finally:
+        await conn.close()
+
+    # Apply the expansion migration.
+    await asyncio.to_thread(command.upgrade, cfg, "head")
+
+    conn = await asyncpg.connect(
+        host=os.environ["MNM_DB_HOST"],
+        port=int(os.environ.get("MNM_DB_PORT", "5432")),
+        user=os.environ.get("MNM_DB_USER", "nautobot"),
+        password=os.environ.get("MNM_DB_PASSWORD", ""),
+        database=throwaway_db,
+    )
+    try:
+        row = await conn.fetchrow(
+            "SELECT node_name, local_interface, remote_system_name, "
+            "remote_port, remote_chassis_id, remote_management_ip, "
+            "local_port_ifindex, local_port_name, "
+            "remote_chassis_id_subtype, remote_port_id_subtype, "
+            "remote_system_description "
+            "FROM node_lldp_entries"
+        )
+    finally:
+        await conn.close()
+    assert row is not None
+    # Pre-existing columns unchanged.
+    assert row["node_name"] == "ex2300-24p"
+    assert row["local_interface"] == "ge-0/0/5"
+    assert row["remote_system_name"] == "srx320"
+    assert row["remote_port"] == "ge-0/0/0"
+    assert row["remote_chassis_id"] == "aa:bb:cc:dd:ee:ff"
+    assert row["remote_management_ip"] == "192.0.2.1"
+    # Expansion columns NULL.
+    assert row["local_port_ifindex"] is None
+    assert row["local_port_name"] is None
+    assert row["remote_chassis_id_subtype"] is None
+    assert row["remote_port_id_subtype"] is None
+    assert row["remote_system_description"] is None
+
+
 async def test_legacy_schema_detection_and_stamp(throwaway_db):
     """Tables created via Base.metadata.create_all are detected as legacy
     and alembic stamp head marks the DB without re-running migrations."""
