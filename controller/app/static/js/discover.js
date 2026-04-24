@@ -257,12 +257,12 @@ function renderTable(hosts, onboardingByIp) {
       <td>${escHtml(ip)}</td>
       <td>${escHtml(info.dns_name || '-')}</td>
       <td>${escHtml(info.mac_vendor || '-')}</td>
-      <td>${escHtml(ports)}</td>
+      <td class="align-center">${escHtml(ports)}</td>
       <td>${escHtml((info.snmp && info.snmp.sysName || '') || '-')}</td>
-      <td>${sshHttp}</td>
-      <td>${classificationBadge(info.classification)}</td>
-      <td>${statusBadge(info.status)}</td>
-      <td>${actionParts.join(' ')}</td>
+      <td class="align-center">${sshHttp}</td>
+      <td class="align-center">${classificationBadge(info.classification)}</td>
+      <td class="align-center">${statusBadge(info.status)}</td>
+      <td class="align-center">${actionParts.join(' ')}</td>
     </tr>`);
 
     // Detail row (preserve expanded state across re-renders)
@@ -522,12 +522,12 @@ async function loadHistory() {
       const dur = h.duration_seconds != null ? h.duration_seconds + 's' : '-';
       return `<tr>
         <td>${started}</td>
-        <td>${dur}</td>
+        <td class="align-center">${dur}</td>
         <td>${escHtml(ranges)}</td>
-        <td>${s.alive || 0}</td>
-        <td>${s.onboarded || 0}</td>
-        <td>${s.recorded || 0}</td>
-        <td>${s.failed || 0}</td>
+        <td class="align-center">${s.alive || 0}</td>
+        <td class="align-center">${s.onboarded || 0}</td>
+        <td class="align-center">${s.recorded || 0}</td>
+        <td class="align-center">${s.failed || 0}</td>
       </tr>`;
     }).join('');
   } catch (e) {

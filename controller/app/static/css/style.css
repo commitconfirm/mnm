@@ -196,6 +196,102 @@ th.center, td.center {
   text-align: center;
 }
 
+/* Column-alignment conventions (docs/UI_CONVENTIONS.md):
+   - icon cells centered
+   - numeric cells centered
+   - text cells left-aligned (default)
+   - headers match their data cells. */
+th.align-center, td.align-center { text-align: center; }
+th.align-center .dot-wrap,
+td.align-center .dot-wrap { justify-content: center; }
+
+/* Column-header help icon + tooltip. Use MNMColHelp.icon(...) to
+   render inside a DataTable column ``label``. */
+.col-help-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  margin-left: 4px;
+  cursor: help;
+  color: var(--text-muted);
+  vertical-align: middle;
+}
+.col-help-icon {
+  font-size: 0.95em;
+  line-height: 1;
+  opacity: 0.7;
+}
+.col-help-wrap:hover .col-help-icon,
+.col-help-wrap:focus .col-help-icon { opacity: 1; color: var(--accent); }
+.col-help-tip {
+  display: none;
+  position: absolute;
+  bottom: calc(100% + 10px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--tooltip-bg);
+  border: 1px solid var(--tooltip-border);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  font-size: 0.78rem;
+  font-weight: 400;
+  letter-spacing: normal;
+  text-transform: none;
+  color: var(--tooltip-text);
+  min-width: 260px;
+  max-width: 360px;
+  z-index: 200;
+  box-shadow: 0 4px 16px var(--tooltip-shadow);
+  text-align: left;
+}
+.col-help-wrap:hover .col-help-tip,
+.col-help-wrap:focus-within .col-help-tip { display: block; }
+.col-help-title {
+  font-weight: 600;
+  margin-bottom: 6px;
+  color: var(--text);
+}
+.col-help-item {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 4px;
+  line-height: 1.4;
+}
+.col-help-key {
+  flex: 0 0 auto;
+  font-weight: 600;
+  color: var(--text);
+}
+.col-help-desc { color: var(--text-muted); }
+.col-help-link {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+.col-help-link a { font-size: 0.75rem; }
+
+/* Table-export buttons (CSV / JSON). Sit in the top-right of a
+   card's table container. */
+.table-export-buttons {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
+/* Inline muted small text — used by the Nodes coverage indicator
+   next to the Poll Jobs dot strip. */
+.muted.small { color: var(--text-muted); font-size: 0.75rem; }
+
+/* Section head: heading on the left, table-export buttons on the right.
+   Used by Investigations result sections. */
+.section-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.section-head h3 { margin: 0; }
+
 td {
   padding: 8px 12px;
   border-bottom: 1px solid var(--border);

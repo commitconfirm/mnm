@@ -163,14 +163,22 @@ class DataTable {
     // Build visible columns
     const visCols = this.columns.filter(c => this.visibleColumns.includes(c.key));
 
-    // Build table header
+    // Build table header. ``align: 'center'`` on a column option
+    // sets align-center on both <th> and each <td> (icon and numeric
+    // columns; see docs/UI_CONVENTIONS.md).
     const theadCells = visCols.map(c => {
+      const alignCls = c.align === 'center' ? ' align-center' : '';
+      const exportAttr = c.exportLabel != null
+        ? ' data-export-label="' + this._escHtml(c.exportLabel) + '"'
+        : '';
       if (c.sortable) {
-        let cls = 'sortable';
+        let cls = 'sortable' + alignCls;
         if (this.sortCol === c.key) cls += ' ' + this.sortDir;
-        return '<th class="' + cls + '" data-dt-sort="' + c.key + '">' + c.label + '</th>';
+        return '<th class="' + cls + '" data-dt-sort="' + c.key + '"' + exportAttr + '>'
+          + c.label + '</th>';
       }
-      return '<th>' + c.label + '</th>';
+      return '<th class="' + ('plain' + alignCls).trim() + '"' + exportAttr + '>'
+        + c.label + '</th>';
     }).join('');
 
     // Build table body
@@ -178,7 +186,19 @@ class DataTable {
       const cells = visCols.map(c => {
         const val = row[c.key];
         const rendered = c.render ? c.render(val, row) : this._escHtml(val != null ? String(val) : '-');
-        return '<td>' + rendered + '</td>';
+        const alignCls = c.align === 'center' ? ' class="align-center"' : '';
+        // data-export lets table-export.js surface the semantic value
+        // rather than an empty string for icon-only cells.
+        let exportAttr = '';
+        if (c.exportValue) {
+          const ev = c.exportValue(val, row);
+          if (ev != null) exportAttr = ' data-export="' + this._escHtml(String(ev)) + '"';
+        } else if (val != null && typeof val !== 'object' && c.render) {
+          // If the render produces HTML (e.g. icons, badges), preserve
+          // the raw value for export so operators get the data, not markup.
+          exportAttr = ' data-export="' + this._escHtml(String(val)) + '"';
+        }
+        return '<td' + alignCls + exportAttr + '>' + rendered + '</td>';
       }).join('');
       return '<tr>' + cells + '</tr>';
     }).join('');

@@ -25,7 +25,19 @@ function makeTable(containerId, columns, storageKey, data) {
   });
   t.setData(data);
   t.render();
+  wireExportButtonsFor(containerId);
   return t;
+}
+
+// Wire CSV/JSON export buttons declared with
+// data-export-for="<containerId>" in the section-head.
+function wireExportButtonsFor(containerId) {
+  var host = document.querySelector('[data-export-for="' + containerId + '"]');
+  if (!host || host.dataset.wired) return;
+  var base = host.getAttribute('data-export-base') || 'mnm-table';
+  var built = MNMTableExport.makeButtons('#' + containerId + ' table', base);
+  while (built.firstChild) host.appendChild(built.firstChild);
+  host.dataset.wired = '1';
 }
 
 // ---- Populate node filter dropdown ----

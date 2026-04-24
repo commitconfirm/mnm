@@ -2081,15 +2081,36 @@ async def list_nodes():
 
         jobs = poll_by_device.get(name, {})
 
-        # Compute poll health: green/yellow/red/gray
-        if not jobs:
+        # Prompt 9 Block A: health calculation is computed over *enabled*
+        # rows only. A disabled row is an operator-set scheduling gate
+        # (e.g. the FG-40F / arista-mnm NAPALM disables pending Block C
+        # SNMP-collector polling integration) — not a failure signal.
+        # ``phase2_populate`` is a one-shot job type whose enabled=False
+        # means "Phase 2 succeeded" — also not a health signal, so it's
+        # excluded explicitly.
+        active_jobs = {
+            jt: j for jt, j in jobs.items()
+            if j.get("enabled") and jt != "phase2_populate"
+        }
+        # Polling-coverage indicator: N active / M total rows (excluding
+        # phase2_populate from the denominator for the same reason).
+        total_rows = sum(1 for jt in jobs if jt != "phase2_populate")
+        coverage_label = f"{len(active_jobs)}/{total_rows} active" \
+            if total_rows else "0/0 active"
+
+        if not active_jobs:
             health = "gray"
-            health_label = "No polls configured"
+            health_label = (
+                "All polls disabled" if total_rows
+                else "No polls configured"
+            )
         else:
-            successes = sum(1 for j in jobs.values() if j.get("last_success"))
-            failures = sum(1 for j in jobs.values() if j.get("last_error") and not j.get("last_success"))
-            stale = sum(1 for j in jobs.values() if not j.get("last_success") and not j.get("last_error"))
-            total = len(jobs)
+            successes = sum(1 for j in active_jobs.values() if j.get("last_success"))
+            failures = sum(1 for j in active_jobs.values()
+                           if j.get("last_error") and not j.get("last_success"))
+            stale = sum(1 for j in active_jobs.values()
+                        if not j.get("last_success") and not j.get("last_error"))
+            total = len(active_jobs)
             if successes == total:
                 health = "green"
                 health_label = "All polls healthy"
@@ -2139,6 +2160,7 @@ async def list_nodes():
             "phase2_state": phase2_state,
             "health": health,
             "health_label": health_label,
+            "coverage_label": coverage_label,
             "last_polled": last_polled,
             "jobs": jobs,
             "interface_count": dev.get("interface_count"),

@@ -1182,7 +1182,7 @@ async def poll_loop() -> None:
                 await asyncio.sleep(POLL_CHECK_INTERVAL)
                 continue
 
-            # Build device info map
+            # Build device info map (name lowercased -> id/ip/platform/status)
             device_info: dict[str, dict] = {}
             for d in devices:
                 name = d.get("name", "")
@@ -1192,10 +1192,48 @@ async def poll_loop() -> None:
                 ip_addr = ip_display.split("/")[0] if "/" in ip_display else ip_display
                 platform = d.get("platform") or {}
                 plat_name = platform.get("name") or "" if isinstance(platform, dict) else ""
+                status = d.get("status") or {}
+                status_name = status.get("display") or status.get("name") or "" \
+                    if isinstance(status, dict) else ""
                 device_info[name.lower()] = {
                     "id": did, "ip": ip_addr,
                     "is_junos": "junos" in plat_name.lower(),
+                    "status_name": status_name,
                 }
+
+            # Status-gated dispatch: core collectors (arp/mac/lldp/routes/bgp/
+            # dhcp) only run for devices with Nautobot status=Active. Devices
+            # in Onboarding Incomplete / Onboarding Failed would otherwise
+            # generate collector-failure noise while the orchestrator drives
+            # them toward Active. phase2_populate is exempt — by definition
+            # it runs on not-yet-Active devices.
+            gated_device_jobs: dict[str, list[str]] = {}
+            for dn, jts in device_jobs.items():
+                info = device_info.get(dn.lower(), {})
+                is_active = (info.get("status_name") == "Active")
+                kept = [
+                    jt for jt in jts
+                    if jt == "phase2_populate" or is_active
+                ]
+                skipped = [jt for jt in jts if jt not in kept]
+                if skipped:
+                    log.debug(
+                        "poll_skip_status_gated",
+                        "Skipped non-Active device's core poll rows",
+                        context={
+                            "device": dn,
+                            "status": info.get("status_name") or "(unknown)",
+                            "skipped": skipped,
+                        },
+                    )
+                if kept:
+                    gated_device_jobs[dn] = kept
+            device_jobs = gated_device_jobs
+
+            if not device_jobs:
+                _poll_state["polls_dispatched"] = 0
+                await asyncio.sleep(POLL_CHECK_INTERVAL)
+                continue
 
             # Dispatch per-device tasks with bounded concurrency
             all_results: list[dict] = []
@@ -1204,6 +1242,46 @@ async def poll_loop() -> None:
                 async with semaphore:
                     info = device_info.get(dev_name.lower(), {})
                     dev_id = info.get("id")
+                    # Cache-miss retry: phase2_populate is dispatched
+                    # immediately after Phase 1 Step H clears the cache, but
+                    # the polling loop's own get_devices() call may have
+                    # refilled it before Step H ran. Clear + retry once so
+                    # the freshly-created device resolves.
+                    if not dev_id and "phase2_populate" in job_types:
+                        log.info(
+                            "phase2_dispatch_cache_miss_retry",
+                            "Device missing from Nautobot cache; "
+                            "clearing cache and retrying once",
+                            context={"device": dev_name},
+                        )
+                        nautobot_client.clear_cache()
+                        try:
+                            fresh = await nautobot_client.get_devices()
+                        except Exception as exc:  # noqa: BLE001
+                            fresh = []
+                            log.warning(
+                                "phase2_dispatch_cache_miss_refetch_failed",
+                                "Cache-clear refetch failed",
+                                context={"device": dev_name, "error": str(exc)},
+                            )
+                        for d in fresh:
+                            if (d.get("name") or "").lower() == dev_name.lower():
+                                pip = d.get("primary_ip4") or {}
+                                ip_display = (pip.get("display")
+                                              or pip.get("address") or "") \
+                                    if isinstance(pip, dict) else ""
+                                ip_addr = (ip_display.split("/")[0]
+                                           if "/" in ip_display else ip_display)
+                                plat = d.get("platform") or {}
+                                plat_name = (plat.get("name") or "") \
+                                    if isinstance(plat, dict) else ""
+                                info = {
+                                    "id": d.get("id", ""),
+                                    "ip": ip_addr,
+                                    "is_junos": "junos" in plat_name.lower(),
+                                }
+                                dev_id = info["id"]
+                                break
                     if not dev_id:
                         # Ensure poll rows exist even if device disappeared
                         for jt in job_types:

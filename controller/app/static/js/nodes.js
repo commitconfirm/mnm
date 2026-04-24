@@ -101,9 +101,23 @@ function jobDots(jobs) {
 const nodesDT = new DataTable({
   containerId: 'nodes-dt',
   columns: [
-    { key: 'health', label: 'Health', sortable: true, render: function(v, row) {
-      return healthDot(v, row.health_label || '');
-    } },
+    {
+      key: 'health',
+      label: 'Health' + MNMColHelp.icon({
+        title: 'Aggregate poll health across enabled jobs',
+        values: [
+          ['Green',  'All enabled poll jobs succeeded on last attempt.'],
+          ['Yellow', 'Some jobs failing or pending; others healthy.'],
+          ['Red',    'All enabled jobs failing or no job succeeded.'],
+          ['Gray',   'No enabled jobs, no data yet, or all disabled.'],
+        ],
+        docsLink: '/docs/ONBOARDING.md',
+      }),
+      exportLabel: 'Health',
+      align: 'center',
+      sortable: true,
+      render: function(v, row) { return healthDot(v, row.health_label || ''); },
+    },
     { key: 'name', label: 'Name', sortable: true, render: function(v) {
       return '<a href="/nodes/' + encodeURIComponent(v) + '"><strong>' + escHtml(v) + '</strong></a>';
     } },
@@ -111,14 +125,40 @@ const nodesDT = new DataTable({
     { key: 'primary_ip', label: 'Primary IP', sortable: true, render: function(v) { if (!v) return '-'; return '<code>' + escHtml(v.replace(/\/\d+$/, '')) + '</code>'; } },
     { key: 'role', label: 'Role', sortable: true, render: function(v) { return escHtml(v || '-'); } },
     { key: 'location', label: 'Location', sortable: true, render: function(v) { return escHtml(v || '-'); } },
-    { key: 'status_name', label: 'Status', sortable: true, render: function(_v, row) { return statusBadge(row); } },
-    { key: 'jobs', label: 'Poll Jobs', sortable: false, render: function(v) { return jobDots(v); } },
-    { key: 'last_polled', label: 'Last Polled', sortable: true, render: function(v) {
+    {
+      key: 'status_name',
+      label: 'Status' + MNMColHelp.icon({
+        title: 'Nautobot device status + Phase 2 state',
+        values: [
+          ['Active',               'Fully onboarded. Phase 1 + Phase 2 succeeded.'],
+          ['Incomplete',           'Phase 2 failed or is retrying. Polling loop retries ~every 5 min; click Retry Phase 2 to re-run now.'],
+          ['Failed',               'Phase 1 failed partway. Manual cleanup may be required.'],
+          ['Hourglass ⏳',         'Phase 2 is actively running.'],
+        ],
+        docsLink: '/docs/ONBOARDING.md#status-badges',
+      }),
+      exportLabel: 'Status',
+      sortable: true,
+      render: function(_v, row) { return statusBadge(row); },
+    },
+    {
+      key: 'jobs',
+      label: 'Poll Jobs',
+      exportLabel: 'Poll Jobs',
+      align: 'center',
+      sortable: false,
+      render: function(v, row) {
+        var coverage = row.coverage_label ? ' <span class="muted small">(' + escHtml(row.coverage_label) + ')</span>' : '';
+        return jobDots(v) + coverage;
+      },
+      exportValue: function(_v, row) { return row.coverage_label || ''; },
+    },
+    { key: 'last_polled', label: 'Last Polled', sortable: true, align: 'center', render: function(v) {
       return '<span title="' + escHtml(v || '') + '">' + timeAgo(v) + '</span>';
     } },
-    { key: 'name', label: '', sortable: false, render: function(v) {
+    { key: 'name', label: '', sortable: false, align: 'center', render: function(v) {
       return '<button class="btn small poll-now-btn" data-node="' + escHtml(v) + '">Poll Now</button>';
-    } },
+    }, exportValue: function() { return ''; } },
   ],
   pageSize: 100,
   storageKey: 'mnm-nodes-table',
@@ -421,4 +461,10 @@ document.getElementById('add-node-modal').addEventListener('click', function(e) 
 checkAuth().then(function() {
   loadNodes();
   startAutoRefresh();
+  var exportHost = document.getElementById('nodes-export-buttons');
+  if (exportHost) {
+    exportHost.replaceWith(
+      MNMTableExport.makeButtons('#nodes-dt table', 'mnm-nodes')
+    );
+  }
 });
