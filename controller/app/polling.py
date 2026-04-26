@@ -21,7 +21,7 @@ import random
 import time
 from datetime import datetime, timezone, timedelta
 
-from app import db, nautobot_client, endpoint_store, snmp_collector
+from app import db, nautobot_client, endpoint_store, snmp_collector, arp_snmp
 from app.logging_config import StructuredLogger
 
 log = StructuredLogger(__name__, module="polling")
@@ -409,14 +409,109 @@ def _resolve_device_id(devices: list[dict], device_name: str) -> str | None:
     return None
 
 
-async def collect_arp(device_name: str, device_id: str) -> dict:
-    """Collect ARP table from one device. Returns result dict."""
+async def collect_arp(device_name: str, device_id: str,
+                      device_ip: "str | None" = None) -> dict:
+    """Collect ARP table from one device via direct SNMP (Block C P3).
+
+    Walks ipNetToMediaTable / ipNetToPhysicalTable through ``arp_snmp``,
+    then resolves each entry's ifIndex to an interface name via
+    ``snmp_collector.collect_ifindex_to_name``. Unresolved ifIndex values
+    fall back to ``ifindex:N`` sentinel strings so data is preserved
+    (Rule 7) even when ifTable is unwalkable.
+
+    Returns the same {device_name, job_type, success, entries, count,
+    duration} shape the dispatcher and ``_correlate_and_record`` expect.
+    Each entry dict matches the {ip, mac, interface} contract that
+    ``upsert_node_arp_bulk`` and ``endpoint_collector._correlate_endpoints``
+    read.
+    """
+    t0 = time.monotonic()
+    await _mark_attempt(device_name, "arp")
+
+    if not device_ip:
+        duration = time.monotonic() - t0
+        err = "no primary_ip4 on device"
+        await _mark_failure(device_name, "arp", err, duration)
+        log.warning("arp_snmp_collect_failed",
+                    "ARP collection skipped — no device IP",
+                    context={"device": device_name, "error": err})
+        return {"device_name": device_name, "job_type": "arp", "success": False,
+                "error": err, "count": 0, "duration": duration}
+
+    community = os.environ.get("SNMP_COMMUNITY", "public")
+    log.debug("arp_snmp_collect_start", "Direct-SNMP ARP collection start",
+              context={"device": device_name})
+
+    try:
+        arp_entries = await arp_snmp.collect_arp(device_ip, community)
+    except snmp_collector.SnmpError as exc:
+        duration = time.monotonic() - t0
+        err = f"{exc.__class__.__name__}: {str(exc)[:400]}"
+        await _mark_failure(device_name, "arp", err, duration)
+        log.warning("arp_snmp_collect_failed",
+                    "Direct-SNMP ARP collection failed",
+                    context={"device": device_name, "error": err,
+                             "exc_class": exc.__class__.__name__})
+        return {"device_name": device_name, "job_type": "arp", "success": False,
+                "error": err, "count": 0, "duration": duration}
+
+    # ifIndex → interface name. collect_ifindex_to_name swallows SnmpError
+    # internally and returns {} on failure; an empty map means every entry
+    # gets the ifindex:N sentinel — degraded but not lost.
+    name_map = await snmp_collector.collect_ifindex_to_name(device_ip, community)
+    if not name_map:
+        log.warning("arp_snmp_ifindex_lookup_empty",
+                    "ifIndex→name resolution returned empty; "
+                    "entries will use ifindex:N sentinel",
+                    context={"device": device_name,
+                             "entries": len(arp_entries)})
+
+    # Dedupe by (ip, mac) — the upsert's UNIQUE constraint is
+    # (node_name, ip, mac, vrf) and PostgreSQL ON CONFLICT DO UPDATE
+    # raises CardinalityViolationError if the same key appears twice
+    # in one batch. Junos exposes loopback IPs on multiple lo0.X
+    # subinterfaces, producing repeats with different ifIndex values
+    # for the same (ip, mac) pair. Keep the first interface seen per
+    # key — matches NAPALM's implicit dedup behavior.
+    seen_keys: set[tuple[str, str]] = set()
+    entries: list[dict] = []
+    for e in arp_entries:
+        key = (e.ip_address, (e.mac_address or "").upper())
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        entries.append({
+            "ip": e.ip_address,
+            "mac": e.mac_address,
+            "interface": name_map.get(e.interface_index,
+                                      f"ifindex:{e.interface_index}"),
+        })
+
+    try:
+        await endpoint_store.upsert_node_arp_bulk(device_name, entries)
+    except Exception:  # noqa: BLE001 — persistence failure shouldn't kill collection
+        pass
+
+    duration = time.monotonic() - t0
+    await _mark_success(device_name, "arp", duration)
+    log.info("arp_snmp_collect_complete",
+             "Direct-SNMP ARP collection complete",
+             context={"device": device_name, "entries": len(entries),
+                      "duration": round(duration, 1)})
+    return {"device_name": device_name, "job_type": "arp", "success": True,
+            "entries": entries, "count": len(entries), "duration": duration}
+
+
+# DEPRECATED — unreferenced as of Block C P3. Removal scheduled for
+# Block C P6 after a 1-cycle soak window. Do not call this from new
+# code. The active ARP collection path is :func:`collect_arp` above.
+async def _collect_arp_napalm_deprecated(device_name: str, device_id: str) -> dict:
+    """Original NAPALM-proxy ARP path. Replaced by direct SNMP in Block C P3."""
     t0 = time.monotonic()
     await _mark_attempt(device_name, "arp")
     try:
         data = await nautobot_client.napalm_get(device_id, "get_arp_table")
         entries = data.get("get_arp_table", [])
-        # Persist raw ARP data (Phase 2.85)
         try:
             await endpoint_store.upsert_node_arp_bulk(device_name, entries)
         except Exception:
@@ -892,7 +987,8 @@ async def poll_device(device_name: str, device_id: str,
     results = []
     for jt in due_jobs:
         if jt == "arp":
-            results.append(await collect_arp(device_name, device_id))
+            results.append(await collect_arp(device_name, device_id,
+                                             device_ip=device_ip))
         elif jt == "mac":
             results.append(await collect_mac(device_name, device_id))
         elif jt == "dhcp":
