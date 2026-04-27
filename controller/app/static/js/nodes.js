@@ -40,6 +40,33 @@ function healthDot(health, label) {
     '</span>';
 }
 
+// v1.0 Prompt 8: render Nautobot status + Phase 2 state as a badge
+// with inline Retry Phase 2 button when stuck. Colors match the
+// design conventions: green=Active, yellow=Onboarding Incomplete,
+// red=Onboarding Failed, gray=other (e.g. Staged, Inventory). phase2
+// running/pending show an hourglass; failed surfaces the retry button.
+function statusBadge(node) {
+  var statusName = node.status_name || '';
+  var p2 = node.phase2_state;  // null | "pending" | "running" | "completed" | "failed"
+  var color, label, extra = '';
+  if (statusName === 'Active') { color = 'green'; label = 'Active'; }
+  else if (statusName === 'Onboarding Incomplete') { color = 'yellow'; label = 'Incomplete'; }
+  else if (statusName === 'Onboarding Failed') { color = 'red'; label = 'Failed'; }
+  else { color = 'grey'; label = statusName || '-'; }
+
+  if (p2 === 'running') {
+    extra = ' <span title="Phase 2 running">&#8987;</span>';
+  } else if (p2 === 'failed' || (statusName === 'Onboarding Incomplete' && p2 !== 'running')) {
+    // Include the retry button inline with the badge. Cache-miss race
+    // (Prompt 7.5 observation): first polling-loop dispatch after
+    // Phase 1 may show "failed" fleetingly; operator retry drives to
+    // success. Prompt 9 hardens at the polling layer.
+    extra = ' <button class="btn small retry-phase2-btn" data-node="' +
+      escHtml(node.name) + '" title="Re-enable phase2_populate; polling loop picks it up within ~30s">Retry Phase 2</button>';
+  }
+  return '<span class="badge ' + color + '">' + escHtml(label) + '</span>' + extra;
+}
+
 function jobDots(jobs) {
   if (!jobs || Object.keys(jobs).length === 0) return '-';
   const types = ['arp', 'mac', 'dhcp', 'lldp', 'routes', 'bgp'];
@@ -74,9 +101,23 @@ function jobDots(jobs) {
 const nodesDT = new DataTable({
   containerId: 'nodes-dt',
   columns: [
-    { key: 'health', label: 'Health', sortable: true, render: function(v, row) {
-      return healthDot(v, row.health_label || '');
-    } },
+    {
+      key: 'health',
+      label: 'Health' + MNMColHelp.icon({
+        title: 'Aggregate poll health across enabled jobs',
+        values: [
+          ['Green',  'All enabled poll jobs succeeded on last attempt.'],
+          ['Yellow', 'Some jobs failing or pending; others healthy.'],
+          ['Red',    'All enabled jobs failing or no job succeeded.'],
+          ['Gray',   'No enabled jobs, no data yet, or all disabled.'],
+        ],
+        docsLink: '/docs/ONBOARDING.md',
+      }),
+      exportLabel: 'Health',
+      align: 'center',
+      sortable: true,
+      render: function(v, row) { return healthDot(v, row.health_label || ''); },
+    },
     { key: 'name', label: 'Name', sortable: true, render: function(v) {
       return '<a href="/nodes/' + encodeURIComponent(v) + '"><strong>' + escHtml(v) + '</strong></a>';
     } },
@@ -84,13 +125,40 @@ const nodesDT = new DataTable({
     { key: 'primary_ip', label: 'Primary IP', sortable: true, render: function(v) { if (!v) return '-'; return '<code>' + escHtml(v.replace(/\/\d+$/, '')) + '</code>'; } },
     { key: 'role', label: 'Role', sortable: true, render: function(v) { return escHtml(v || '-'); } },
     { key: 'location', label: 'Location', sortable: true, render: function(v) { return escHtml(v || '-'); } },
-    { key: 'jobs', label: 'Poll Jobs', sortable: false, render: function(v) { return jobDots(v); } },
-    { key: 'last_polled', label: 'Last Polled', sortable: true, render: function(v) {
+    {
+      key: 'status_name',
+      label: 'Status' + MNMColHelp.icon({
+        title: 'Nautobot device status + Phase 2 state',
+        values: [
+          ['Active',               'Fully onboarded. Phase 1 + Phase 2 succeeded.'],
+          ['Incomplete',           'Phase 2 failed or is retrying. Polling loop retries ~every 5 min; click Retry Phase 2 to re-run now.'],
+          ['Failed',               'Phase 1 failed partway. Manual cleanup may be required.'],
+          ['Hourglass ⏳',         'Phase 2 is actively running.'],
+        ],
+        docsLink: '/docs/ONBOARDING.md#status-badges',
+      }),
+      exportLabel: 'Status',
+      sortable: true,
+      render: function(_v, row) { return statusBadge(row); },
+    },
+    {
+      key: 'jobs',
+      label: 'Poll Jobs',
+      exportLabel: 'Poll Jobs',
+      align: 'center',
+      sortable: false,
+      render: function(v, row) {
+        var coverage = row.coverage_label ? ' <span class="muted small">(' + escHtml(row.coverage_label) + ')</span>' : '';
+        return jobDots(v) + coverage;
+      },
+      exportValue: function(_v, row) { return row.coverage_label || ''; },
+    },
+    { key: 'last_polled', label: 'Last Polled', sortable: true, align: 'center', render: function(v) {
       return '<span title="' + escHtml(v || '') + '">' + timeAgo(v) + '</span>';
     } },
-    { key: 'name', label: '', sortable: false, render: function(v) {
+    { key: 'name', label: '', sortable: false, align: 'center', render: function(v) {
       return '<button class="btn small poll-now-btn" data-node="' + escHtml(v) + '">Poll Now</button>';
-    } },
+    }, exportValue: function() { return ''; } },
   ],
   pageSize: 100,
   storageKey: 'mnm-nodes-table',
@@ -174,6 +242,34 @@ function applyFiltersAndRender() {
   nodesDT.setFilter(buildFilterFn());
   nodesDT.render();
   attachPollButtons();
+  attachRetryPhase2Buttons();
+}
+
+function attachRetryPhase2Buttons() {
+  document.querySelectorAll('.retry-phase2-btn').forEach(function(btn) {
+    btn.addEventListener('click', async function() {
+      var nodeName = btn.getAttribute('data-node');
+      btn.disabled = true;
+      btn.textContent = 'Retrying...';
+      try {
+        var r = await fetch('/api/onboarding/retry-phase2/' + encodeURIComponent(nodeName), { method: 'POST' });
+        if (!r.ok) {
+          var err = await r.json().catch(function() { return {}; });
+          btn.textContent = 'Failed';
+          alert('Retry failed: ' + (err.detail || r.statusText));
+          return;
+        }
+        // Polling loop picks up the re-enabled row within
+        // ~POLL_CHECK_INTERVAL (default 30s). Refresh the nodes list
+        // so the operator sees the transition once it completes.
+        btn.textContent = 'Queued...';
+        setTimeout(function() { loadNodes(); }, 5000);
+      } catch (e) {
+        btn.textContent = 'Error';
+        alert('Retry error: ' + e.message);
+      }
+    });
+  });
 }
 
 function attachPollButtons() {
@@ -245,7 +341,130 @@ window.addEventListener('mnm-preferences-changed', function() {
   startAutoRefresh();
 });
 
+// ---------------------------------------------------------------------------
+// v1.0 Prompt 8: Add Node modal — single-device manual onboarding via
+// the direct-REST orchestrator. Same backend endpoint as the Discover
+// page's retry-onboard button; surfaces Phase 1 result synchronously
+// and the new device appears in the Nodes list after Phase 2 polls
+// complete (next polling-loop tick, ≤30s).
+// ---------------------------------------------------------------------------
+
+async function populateAddNodeDropdowns() {
+  try {
+    const [locResp, sgResp] = await Promise.all([
+      fetch('/api/nautobot/locations'),
+      fetch('/api/nautobot/secrets-groups'),
+    ]);
+    if (locResp.ok) {
+      const data = await locResp.json();
+      const sel = document.getElementById('add-location');
+      sel.innerHTML = '<option value="">-- select --</option>';
+      (data.locations || []).forEach(function(loc) {
+        var opt = document.createElement('option');
+        opt.value = loc.id;
+        opt.textContent = loc.display || loc.name || loc.id;
+        sel.appendChild(opt);
+      });
+    }
+    if (sgResp.ok) {
+      const data = await sgResp.json();
+      const sel = document.getElementById('add-secrets-group');
+      sel.innerHTML = '<option value="">-- select --</option>';
+      (data.secrets_groups || []).forEach(function(sg) {
+        var opt = document.createElement('option');
+        opt.value = sg.id;
+        opt.textContent = sg.display || sg.name || sg.id;
+        sel.appendChild(opt);
+      });
+    }
+  } catch (e) {
+    console.error('Dropdown populate failed:', e);
+  }
+}
+
+function openAddNodeModal() {
+  document.getElementById('add-ip').value = '';
+  document.getElementById('add-community').value = '';
+  document.getElementById('add-node-status').textContent = '';
+  document.getElementById('add-node-submit').disabled = false;
+  document.getElementById('add-node-modal').style.display = 'flex';
+  populateAddNodeDropdowns();
+}
+
+function closeAddNodeModal() {
+  document.getElementById('add-node-modal').style.display = 'none';
+}
+
+async function submitAddNode() {
+  var ip = document.getElementById('add-ip').value.trim();
+  var community = document.getElementById('add-community').value;
+  var locId = document.getElementById('add-location').value;
+  var sgId = document.getElementById('add-secrets-group').value;
+  var statusEl = document.getElementById('add-node-status');
+  var submitBtn = document.getElementById('add-node-submit');
+  // Minimal IPv4 validation — backend does the authoritative check.
+  if (!/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(ip)) {
+    statusEl.textContent = 'Enter a valid IPv4 address.';
+    statusEl.style.color = 'var(--danger, #b71c1c)';
+    return;
+  }
+  if (!community || !locId || !sgId) {
+    statusEl.textContent = 'All fields required.';
+    statusEl.style.color = 'var(--danger, #b71c1c)';
+    return;
+  }
+  submitBtn.disabled = true;
+  statusEl.style.color = 'var(--muted)';
+  statusEl.textContent = 'Phase 1: classifying + creating device...';
+  try {
+    var r = await fetch('/api/onboarding/direct-rest', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ip: ip, snmp_community: community,
+        secrets_group_id: sgId, location_id: locId,
+      }),
+    });
+    var d = await r.json();
+    if (!r.ok || !d.success) {
+      if (d && d.error_type === 'AlreadyOnboardedError') {
+        statusEl.style.color = 'var(--warning, #d08800)';
+        statusEl.textContent = 'Already onboarded as ' + (d.device_name || '(unknown)') +
+          '. View it in the list below.';
+      } else {
+        statusEl.style.color = 'var(--danger, #b71c1c)';
+        statusEl.textContent = 'Failed: ' + (d.error || r.statusText || 'unknown error');
+      }
+      submitBtn.disabled = false;
+      return;
+    }
+    // Phase 1 complete; Phase 2 runs via polling loop within ~30s.
+    statusEl.style.color = 'var(--muted)';
+    statusEl.textContent = 'Phase 1 complete: ' + d.device_name +
+      '. Phase 2 (populate interfaces) runs in the background; refreshing in 5s...';
+    setTimeout(function() { loadNodes(); closeAddNodeModal(); }, 5000);
+  } catch (e) {
+    statusEl.style.color = 'var(--danger, #b71c1c)';
+    statusEl.textContent = 'Request failed: ' + e.message;
+    submitBtn.disabled = false;
+  }
+}
+
+document.getElementById('add-node-btn').addEventListener('click', openAddNodeModal);
+document.getElementById('add-node-cancel').addEventListener('click', closeAddNodeModal);
+document.getElementById('add-node-submit').addEventListener('click', submitAddNode);
+document.getElementById('add-node-modal').addEventListener('click', function(e) {
+  if (e.target && e.target.id === 'add-node-modal') closeAddNodeModal();
+});
+
+
 checkAuth().then(function() {
   loadNodes();
   startAutoRefresh();
+  var exportHost = document.getElementById('nodes-export-buttons');
+  if (exportHost) {
+    exportHost.replaceWith(
+      MNMTableExport.makeButtons('#nodes-dt table', 'mnm-nodes')
+    );
+  }
 });

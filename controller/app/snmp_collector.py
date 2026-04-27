@@ -93,8 +93,49 @@ OIDS: dict[str, str] = {
     "LLDP-MIB::lldpRemEntry":             "1.0.8802.1.1.2.1.4.1.1",
     "LLDP-MIB::lldpRemManAddrEntry":      "1.0.8802.1.1.2.1.4.2.1",
     # Interface name tables — ifXTable.ifName preferred, ifTable.ifDescr fallback
+    "IF-MIB::ifIndex":                    "1.3.6.1.2.1.2.2.1.1",
     "IF-MIB::ifDescr":                    "1.3.6.1.2.1.2.2.1.2",
     "IF-MIB::ifName":                     "1.3.6.1.2.1.31.1.1.1.1",
+    # Bridge port → ifIndex mapping (BRIDGE-MIB::dot1dBasePortIfIndex column).
+    # Walking this column directly returns one row per bridge port; suffix is
+    # the bridge port number (matches MacEntry.bridge_port), value is ifIndex.
+    # Used by MAC collector to bridge from FDB rows to interface names.
+    "BRIDGE-MIB::dot1dBasePortIfIndex":   "1.3.6.1.2.1.17.1.4.1.2",
+    # IP address tables — ipAddressTable (modern, v4+v6) preferred with
+    # legacy ipAddrTable fallback for older firmware (e.g. EX3300 12.3
+    # returns empty for the modern table).
+    "IP-MIB::ipAddressIfIndex":           "1.3.6.1.2.1.4.34.1.3",
+    "IP-MIB::ipAddressPrefix":            "1.3.6.1.2.1.4.34.1.5",
+    "RFC1213-MIB::ipAdEntIfIndex":        "1.3.6.1.2.1.4.20.1.2",
+    "RFC1213-MIB::ipAdEntNetMask":        "1.3.6.1.2.1.4.20.1.3",
+    # System MIB scalars — used by onboarding classifier (sysDescr substring
+    # match + sysObjectID prefix fallback). See
+    # .claude/design/nautobot_rest_schema_notes.md §3 for the captured
+    # signal matrix across the lab vendor set.
+    "SNMPv2-MIB::sysDescr":               "1.3.6.1.2.1.1.1.0",
+    "SNMPv2-MIB::sysObjectID":            "1.3.6.1.2.1.1.2.0",
+    "SNMPv2-MIB::sysName":                "1.3.6.1.2.1.1.5.0",
+    # Juniper enterprise chassis scalars (JUNIPER-MIB at 2636.3.1) —
+    # authoritative on Junos EX/SRX/MX; primary source of serial + chassis
+    # model for the onboarding probe.
+    "JUNIPER-MIB::jnxBoxDescr":           "1.3.6.1.4.1.2636.3.1.2.0",
+    "JUNIPER-MIB::jnxBoxSerialNo":        "1.3.6.1.4.1.2636.3.1.3.0",
+    # ENTITY-MIB fallbacks for serial / chassis model on vendors that don't
+    # implement the Juniper scalars. Table columns under entPhysicalTable
+    # (1.3.6.1.2.1.47.1.1.1); the onboarding probe walks for the first row
+    # where entPhysicalClass = chassis(3).
+    "ENTITY-MIB::entPhysicalClass":       "1.3.6.1.2.1.47.1.1.1.1.5",
+    "ENTITY-MIB::entPhysicalSerialNum":   "1.3.6.1.2.1.47.1.1.1.1.11",
+    "ENTITY-MIB::entPhysicalModelName":   "1.3.6.1.2.1.47.1.1.1.1.13",
+    # PAN-OS enterprise scalars (PAN-COMMON-MIB at 25461.2.1.2.1) — analogue
+    # to Juniper's jnxBoxSerialNo. PAN-OS sysDescr doesn't embed the PAN-OS
+    # version string, so we read panSysSwVersion directly.
+    "PAN-COMMON-MIB::panSysSwVersion":    "1.3.6.1.4.1.25461.2.1.2.1.1.0",
+    "PAN-COMMON-MIB::panSysSerialNumber": "1.3.6.1.4.1.25461.2.1.2.1.3.0",
+    # FortiGate enterprise scalar (FORTINET-CORE-MIB) — chassis serial.
+    # No enterprise scalar for chassis model name; ENTITY-MIB walk is the
+    # fallback for product-name discovery.
+    "FORTINET-CORE-MIB::fnSysSerial":     "1.3.6.1.4.1.12356.1.2.0",
 }
 
 
@@ -523,3 +564,50 @@ async def collect_ifindex_to_name(
                     ifindex_to_name[ifindex] = val.decode("utf-8", errors="replace").rstrip("\x00")
 
     return ifindex_to_name
+
+
+async def collect_bridgeport_to_ifindex(
+    device_ip: str,
+    community: str,
+    *,
+    version: str = "2c",
+    timeout_sec: float = 10.0,
+    port: int = 161,
+) -> dict[int, int]:
+    """Build a {bridge_port: ifIndex} map for a device.
+
+    Walks BRIDGE-MIB::dot1dBasePortIfIndex (1.3.6.1.2.1.17.1.4.1.2) — one row
+    per bridge port; suffix is the bridge port number (matches
+    ``MacEntry.bridge_port`` from ``mac_snmp.collect_mac``), value is the
+    ifIndex of the interface that bridge port maps to.
+
+    Used by the MAC collector to bridge from FDB rows to interface names
+    (bridge_port → ifIndex → ifName via ``collect_ifindex_to_name``).
+
+    Returns:
+        ``{bridge_port: ifIndex}`` dict. Empty on any SNMP error or on
+        devices that don't act as bridges (e.g. firewalls without an L2
+        domain) — callers treat a missing bridge port as "unresolved"
+        rather than a hard failure.
+    """
+    bridge_to_ifindex: dict[int, int] = {}
+
+    try:
+        rows = await walk_table(
+            device_ip, community, OIDS["BRIDGE-MIB::dot1dBasePortIfIndex"],
+            version=version, timeout_sec=timeout_sec, port=port,
+        )
+    except SnmpError:
+        return bridge_to_ifindex
+
+    for row in rows:
+        for suffix, val in row.items():
+            try:
+                bridge_port = int(suffix)
+                ifindex = int(val)
+            except (ValueError, TypeError):
+                continue
+            if bridge_port > 0 and ifindex > 0:
+                bridge_to_ifindex[bridge_port] = ifindex
+
+    return bridge_to_ifindex

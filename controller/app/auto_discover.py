@@ -268,7 +268,7 @@ async def auto_discover_from_node(
     Returns:
         Summary dict with attempted/succeeded/failed/skipped counts and node list
     """
-    from app.discovery import _onboard_host, _onb_set, _detect_platform
+    from app.discovery import _onboard_host_direct, _onb_set, _detect_platform
     from app import polling
 
     def _log(msg: str):
@@ -427,9 +427,11 @@ async def auto_discover_from_node(
         # Attempt onboarding
         attempted += 1
         try:
-            success = await _onboard_host(
-                neighbor_ip, location_id, secrets_group_id,
-                snmp_data=None,  # no pre-enrichment during auto-discover
+            # v1.0 Prompt 8: direct-REST orchestrator (plugin path retired
+            # from auto-discover). snmp_community plumbed through from
+            # the caller (sweep / manual /api/discover/auto trigger).
+            success = await _onboard_host_direct(
+                neighbor_ip, location_id, secrets_group_id, snmp_community,
             )
         except Exception as exc:
             _log(f"Onboarding exception for {neighbor_ip}: {exc}")

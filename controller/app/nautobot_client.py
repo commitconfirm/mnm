@@ -21,6 +21,98 @@ log = StructuredLogger(__name__, module="nautobot")
 NAUTOBOT_URL = os.environ.get("NAUTOBOT_URL", "http://nautobot:8080")
 _api_token: str | None = None
 
+
+# ---------------------------------------------------------------------------
+# Exception hierarchy — consumed by the direct-REST onboarding orchestrator
+# (Prompt 4). See .claude/design/nautobot_rest_schema_notes.md §4 for the
+# reality-check findings each exception maps to.
+# ---------------------------------------------------------------------------
+
+class NautobotError(Exception):
+    """Base class for Nautobot REST errors."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        response_body: "dict | str | None" = None,
+    ):
+        super().__init__(message)
+        self.status_code = status_code
+        self.response_body = response_body
+
+
+class NautobotDuplicateError(NautobotError):
+    """400 for a uniqueness-constraint violation (reality-check Test 5, Test 6)."""
+
+
+class NautobotValidationError(NautobotError):
+    """400 for a field-validation failure that is NOT a duplicate.
+
+    Includes Nautobot's rejection of ``primary_ip4`` when the target IP is not
+    linked to any interface on the device (reality-check Test 2).
+    """
+
+
+class NautobotNotFoundError(NautobotError):
+    """404 for missing resource on GET / PATCH / DELETE."""
+
+
+def _classify_400(body: "dict | str") -> type[NautobotError]:
+    """Pick the right exception class for a 400 response body.
+
+    Reality-check findings:
+      - Test 5 duplicate device: ``{"__all__": ["A device named ... already
+        exists in this location ..."]}``
+      - Test 6 duplicate interface: ``{"non_field_errors": ["The fields
+        device, name must make a unique set."]}``
+    Any other 400 shape is a validation error.
+    """
+    if isinstance(body, dict):
+        flat = " ".join(
+            str(v) if not isinstance(v, list) else " ".join(str(x) for x in v)
+            for v in body.values()
+        ).lower()
+    else:
+        flat = str(body).lower()
+    if "already exists" in flat or "must make a unique set" in flat:
+        return NautobotDuplicateError
+    return NautobotValidationError
+
+
+def _raise_for_write(resp: "httpx.Response", *, operation: str) -> None:
+    """Translate a write response into the typed exception hierarchy.
+
+    Any 2xx is accepted silently; 400 is classified via ``_classify_400``;
+    404 becomes :class:`NautobotNotFoundError`; other 4xx/5xx become the
+    generic :class:`NautobotError`. ``operation`` is folded into the
+    message for log correlation (e.g. ``"create_device"``).
+    """
+    if 200 <= resp.status_code < 300:
+        return
+    try:
+        body: "dict | str" = resp.json()
+    except Exception:
+        body = resp.text
+    if resp.status_code == 400:
+        raise _classify_400(body)(
+            f"{operation} rejected by Nautobot (400)",
+            status_code=400,
+            response_body=body,
+        )
+    if resp.status_code == 404:
+        raise NautobotNotFoundError(
+            f"{operation} target not found (404)",
+            status_code=404,
+            response_body=body,
+        )
+    raise NautobotError(
+        f"{operation} failed ({resp.status_code})",
+        status_code=resp.status_code,
+        response_body=body,
+    )
+
 # ---------------------------------------------------------------------------
 # Shared HTTP client — connection pooling across all Nautobot API calls
 # ---------------------------------------------------------------------------
@@ -139,9 +231,15 @@ async def get_devices() -> list[dict]:
     return results
 
 
-async def get_device(device_id: str) -> dict:
+async def get_device(device_id: str, *, depth: int = 0) -> dict:
+    """GET a single device by UUID. ``depth=1`` nests primary_ip4,
+    platform, role, location, status with their display/address fields —
+    required when the caller needs e.g. the primary_ip4 address string."""
     client = _get_client()
-    resp = await client.get(f"/api/dcim/devices/{device_id}/", headers=_headers())
+    url = f"/api/dcim/devices/{device_id}/"
+    if depth:
+        url = f"{url}?depth={depth}"
+    resp = await client.get(url, headers=_headers())
     resp.raise_for_status()
     return resp.json()
 
@@ -496,8 +594,17 @@ async def delete_standalone_ip(ip: str) -> bool:
     for ipo in resp.json().get("results", []):
         if not (ipo.get("address") or "").startswith(ip):
             continue
-        interfaces = ipo.get("interfaces") or []
-        if interfaces:
+        # Check assignment via the IPAddressToInterface through model.
+        # The ``interfaces`` attribute on the IP record isn't reliably
+        # populated without ?depth=1 — using the through-model endpoint
+        # is authoritative. (Caught live during Prompt 6 Phase 2 where a
+        # depth=0 interfaces-null check caused delete of a primary IP.)
+        link_resp = await client.get(
+            "/api/ipam/ip-address-to-interface/",
+            params={"ip_address": ipo["id"], "limit": 1},
+            headers=_headers(),
+        )
+        if link_resp.status_code == 200 and link_resp.json().get("count", 0) > 0:
             # Already on a device interface — leave it alone.
             continue
         del_resp = await client.delete(
@@ -936,3 +1043,658 @@ async def upsert_endpoint_ip(ip: str, endpoint: dict) -> dict:
         resp.raise_for_status()
         log.debug("upsert_endpoint_ip", "Created endpoint IP", context={"ip": ip, "action": "create"})
         return resp.json()
+
+
+# ===========================================================================
+# Direct-REST onboarding primitives (Prompt 2 of the v1.0 onboarding
+# workstream). Every function cites the section of
+# .claude/design/nautobot_rest_schema_notes.md it was built against so that
+# later edits can reverify the contract against the reality-check doc.
+#
+# Style: each write goes through ``_raise_for_write`` so orchestrator code
+# can distinguish duplicate / validation / not-found / generic failures
+# without parsing response bodies itself.
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# Category 1 — reference lookups (GET by name/slug → record or None).
+# All five endpoints documented in reality-check §1.1.
+# ---------------------------------------------------------------------------
+
+async def get_manufacturer_by_name(name: str) -> "dict | None":
+    """Look up a manufacturer by name. Reality-check §1.1."""
+    client = _get_client()
+    resp = await client.get(
+        "/api/dcim/manufacturers/",
+        params={"name": name, "limit": 1},
+        headers=_headers(),
+    )
+    resp.raise_for_status()
+    results = resp.json().get("results", [])
+    return results[0] if results else None
+
+
+async def get_role_by_name(name: str) -> "dict | None":
+    """Look up a DCIM-device role by name.
+
+    Reality-check §1.1: the canonical Roles endpoint is ``/api/extras/roles/``.
+    The original design spike used ``/api/dcim/roles/`` which returns 404 on
+    Nautobot 3.x. This function must NOT fall back to the dcim path.
+    """
+    client = _get_client()
+    resp = await client.get(
+        "/api/extras/roles/",
+        params={"name": name, "content_types": "dcim.device", "limit": 1},
+        headers=_headers(),
+    )
+    resp.raise_for_status()
+    results = resp.json().get("results", [])
+    return results[0] if results else None
+
+
+async def get_devicetype_by_model(model: str) -> "dict | None":
+    """Look up a DeviceType by its ``model`` field. Reality-check §1.1."""
+    client = _get_client()
+    resp = await client.get(
+        "/api/dcim/device-types/",
+        params={"model": model, "limit": 1},
+        headers=_headers(),
+    )
+    resp.raise_for_status()
+    results = resp.json().get("results", [])
+    return results[0] if results else None
+
+
+async def get_platform_by_name(name: str) -> "dict | None":
+    """Look up a Platform by name (e.g. ``juniper_junos``). Reality-check §1.1."""
+    client = _get_client()
+    resp = await client.get(
+        "/api/dcim/platforms/",
+        params={"name": name, "limit": 1},
+        headers=_headers(),
+    )
+    resp.raise_for_status()
+    results = resp.json().get("results", [])
+    return results[0] if results else None
+
+
+async def get_status_by_name(
+    name: str,
+    content_type: "str | None" = None,
+) -> "dict | None":
+    """Exact-name lookup against ``/api/extras/statuses/``.
+
+    Optionally filter by ``content_type`` (e.g. ``"dcim.device"``) to
+    disambiguate same-named Statuses that exist across multiple content
+    types — Nautobot ships an ``Active`` Status attached to both
+    ``dcim.device`` and ``dcim.interface``, for example.
+
+    Reality-check §1.1 (the ``?name=`` filter is supported) and §2
+    (custom Status bootstrap).
+    """
+    params: dict = {"name": name, "limit": 2}
+    if content_type:
+        params["content_types"] = content_type
+    client = _get_client()
+    resp = await client.get(
+        "/api/extras/statuses/",
+        params=params,
+        headers=_headers(),
+    )
+    resp.raise_for_status()
+    results = resp.json().get("results", [])
+    if not results:
+        log.debug("status_lookup_miss", "status not found",
+                  context={"name": name, "content_type": content_type})
+        return None
+    if len(results) > 1:
+        log.warning("status_name_ambiguous",
+                    "multiple statuses matched exact name filter",
+                    context={"name": name, "content_type": content_type,
+                             "count": len(results)})
+    log.info("status_lookup_hit", "status resolved by name",
+             context={"name": name, "content_type": content_type,
+                      "status_id": results[0].get("id")})
+    return results[0]
+
+
+# ---------------------------------------------------------------------------
+# Category 2 — Device creation.
+# Reality-check §1.2 (required fields), §1.3 (ordering), Test 5 (duplicate
+# name at location scope).
+# ---------------------------------------------------------------------------
+
+async def create_device(
+    *,
+    name: str,
+    device_type_id: str,
+    location_id: str,
+    role_id: str,
+    status_id: str,
+    platform_id: "str | None" = None,
+    tenant_id: "str | None" = None,
+    serial: "str | None" = None,
+) -> dict:
+    """POST /api/dcim/devices/ — create a new device.
+
+    Required fields per reality-check §1.2: ``device_type``, ``location``,
+    ``role``, ``status``. ``platform`` is optional. Uniqueness is
+    ``(name, tenant, location)`` per Test 5; a collision raises
+    :class:`NautobotDuplicateError` with the Nautobot error body preserved.
+    """
+    payload: dict = {
+        "name": name,
+        "device_type": device_type_id,
+        "location": location_id,
+        "role": role_id,
+        "status": status_id,
+    }
+    if platform_id:
+        payload["platform"] = platform_id
+    if tenant_id:
+        payload["tenant"] = tenant_id
+    if serial:
+        payload["serial"] = serial
+
+    t0 = time.monotonic()
+    client = _get_client()
+    resp = await client.post(
+        "/api/dcim/devices/",
+        headers={**_headers(), "Content-Type": "application/json"},
+        json=payload,
+    )
+    _raise_for_write(resp, operation="create_device")
+    body = resp.json()
+    log.info("nautobot_write", "create_device ok", context={
+        "name": name, "device_id": body.get("id"), "status_code": resp.status_code,
+        "duration_ms": round((time.monotonic() - t0) * 1000, 1),
+    })
+    return body
+
+
+# ---------------------------------------------------------------------------
+# Category 3 — Interface management (query-and-reuse per Test 4).
+# Reality-check Test 4: creating a device auto-populates interfaces from the
+# DeviceType template, so blind POST of the management interface may 400 on
+# Test 6's (device, name) uniqueness constraint. ``ensure_management_interface``
+# is the function Prompt 4 actually calls.
+# ---------------------------------------------------------------------------
+
+async def get_interfaces_for_device(device_id: str) -> list[dict]:
+    """GET /api/dcim/interfaces/?device_id=... — list every interface for a device.
+
+    Reality-check Test 4: device-type templates may have auto-created up to
+    several dozen interfaces at device creation time.
+    """
+    client = _get_client()
+    resp = await client.get(
+        "/api/dcim/interfaces/",
+        params={"device_id": device_id, "limit": 0},
+        headers=_headers(),
+    )
+    resp.raise_for_status()
+    return resp.json().get("results", [])
+
+
+async def find_interface_by_name(device_id: str, name: str) -> "dict | None":
+    """Return the interface record for (device, name) or None.
+
+    Reality-check Test 6: Nautobot enforces ``(device, name)`` uniqueness —
+    this function lets callers avoid the 400 by checking first.
+    """
+    client = _get_client()
+    resp = await client.get(
+        "/api/dcim/interfaces/",
+        params={"device_id": device_id, "name": name, "limit": 1},
+        headers=_headers(),
+    )
+    resp.raise_for_status()
+    results = resp.json().get("results", [])
+    return results[0] if results else None
+
+
+async def create_interface(
+    *,
+    device_id: str,
+    name: str,
+    type_: str = "virtual",
+    status_id: str,
+) -> dict:
+    """POST /api/dcim/interfaces/ — create an interface on a device.
+
+    Required fields per reality-check §1.2: ``name``, ``status``, ``type``
+    (plus ``device`` writable-optional; we always send it). Duplicate
+    ``(device, name)`` raises :class:`NautobotDuplicateError` per Test 6.
+    """
+    payload = {
+        "device": device_id,
+        "name": name,
+        "type": type_,
+        "status": status_id,
+    }
+    t0 = time.monotonic()
+    client = _get_client()
+    resp = await client.post(
+        "/api/dcim/interfaces/",
+        headers={**_headers(), "Content-Type": "application/json"},
+        json=payload,
+    )
+    _raise_for_write(resp, operation="create_interface")
+    body = resp.json()
+    log.info("nautobot_write", "create_interface ok", context={
+        "device_id": device_id, "name": name, "interface_id": body.get("id"),
+        "status_code": resp.status_code,
+        "duration_ms": round((time.monotonic() - t0) * 1000, 1),
+    })
+    return body
+
+
+async def create_interfaces_bulk(interfaces: list[dict]) -> list[dict]:
+    """POST /api/dcim/interfaces/ with a JSON array body for bulk creation.
+
+    Nautobot 3.x accepts an array body on list endpoints for one-shot
+    multi-record creation; response is a matching array of created
+    records. Empty input returns ``[]`` without a round trip.
+
+    Each element of ``interfaces`` must already be a well-formed POST
+    payload (``device``, ``name``, ``type``, ``status`` at minimum per
+    reality-check §1.2). The caller filters out duplicates against the
+    device's existing interface set — Nautobot rejects the whole batch
+    on a single ``(device, name)`` collision (reality-check Test 6).
+    """
+    if not interfaces:
+        return []
+    t0 = time.monotonic()
+    client = _get_client()
+    resp = await client.post(
+        "/api/dcim/interfaces/",
+        headers={**_headers(), "Content-Type": "application/json"},
+        json=interfaces,
+    )
+    _raise_for_write(resp, operation="create_interfaces_bulk")
+    body = resp.json()
+    log.info("nautobot_write", "create_interfaces_bulk ok", context={
+        "count": len(body) if isinstance(body, list) else 1,
+        "status_code": resp.status_code,
+        "duration_ms": round((time.monotonic() - t0) * 1000, 1),
+    })
+    return body if isinstance(body, list) else [body]
+
+
+async def create_ip_addresses_bulk(ip_addresses: list[dict]) -> list[dict]:
+    """POST /api/ipam/ip-addresses/ with an array body.
+
+    Reality-check §1.2: ``address``, ``status`` are required; Nautobot 3.x
+    also requires ``parent`` or ``namespace`` per-entry (surfaced live
+    during Prompt 5 vEOS validation).  Empty input returns ``[]``.
+    """
+    if not ip_addresses:
+        return []
+    t0 = time.monotonic()
+    client = _get_client()
+    resp = await client.post(
+        "/api/ipam/ip-addresses/",
+        headers={**_headers(), "Content-Type": "application/json"},
+        json=ip_addresses,
+    )
+    _raise_for_write(resp, operation="create_ip_addresses_bulk")
+    body = resp.json()
+    log.info("nautobot_write", "create_ip_addresses_bulk ok", context={
+        "count": len(body) if isinstance(body, list) else 1,
+        "status_code": resp.status_code,
+        "duration_ms": round((time.monotonic() - t0) * 1000, 1),
+    })
+    return body if isinstance(body, list) else [body]
+
+
+async def link_ips_to_interfaces_bulk(links: list[dict]) -> list[dict]:
+    """POST /api/ipam/ip-address-to-interface/ with an array body.
+
+    Reality-check §1.4 through-model endpoint. Each element must be
+    ``{"ip_address": <uuid>, "interface": <uuid>, "is_primary": bool}``.
+    Empty input returns ``[]``.
+    """
+    if not links:
+        return []
+    t0 = time.monotonic()
+    client = _get_client()
+    resp = await client.post(
+        "/api/ipam/ip-address-to-interface/",
+        headers={**_headers(), "Content-Type": "application/json"},
+        json=links,
+    )
+    _raise_for_write(resp, operation="link_ips_to_interfaces_bulk")
+    body = resp.json()
+    log.info("nautobot_write", "link_ips_to_interfaces_bulk ok", context={
+        "count": len(body) if isinstance(body, list) else 1,
+        "status_code": resp.status_code,
+        "duration_ms": round((time.monotonic() - t0) * 1000, 1),
+    })
+    return body if isinstance(body, list) else [body]
+
+
+async def ensure_management_interface(
+    device_id: str,
+    expected_name: str,
+    status_id: str,
+) -> dict:
+    """Return the management interface for a device, creating if absent.
+
+    Reality-check Test 4 finding: device-type templates auto-create
+    interfaces, so the management interface may already exist when the
+    orchestrator reaches its Step B. This helper is the query-and-reuse
+    wrapper the orchestrator calls — it never raises on duplicate.
+    """
+    existing = await find_interface_by_name(device_id, expected_name)
+    if existing is not None:
+        log.debug("ensure_mgmt_iface", "reused template-created interface",
+                  context={"device_id": device_id, "name": expected_name,
+                           "interface_id": existing.get("id")})
+        return existing
+    return await create_interface(
+        device_id=device_id, name=expected_name,
+        type_="virtual", status_id=status_id,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Category 4 — IPAddress management.
+# Reality-check §1.3 (ordering), §1.4 (IP↔Interface through model),
+# Test 7 (IP does NOT cascade on device delete).
+# ---------------------------------------------------------------------------
+
+async def create_ip_address(
+    *,
+    address: str,
+    status_id: str,
+    namespace_id: "str | None" = None,
+    parent_prefix_id: "str | None" = None,
+) -> dict:
+    """POST /api/ipam/ip-addresses/ — create an IP address.
+
+    Required fields per reality-check §1.2: ``address``, ``status``. The
+    covering prefix (``parent_prefix_id`` if passed, otherwise any matching
+    prefix in the namespace) must already exist — Nautobot 3.x rejects
+    orphan IPs.
+    """
+    payload: dict = {
+        "address": address,
+        "status": status_id,
+        "type": "host",
+    }
+    if namespace_id:
+        payload["namespace"] = namespace_id
+    if parent_prefix_id:
+        payload["parent"] = parent_prefix_id
+
+    t0 = time.monotonic()
+    client = _get_client()
+    resp = await client.post(
+        "/api/ipam/ip-addresses/",
+        headers={**_headers(), "Content-Type": "application/json"},
+        json=payload,
+    )
+    _raise_for_write(resp, operation="create_ip_address")
+    body = resp.json()
+    log.info("nautobot_write", "create_ip_address ok", context={
+        "address": address, "ip_id": body.get("id"),
+        "status_code": resp.status_code,
+        "duration_ms": round((time.monotonic() - t0) * 1000, 1),
+    })
+    return body
+
+
+async def link_ip_to_interface(
+    ip_id: str,
+    interface_id: str,
+    *,
+    is_primary: bool = False,
+) -> dict:
+    """Link an IP to an interface via the IPAddressToInterface through model.
+
+    Reality-check §1.4: Nautobot 3.x moved IP↔Interface linking to a through
+    model at ``/api/ipam/ip-address-to-interface/``. The design spike's
+    earlier ``PATCH /ipam/ip-addresses/{id}/`` approach is superseded.
+    Reality-check Test 2 confirmed that ``primary_ip4`` cannot be set until
+    this link exists — Nautobot validates assignment, not just the UUID.
+    """
+    payload = {
+        "ip_address": ip_id,
+        "interface": interface_id,
+        "is_primary": is_primary,
+    }
+    t0 = time.monotonic()
+    client = _get_client()
+    resp = await client.post(
+        "/api/ipam/ip-address-to-interface/",
+        headers={**_headers(), "Content-Type": "application/json"},
+        json=payload,
+    )
+    _raise_for_write(resp, operation="link_ip_to_interface")
+    body = resp.json()
+    log.info("nautobot_write", "link_ip_to_interface ok", context={
+        "ip_id": ip_id, "interface_id": interface_id, "link_id": body.get("id"),
+        "status_code": resp.status_code,
+        "duration_ms": round((time.monotonic() - t0) * 1000, 1),
+    })
+    return body
+
+
+async def delete_ip_address(ip_id: str) -> None:
+    """DELETE /api/ipam/ip-addresses/{id}/ — remove an IP.
+
+    Reality-check Test 7: deleting a device cascades to interfaces but
+    **not** to IPs. Orchestrator rollback must call this explicitly for
+    every IP created during a failed onboarding.
+    """
+    t0 = time.monotonic()
+    client = _get_client()
+    resp = await client.delete(
+        f"/api/ipam/ip-addresses/{ip_id}/",
+        headers=_headers(),
+    )
+    _raise_for_write(resp, operation="delete_ip_address")
+    log.info("nautobot_write", "delete_ip_address ok", context={
+        "ip_id": ip_id, "status_code": resp.status_code,
+        "duration_ms": round((time.monotonic() - t0) * 1000, 1),
+    })
+
+
+# ---------------------------------------------------------------------------
+# Category 5 — Device primary IP + status + delete.
+# Reality-check Test 2 (primary_ip4 requires through-model link),
+# Test 7 (device delete cascades interfaces, not IPs).
+# ---------------------------------------------------------------------------
+
+async def set_device_primary_ip4(device_id: str, ip_id: str) -> dict:
+    """PATCH /api/dcim/devices/{id}/ with ``primary_ip4 = ip_id``.
+
+    Reality-check Test 2: Nautobot rejects with 400 and body
+    ``{"primary_ip4": ["The specified IP address (…) is not assigned to
+    this device."]}`` if the IP has not been linked to one of the device's
+    interfaces via :func:`link_ip_to_interface`. The orchestrator must call
+    link_ip_to_interface first.
+    """
+    t0 = time.monotonic()
+    client = _get_client()
+    resp = await client.patch(
+        f"/api/dcim/devices/{device_id}/",
+        headers={**_headers(), "Content-Type": "application/json"},
+        json={"primary_ip4": ip_id},
+    )
+    _raise_for_write(resp, operation="set_device_primary_ip4")
+    body = resp.json()
+    log.info("nautobot_write", "set_device_primary_ip4 ok", context={
+        "device_id": device_id, "ip_id": ip_id,
+        "status_code": resp.status_code,
+        "duration_ms": round((time.monotonic() - t0) * 1000, 1),
+    })
+    return body
+
+
+async def set_device_status(device_id: str, status_id: str) -> dict:
+    """PATCH /api/dcim/devices/{id}/ with ``status = status_id``.
+
+    Used by the orchestrator to move a device between the Active /
+    Onboarding Incomplete / Onboarding Failed statuses (reality-check §2).
+    """
+    t0 = time.monotonic()
+    client = _get_client()
+    resp = await client.patch(
+        f"/api/dcim/devices/{device_id}/",
+        headers={**_headers(), "Content-Type": "application/json"},
+        json={"status": status_id},
+    )
+    _raise_for_write(resp, operation="set_device_status")
+    body = resp.json()
+    log.info("nautobot_write", "set_device_status ok", context={
+        "device_id": device_id, "status_id": status_id,
+        "status_code": resp.status_code,
+        "duration_ms": round((time.monotonic() - t0) * 1000, 1),
+    })
+    return body
+
+
+async def delete_device(device_id: str) -> None:
+    """DELETE /api/dcim/devices/{id}/ — remove a device.
+
+    Reality-check Test 7: interfaces cascade on delete (204 → interfaces
+    gone), but IPs do NOT. Orchestrator rollback must explicitly call
+    :func:`delete_ip_address` for IPs it created.
+    """
+    t0 = time.monotonic()
+    client = _get_client()
+    resp = await client.delete(
+        f"/api/dcim/devices/{device_id}/",
+        headers=_headers(),
+    )
+    _raise_for_write(resp, operation="delete_device")
+    log.info("nautobot_write", "delete_device ok", context={
+        "device_id": device_id, "status_code": resp.status_code,
+        "duration_ms": round((time.monotonic() - t0) * 1000, 1),
+    })
+
+
+# ---------------------------------------------------------------------------
+# Category 6 — Pre-check for strict-new onboarding (operator Q2 decision).
+# Reality-check Test 5: uniqueness is ``(name, tenant, location)``.
+# ---------------------------------------------------------------------------
+
+async def device_exists_at_location(name: str, location_id: str) -> bool:
+    """Return True if a device with this name already exists at this location.
+
+    Operator Q2 decision: onboarding is strict-new. The orchestrator uses
+    this pre-check to fail fast with a clear error rather than let create
+    raise :class:`NautobotDuplicateError` mid-sequence.
+    """
+    client = _get_client()
+    resp = await client.get(
+        "/api/dcim/devices/",
+        # Nautobot 3.x filter name is `location=`; `location_id=` returns 400.
+        params={"name": name, "location": location_id, "limit": 1},
+        headers=_headers(),
+    )
+    resp.raise_for_status()
+    return resp.json().get("count", 0) > 0
+
+
+async def find_device_at_location(name: str, location_id: str) -> "dict | None":
+    """Return the device record for (name, location) or None.
+
+    Companion to :func:`device_exists_at_location` that returns the full
+    record, used by the onboarding orchestrator's strict-new pre-check
+    (operator Q2 decision — reality-check §4.5). The caller typically
+    doesn't need the record body, but having it available lets future
+    UI integration (Prompt 8) surface "device already exists as …" with
+    context instead of a generic refusal.
+    """
+    client = _get_client()
+    resp = await client.get(
+        "/api/dcim/devices/",
+        # Nautobot 3.x filter name is `location=`; `location_id=` returns 400.
+        params={"name": name, "location": location_id, "limit": 1, "depth": 1},
+        headers=_headers(),
+    )
+    resp.raise_for_status()
+    results = resp.json().get("results", [])
+    return results[0] if results else None
+
+
+# ---------------------------------------------------------------------------
+# Category 7 — Custom Status bootstrap (operator Q5 decision).
+# Reality-check §2: the two custom Statuses must exist before Prompt 4 fires.
+# ---------------------------------------------------------------------------
+
+_CUSTOM_STATUSES = [
+    {
+        "slug": "onboarding-incomplete",
+        "name": "Onboarding Incomplete",
+        "color": "ff9800",
+        "description": (
+            "Device created via MNM onboarding; Phase 2 network data sync "
+            "failed or incomplete."
+        ),
+        "content_types": ["dcim.device"],
+    },
+    {
+        "slug": "onboarding-failed",
+        "name": "Onboarding Failed",
+        "color": "b71c1c",
+        "description": (
+            "Device onboarding failed before device creation completed. "
+            "Retry or delete."
+        ),
+        "content_types": ["dcim.device"],
+    },
+]
+
+
+async def ensure_custom_statuses() -> dict[str, str]:
+    """Ensure ``Onboarding Incomplete`` and ``Onboarding Failed`` Statuses exist.
+
+    Returns ``{slug: uuid}`` for both Statuses. Idempotent: queries by name
+    first and only POSTs when absent, so safe to call at every controller
+    startup. Reality-check §2 describes the request shape.
+
+    The caller is expected to tolerate Nautobot being briefly unavailable —
+    this function propagates httpx exceptions up; ``main.on_startup`` catches
+    them and logs a warning so the controller still comes up.
+    """
+    client = _get_client()
+
+    out: dict[str, str] = {}
+    actions: list[str] = []
+    for desired in _CUSTOM_STATUSES:
+        slug = desired["slug"]
+        name = desired["name"]
+        existing = await get_status_by_name(name, content_type="dcim.device")
+        if existing is not None:
+            out[slug] = existing["id"]
+            actions.append(f"{slug}=verified")
+            continue
+        payload = {k: v for k, v in desired.items() if k != "slug"}
+        t0 = time.monotonic()
+        post_resp = await client.post(
+            "/api/extras/statuses/",
+            headers={**_headers(), "Content-Type": "application/json"},
+            json=payload,
+        )
+        _raise_for_write(post_resp, operation="ensure_custom_status")
+        body = post_resp.json()
+        out[slug] = body["id"]
+        actions.append(f"{slug}=created")
+        # Invalidate any cached statuses list so downstream callers see the
+        # new Status on their next request.
+        clear_cache()
+        log.info("nautobot_write", "ensure_custom_status ok", context={
+            "slug": slug, "status_id": body["id"],
+            "status_code": post_resp.status_code,
+            "duration_ms": round((time.monotonic() - t0) * 1000, 1),
+        })
+
+    log.info("db_init_custom_statuses",
+             "custom status bootstrap complete",
+             context={"slugs": [d["slug"] for d in _CUSTOM_STATUSES],
+                      "actions": actions})
+    return out

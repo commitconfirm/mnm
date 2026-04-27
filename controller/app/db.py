@@ -494,6 +494,14 @@ class NodeLldpEntry(Base):
     remote_port = Column(Text, nullable=False, default="")
     remote_chassis_id = Column(Text)
     remote_management_ip = Column(Text)
+    # Block C expansion columns (migration c3208527926f). Populated by the
+    # SNMP-based LLDP collector landing in Block C P5; NULL for rows from
+    # the NAPALM path still in use until then.
+    local_port_ifindex = Column(Integer, nullable=True)
+    local_port_name = Column(Text, nullable=True)
+    remote_chassis_id_subtype = Column(Text, nullable=True)
+    remote_port_id_subtype = Column(Text, nullable=True)
+    remote_system_description = Column(Text, nullable=True)
     collected_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False, index=True)
 
     __table_args__ = (
@@ -509,6 +517,11 @@ class NodeLldpEntry(Base):
             "remote_port": self.remote_port or "",
             "remote_chassis_id": self.remote_chassis_id or "",
             "remote_management_ip": self.remote_management_ip or "",
+            "local_port_ifindex": self.local_port_ifindex,
+            "local_port_name": self.local_port_name or "",
+            "remote_chassis_id_subtype": self.remote_chassis_id_subtype or "",
+            "remote_port_id_subtype": self.remote_port_id_subtype or "",
+            "remote_system_description": self.remote_system_description or "",
             "collected_at": self.collected_at.isoformat() if self.collected_at else "",
         }
 
@@ -691,21 +704,98 @@ class EndpointProbe(Base):
 _db_ready: bool = False
 
 
-async def _try_init_db() -> bool:
-    """Single connection attempt — create tables if missing. Returns True on success."""
+# Sentinel table name used to detect "existing schema from the pre-Alembic era".
+# Any core application table works — sweep_runs exists since Phase 2.5 and is
+# present on every installation that has ever run db.init_db().
+_SENTINEL_TABLE = "sweep_runs"
+
+
+def _alembic_ini_path() -> str:
+    """Return the path to alembic.ini.
+
+    In the container: /app/alembic.ini.  In dev/test with the repo checked
+    out: controller/alembic.ini.  ALEMBIC_CONFIG env var overrides for tests
+    that point at a throwaway config.
+    """
+    override = os.environ.get("ALEMBIC_CONFIG")
+    if override:
+        return override
+    # Running inside container: /app/alembic.ini sits alongside /app/app/db.py
+    container_path = "/app/alembic.ini"
+    if os.path.exists(container_path):
+        return container_path
+    # Dev / test path relative to this file
+    here = os.path.dirname(os.path.abspath(__file__))
+    return os.path.abspath(os.path.join(here, "..", "alembic.ini"))
+
+
+async def _table_exists(conn, table_name: str) -> bool:
+    """Return True if ``table_name`` exists in the connected database."""
     from sqlalchemy import text
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        for col, typ in [
-            ("classification_confidence", "TEXT"),
-            ("classification_override", "BOOLEAN NOT NULL DEFAULT false"),
-        ]:
-            try:
-                await conn.execute(text(
-                    f"ALTER TABLE endpoints ADD COLUMN IF NOT EXISTS {col} {typ}"
-                ))
-            except Exception:
-                pass  # Column already exists — IF NOT EXISTS isn't universally atomic
+    result = await conn.execute(
+        text(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = current_schema() AND table_name = :t"
+        ),
+        {"t": table_name},
+    )
+    return result.first() is not None
+
+
+def _run_alembic_command(action: str) -> None:
+    """Synchronous Alembic command runner — called via ``asyncio.to_thread``.
+
+    action = "upgrade" → ``alembic upgrade head``
+    action = "stamp"   → ``alembic stamp head`` (mark schema without running SQL)
+    """
+    from alembic import command
+    from alembic.config import Config
+
+    cfg = Config(_alembic_ini_path())
+    if action == "upgrade":
+        command.upgrade(cfg, "head")
+    elif action == "stamp":
+        command.stamp(cfg, "head")
+    else:
+        raise ValueError(f"Unknown alembic action: {action!r}")
+
+
+async def _try_init_db() -> bool:
+    """Single connection attempt — apply Alembic migrations. Returns True on success.
+
+    Routes:
+    - Fresh DB (no alembic_version, no app tables)  → upgrade head (creates tables)
+    - Legacy DB (no alembic_version, app tables present) → stamp head (marks baseline)
+    - Already-migrated DB (alembic_version present) → upgrade head (no-op or applies new)
+    """
+    async with engine.connect() as conn:
+        has_alembic = await _table_exists(conn, "alembic_version")
+        has_app_tables = await _table_exists(conn, _SENTINEL_TABLE)
+
+    if has_alembic:
+        action = "upgrade"
+        path = "already_stamped"
+    elif has_app_tables:
+        action = "stamp"
+        path = "legacy_schema_stamped"
+    else:
+        action = "upgrade"
+        path = "fresh_install"
+
+    log.info("db_init_alembic",
+             "Applying Alembic migrations",
+             context={"action": action, "path": path,
+                      "has_alembic_version": has_alembic,
+                      "has_app_tables": has_app_tables})
+
+    await asyncio.to_thread(_run_alembic_command, action)
+
+    # On legacy_schema_stamped we've only recorded the baseline — subsequent
+    # migrations (if any) still need to run.  Harmless no-op on a fresh install
+    # because we just upgraded to head above.
+    if action == "stamp":
+        await asyncio.to_thread(_run_alembic_command, "upgrade")
+
     return True
 
 

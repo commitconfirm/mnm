@@ -97,37 +97,58 @@
       </div>
 
       <div id="section-endpoints" class="result-section card" style="display:none">
-        <h3>Endpoint Matches <span class="count" id="ep-count"></span></h3>
+        <div class="section-head">
+          <h3>Endpoint Matches <span class="count" id="ep-count"></span></h3>
+          <div class="table-export-buttons" data-export-for="ep-table-wrap" data-export-base="mnm-investigation-endpoints"></div>
+        </div>
         <div id="ep-table-wrap"></div>
       </div>
 
       <div id="section-arp" class="result-section card" style="display:none">
-        <h3>ARP Table <span class="count" id="arp-count"></span></h3>
+        <div class="section-head">
+          <h3>ARP Table <span class="count" id="arp-count"></span></h3>
+          <div class="table-export-buttons" data-export-for="arp-table-wrap" data-export-base="mnm-investigation-arp"></div>
+        </div>
         <div id="arp-table-wrap"></div>
       </div>
 
       <div id="section-mac" class="result-section card" style="display:none">
-        <h3>MAC Table <span class="count" id="mac-count"></span></h3>
+        <div class="section-head">
+          <h3>MAC Table <span class="count" id="mac-count"></span></h3>
+          <div class="table-export-buttons" data-export-for="mac-table-wrap" data-export-base="mnm-investigation-mac"></div>
+        </div>
         <div id="mac-table-wrap"></div>
       </div>
 
       <div id="section-routes" class="result-section card" style="display:none">
-        <h3>Routing Table <span class="count" id="route-count"></span></h3>
+        <div class="section-head">
+          <h3>Routing Table <span class="count" id="route-count"></span></h3>
+          <div class="table-export-buttons" data-export-for="route-table-wrap" data-export-base="mnm-investigation-routes"></div>
+        </div>
         <div id="route-table-wrap"></div>
       </div>
 
       <div id="section-fib" class="result-section card" style="display:none">
-        <h3>Forwarding Table (FIB) <span class="count" id="fib-count"></span></h3>
+        <div class="section-head">
+          <h3>Forwarding Table (FIB) <span class="count" id="fib-count"></span></h3>
+          <div class="table-export-buttons" data-export-for="fib-table-wrap" data-export-base="mnm-investigation-fib"></div>
+        </div>
         <div id="fib-table-wrap"></div>
       </div>
 
       <div id="section-gateways" class="result-section card" style="display:none">
-        <h3>Gateway Identification <span class="count" id="gw-count"></span></h3>
+        <div class="section-head">
+          <h3>Gateway Identification <span class="count" id="gw-count"></span></h3>
+          <div class="table-export-buttons" data-export-for="gw-table-wrap" data-export-base="mnm-investigation-gateways"></div>
+        </div>
         <div id="gw-table-wrap"></div>
       </div>
 
       <div id="section-lldp" class="result-section card" style="display:none">
-        <h3>LLDP Matches <span class="count" id="lldp-count"></span></h3>
+        <div class="section-head">
+          <h3>LLDP Matches <span class="count" id="lldp-count"></span></h3>
+          <div class="table-export-buttons" data-export-for="lldp-table-wrap" data-export-base="mnm-investigation-lldp"></div>
+        </div>
         <div id="lldp-table-wrap"></div>
       </div>
 
@@ -139,6 +160,8 @@
 
   <script src="/static/js/datatable.js"></script>
   <script src="/static/js/icons.js"></script>
+  <script src="/static/js/col-help.js"></script>
+  <script src="/static/js/table-export.js"></script>
   <script src="/static/js/preferences.js"></script>
   <script src="/static/js/investigate.js"></script>
 </body>

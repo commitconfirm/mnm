@@ -987,8 +987,19 @@ async def upsert_node_mac_bulk(node_name: str, entries: list[dict]) -> int:
 async def upsert_node_lldp_bulk(node_name: str, lldp_data: dict) -> int:
     """Bulk upsert LLDP neighbor entries for a node.
 
-    lldp_data is the NAPALM get_lldp_neighbors format:
-    {interface: [{hostname, port}, ...]}
+    lldp_data is the NAPALM-shaped per-interface dict
+    ``{interface: [{hostname, port, ...}, ...]}``. The SNMP path
+    (``polling.collect_lldp`` from Block C P5 onward) builds the same
+    shape and additionally supplies the 5 expansion fields added by P2
+    migration ``c3208527926f``: ``local_port_ifindex``,
+    ``local_port_name``, ``remote_chassis_id_subtype``,
+    ``remote_port_id_subtype``, ``remote_system_description``.
+
+    Expansion fields are read from ``n.get(...)`` with ``None`` default —
+    NAPALM-shaped callers omit them and the columns stay NULL, the SNMP
+    path supplies them. on_conflict_do_update refreshes the expansion
+    fields alongside the legacy columns so a re-poll picks up changes
+    when a neighbor's chassis/port subtypes or system description shift.
     """
     if not db.is_ready() or not lldp_data:
         return 0
@@ -1008,6 +1019,13 @@ async def upsert_node_lldp_bulk(node_name: str, lldp_data: dict) -> int:
                 "remote_port": n.get("port") or n.get("remote_port") or "",
                 "remote_chassis_id": n.get("remote_chassis_id") or "",
                 "remote_management_ip": n.get("remote_management_ip") or "",
+                # Block C P2 expansion columns. None default keeps
+                # NAPALM-shaped callers (no expansion data) writing NULL.
+                "local_port_ifindex": n.get("local_port_ifindex"),
+                "local_port_name": n.get("local_port_name"),
+                "remote_chassis_id_subtype": n.get("remote_chassis_id_subtype"),
+                "remote_port_id_subtype": n.get("remote_port_id_subtype"),
+                "remote_system_description": n.get("remote_system_description"),
                 "collected_at": now,
             })
 
@@ -1020,6 +1038,11 @@ async def upsert_node_lldp_bulk(node_name: str, lldp_data: dict) -> int:
             set_={
                 "remote_chassis_id": stmt.excluded.remote_chassis_id,
                 "remote_management_ip": stmt.excluded.remote_management_ip,
+                "local_port_ifindex": stmt.excluded.local_port_ifindex,
+                "local_port_name": stmt.excluded.local_port_name,
+                "remote_chassis_id_subtype": stmt.excluded.remote_chassis_id_subtype,
+                "remote_port_id_subtype": stmt.excluded.remote_port_id_subtype,
+                "remote_system_description": stmt.excluded.remote_system_description,
                 "collected_at": stmt.excluded.collected_at,
             },
         )

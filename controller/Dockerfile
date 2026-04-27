@@ -10,6 +10,8 @@ RUN pip install --no-cache-dir -r requirements.txt && \
     python3 -c "from mac_vendor_lookup import MacLookup; MacLookup().update_vendors()" 2>/dev/null || true
 
 COPY app/ ./app/
+COPY alembic/ ./alembic/
+COPY alembic.ini ./alembic.ini
 
 EXPOSE 9090
 
