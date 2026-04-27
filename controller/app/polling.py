@@ -22,7 +22,8 @@ import time
 from datetime import datetime, timezone, timedelta
 
 from app import (
-    db, nautobot_client, endpoint_store, snmp_collector, arp_snmp, mac_snmp,
+    db, nautobot_client, endpoint_store, snmp_collector,
+    arp_snmp, mac_snmp, lldp_snmp,
 )
 from app.logging_config import StructuredLogger
 
@@ -709,15 +710,133 @@ async def collect_dhcp(device_name: str, device_id: str, device_ip: str | None =
                 "error": err, "count": 0, "duration": duration}
 
 
-async def collect_lldp(device_name: str, device_id: str) -> dict:
-    """Collect LLDP neighbors from one device."""
+async def collect_lldp(device_name: str, device_id: str,
+                       device_ip: "str | None" = None) -> dict:
+    """Collect LLDP neighbors from one device via direct SNMP (Block C P5).
+
+    Walks lldpRemTable + lldpRemManAddrTable through ``lldp_snmp``. Uses
+    ``snmp_collector.collect_ifindex_to_name`` to resolve each neighbor's
+    ``local_port_ifindex`` to a Junos-style local-interface name; sentinel
+    ``ifindex:N`` on resolution miss preserves the entry per Rule 7.
+
+    Adapter groups by local interface name to match the existing
+    ``upsert_node_lldp_bulk`` dict-shape contract (NAPALM-shape held during
+    P5/P6 soak window). All 5 expansion columns added by P2 migration
+    (``local_port_ifindex``, ``local_port_name``,
+    ``remote_chassis_id_subtype``, ``remote_port_id_subtype``,
+    ``remote_system_description``) populate from the LldpNeighbor fields.
+
+    Returns the same {device_name, job_type, success, entries, count,
+    duration} shape the dispatcher expects. ``entries`` is the grouped
+    dict for downstream readers.
+    """
+    t0 = time.monotonic()
+    await _mark_attempt(device_name, "lldp")
+
+    if not device_ip:
+        duration = time.monotonic() - t0
+        err = "no primary_ip4 on device"
+        await _mark_failure(device_name, "lldp", err, duration)
+        log.warning("lldp_snmp_collect_failed",
+                    "LLDP collection skipped — no device IP",
+                    context={"device": device_name, "error": err})
+        return {"device_name": device_name, "job_type": "lldp", "success": False,
+                "error": err, "count": 0, "duration": duration}
+
+    community = os.environ.get("SNMP_COMMUNITY", "public")
+    log.debug("lldp_snmp_collect_start", "Direct-SNMP LLDP collection start",
+              context={"device": device_name})
+
+    try:
+        neighbors = await lldp_snmp.collect_lldp(device_ip, community)
+    except snmp_collector.SnmpError as exc:
+        duration = time.monotonic() - t0
+        err = f"{exc.__class__.__name__}: {str(exc)[:400]}"
+        await _mark_failure(device_name, "lldp", err, duration)
+        log.warning("lldp_snmp_collect_failed",
+                    "Direct-SNMP LLDP collection failed",
+                    context={"device": device_name, "error": err,
+                             "exc_class": exc.__class__.__name__})
+        return {"device_name": device_name, "job_type": "lldp", "success": False,
+                "error": err, "count": 0, "duration": duration}
+
+    # ifIndex → name resolution. lldp_snmp.collect_lldp already resolves
+    # local_port_name internally via the same helper, but we re-run here
+    # to derive the *grouping key* (the dict key the upsert uses to derive
+    # local_interface). Empty map → all entries get ifindex:N sentinels.
+    name_map = await snmp_collector.collect_ifindex_to_name(device_ip, community)
+
+    sentinel_count = 0
+    grouped: dict[str, list[dict]] = {}
+    # Dedupe by the upsert's UNIQUE constraint
+    # (node_name, local_interface, remote_system_name, remote_port).
+    # Two distinct neighbors on the same local port can collapse to the
+    # same key when both have remote_system_name=None (None → "" via the
+    # `or ""` coercion below) and identical remote_port_id — observed on
+    # ex4300-48t ge-0/0/24 with two unmanaged neighbors advertising the
+    # same port-MAC identifier but different chassis IDs. PostgreSQL ON
+    # CONFLICT DO UPDATE raises CardinalityViolationError on a single
+    # batch with duplicate keys; same class of bug as P3's Junos lo0.X
+    # collision. Keep first seen — matches NAPALM's implicit dedup.
+    seen_keys: set[tuple[str, str, str]] = set()
+    for n in neighbors:
+        local_idx = n.local_port_ifindex
+        local_iface = name_map.get(local_idx, f"ifindex:{local_idx}")
+        if local_iface.startswith("ifindex:"):
+            sentinel_count += 1
+
+        sys_name = n.remote_system_name or ""
+        remote_port = n.remote_port_id or ""
+        key = (local_iface, sys_name, remote_port)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+
+        grouped.setdefault(local_iface, []).append({
+            # Existing NAPALM-shape fields the upsert reads
+            "remote_system_name": sys_name,
+            "remote_port": remote_port,
+            "remote_chassis_id": n.remote_chassis_id or "",
+            "remote_management_ip": n.management_ip or "",
+            # Block C P2 expansion columns (P5 first populator)
+            "local_port_ifindex": local_idx,
+            "local_port_name": n.local_port_name or local_iface,
+            "remote_chassis_id_subtype": n.remote_chassis_id_subtype,
+            "remote_port_id_subtype": n.remote_port_id_subtype,
+            "remote_system_description": n.remote_system_description,
+        })
+
+    try:
+        await endpoint_store.upsert_node_lldp_bulk(device_name, grouped)
+    except Exception:  # noqa: BLE001 — persistence failure shouldn't kill collection
+        pass
+
+    persisted_count = sum(len(v) for v in grouped.values())
+    duration = time.monotonic() - t0
+    await _mark_success(device_name, "lldp", duration)
+    log.info("lldp_snmp_collect_complete",
+             "Direct-SNMP LLDP collection complete",
+             context={"device": device_name,
+                      "neighbors_raw": len(neighbors),
+                      "neighbors_persisted": persisted_count,
+                      "local_interfaces": len(grouped),
+                      "sentinel_neighbors": sentinel_count,
+                      "duration": round(duration, 1)})
+    return {"device_name": device_name, "job_type": "lldp", "success": True,
+            "entries": grouped, "count": persisted_count, "duration": duration}
+
+
+# DEPRECATED — unreferenced as of Block C P5. Removal scheduled for
+# Block C P6 after a 1-cycle soak window. Do not call this from new
+# code. The active LLDP collection path is :func:`collect_lldp` above.
+async def _collect_lldp_napalm_deprecated(device_name: str, device_id: str) -> dict:
+    """Original NAPALM-proxy LLDP path. Replaced by direct SNMP in Block C P5."""
     t0 = time.monotonic()
     await _mark_attempt(device_name, "lldp")
     try:
         data = await nautobot_client.napalm_get(device_id, "get_lldp_neighbors")
         neighbors = data.get("get_lldp_neighbors", {})
         count = sum(len(v) if isinstance(v, list) else 1 for v in neighbors.values())
-        # Persist raw LLDP data (Phase 2.85)
         try:
             await endpoint_store.upsert_node_lldp_bulk(device_name, neighbors)
         except Exception:
@@ -1111,7 +1230,8 @@ async def poll_device(device_name: str, device_id: str,
         elif jt == "dhcp":
             results.append(await collect_dhcp(device_name, device_id, device_ip, is_junos))
         elif jt == "lldp":
-            results.append(await collect_lldp(device_name, device_id))
+            results.append(await collect_lldp(device_name, device_id,
+                                              device_ip=device_ip))
         elif jt == "routes":
             results.append(await collect_routes(device_name, device_id, device_ip=device_ip))
         elif jt == "bgp":
