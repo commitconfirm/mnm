@@ -21,7 +21,9 @@ import random
 import time
 from datetime import datetime, timezone, timedelta
 
-from app import db, nautobot_client, endpoint_store, snmp_collector, arp_snmp
+from app import (
+    db, nautobot_client, endpoint_store, snmp_collector, arp_snmp, mac_snmp,
+)
 from app.logging_config import StructuredLogger
 
 log = StructuredLogger(__name__, module="polling")
@@ -532,14 +534,128 @@ async def _collect_arp_napalm_deprecated(device_name: str, device_id: str) -> di
                 "error": err, "count": 0, "duration": duration}
 
 
-async def collect_mac(device_name: str, device_id: str) -> dict:
-    """Collect MAC address table from one device."""
+async def collect_mac(device_name: str, device_id: str,
+                      device_ip: "str | None" = None) -> dict:
+    """Collect MAC/FDB table from one device via direct SNMP (Block C P4).
+
+    Walks dot1qTpFdbTable / dot1dTpFdbTable through ``mac_snmp``, then
+    resolves each entry's ``bridge_port`` to an interface name through two
+    paired walks: ``snmp_collector.collect_bridgeport_to_ifindex`` (BRIDGE-MIB
+    dot1dBasePortIfIndex) and ``snmp_collector.collect_ifindex_to_name``
+    (IF-MIB ifName / ifDescr fallback). Unresolved bridge ports fall back to
+    ``ifindex:N`` sentinel strings so data is preserved (Rule 7) even when the
+    bridge-port table or ifTable is unwalkable.
+
+    Returns the same {device_name, job_type, success, entries, count,
+    duration} shape the dispatcher and ``_correlate_and_record`` expect.
+    Each entry dict matches the {mac, interface, vlan, static} contract that
+    ``upsert_node_mac_bulk`` and ``endpoint_collector._correlate_endpoints``
+    read.
+    """
+    t0 = time.monotonic()
+    await _mark_attempt(device_name, "mac")
+
+    if not device_ip:
+        duration = time.monotonic() - t0
+        err = "no primary_ip4 on device"
+        await _mark_failure(device_name, "mac", err, duration)
+        log.warning("mac_snmp_collect_failed",
+                    "MAC collection skipped — no device IP",
+                    context={"device": device_name, "error": err})
+        return {"device_name": device_name, "job_type": "mac", "success": False,
+                "error": err, "count": 0, "duration": duration}
+
+    community = os.environ.get("SNMP_COMMUNITY", "public")
+    log.debug("mac_snmp_collect_start", "Direct-SNMP MAC collection start",
+              context={"device": device_name})
+
+    try:
+        mac_entries = await mac_snmp.collect_mac(device_ip, community)
+    except snmp_collector.SnmpError as exc:
+        duration = time.monotonic() - t0
+        err = f"{exc.__class__.__name__}: {str(exc)[:400]}"
+        await _mark_failure(device_name, "mac", err, duration)
+        log.warning("mac_snmp_collect_failed",
+                    "Direct-SNMP MAC collection failed",
+                    context={"device": device_name, "error": err,
+                             "exc_class": exc.__class__.__name__})
+        return {"device_name": device_name, "job_type": "mac", "success": False,
+                "error": err, "count": 0, "duration": duration}
+
+    # Bridge-port → ifIndex and ifIndex → name. Both helpers swallow SnmpError
+    # internally and return {} on failure; an empty map means affected entries
+    # get the ifindex:N sentinel — degraded but data preserved.
+    bridge_to_ifindex = await snmp_collector.collect_bridgeport_to_ifindex(
+        device_ip, community,
+    )
+    name_map = await snmp_collector.collect_ifindex_to_name(device_ip, community)
+
+    sentinel_count = 0
+    # Dedupe by (mac.upper(), interface, vlan_int) — matches the upsert's
+    # uq_mac_node_mac_iface_vlan unique constraint. Same dedup discipline as
+    # the ARP path (P3): PostgreSQL ON CONFLICT DO UPDATE raises
+    # CardinalityViolationError if the same constrained tuple appears twice
+    # in one batch. Within the FDB table this is rare, but defensive against
+    # orphan-FDB rows that all dedupe to vlan=0.
+    seen_keys: set[tuple[str, str, int]] = set()
+    entries: list[dict] = []
+    for entry in mac_entries:
+        ifindex = bridge_to_ifindex.get(entry.bridge_port)
+        if ifindex is None:
+            # Bridge-port not in the dot1dBasePortTable — keep bridge_port in
+            # the sentinel so operators can correlate back to the FDB row.
+            interface = f"ifindex:{entry.bridge_port}"
+            sentinel_count += 1
+        else:
+            resolved = name_map.get(ifindex)
+            if resolved is None:
+                interface = f"ifindex:{ifindex}"
+                sentinel_count += 1
+            else:
+                interface = resolved
+
+        vlan_int = int(entry.vlan or 0)
+        mac_upper = (entry.mac_address or "").upper()
+        key = (mac_upper, interface, vlan_int)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+
+        entries.append({
+            "mac": entry.mac_address,
+            "interface": interface,
+            "vlan": vlan_int,
+            # static = entry was administratively configured (entry_status
+            # of "self" or "mgmt"); learned/other map to dynamic.
+            "static": entry.entry_status in ("self", "mgmt"),
+        })
+
+    try:
+        await endpoint_store.upsert_node_mac_bulk(device_name, entries)
+    except Exception:  # noqa: BLE001 — persistence failure shouldn't kill collection
+        pass
+
+    duration = time.monotonic() - t0
+    await _mark_success(device_name, "mac", duration)
+    log.info("mac_snmp_collect_complete",
+             "Direct-SNMP MAC collection complete",
+             context={"device": device_name, "entries": len(entries),
+                      "sentinel_entries": sentinel_count,
+                      "duration": round(duration, 1)})
+    return {"device_name": device_name, "job_type": "mac", "success": True,
+            "entries": entries, "count": len(entries), "duration": duration}
+
+
+# DEPRECATED — unreferenced as of Block C P4. Removal scheduled for
+# Block C P6 after a 1-cycle soak window. Do not call this from new
+# code. The active MAC collection path is :func:`collect_mac` above.
+async def _collect_mac_napalm_deprecated(device_name: str, device_id: str) -> dict:
+    """Original NAPALM-proxy MAC path. Replaced by direct SNMP in Block C P4."""
     t0 = time.monotonic()
     await _mark_attempt(device_name, "mac")
     try:
         data = await nautobot_client.napalm_get(device_id, "get_mac_address_table")
         entries = data.get("get_mac_address_table", [])
-        # Persist raw MAC data (Phase 2.85)
         try:
             await endpoint_store.upsert_node_mac_bulk(device_name, entries)
         except Exception:
@@ -990,7 +1106,8 @@ async def poll_device(device_name: str, device_id: str,
             results.append(await collect_arp(device_name, device_id,
                                              device_ip=device_ip))
         elif jt == "mac":
-            results.append(await collect_mac(device_name, device_id))
+            results.append(await collect_mac(device_name, device_id,
+                                             device_ip=device_ip))
         elif jt == "dhcp":
             results.append(await collect_dhcp(device_name, device_id, device_ip, is_junos))
         elif jt == "lldp":

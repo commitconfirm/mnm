@@ -96,6 +96,11 @@ OIDS: dict[str, str] = {
     "IF-MIB::ifIndex":                    "1.3.6.1.2.1.2.2.1.1",
     "IF-MIB::ifDescr":                    "1.3.6.1.2.1.2.2.1.2",
     "IF-MIB::ifName":                     "1.3.6.1.2.1.31.1.1.1.1",
+    # Bridge port → ifIndex mapping (BRIDGE-MIB::dot1dBasePortIfIndex column).
+    # Walking this column directly returns one row per bridge port; suffix is
+    # the bridge port number (matches MacEntry.bridge_port), value is ifIndex.
+    # Used by MAC collector to bridge from FDB rows to interface names.
+    "BRIDGE-MIB::dot1dBasePortIfIndex":   "1.3.6.1.2.1.17.1.4.1.2",
     # IP address tables — ipAddressTable (modern, v4+v6) preferred with
     # legacy ipAddrTable fallback for older firmware (e.g. EX3300 12.3
     # returns empty for the modern table).
@@ -559,3 +564,50 @@ async def collect_ifindex_to_name(
                     ifindex_to_name[ifindex] = val.decode("utf-8", errors="replace").rstrip("\x00")
 
     return ifindex_to_name
+
+
+async def collect_bridgeport_to_ifindex(
+    device_ip: str,
+    community: str,
+    *,
+    version: str = "2c",
+    timeout_sec: float = 10.0,
+    port: int = 161,
+) -> dict[int, int]:
+    """Build a {bridge_port: ifIndex} map for a device.
+
+    Walks BRIDGE-MIB::dot1dBasePortIfIndex (1.3.6.1.2.1.17.1.4.1.2) — one row
+    per bridge port; suffix is the bridge port number (matches
+    ``MacEntry.bridge_port`` from ``mac_snmp.collect_mac``), value is the
+    ifIndex of the interface that bridge port maps to.
+
+    Used by the MAC collector to bridge from FDB rows to interface names
+    (bridge_port → ifIndex → ifName via ``collect_ifindex_to_name``).
+
+    Returns:
+        ``{bridge_port: ifIndex}`` dict. Empty on any SNMP error or on
+        devices that don't act as bridges (e.g. firewalls without an L2
+        domain) — callers treat a missing bridge port as "unresolved"
+        rather than a hard failure.
+    """
+    bridge_to_ifindex: dict[int, int] = {}
+
+    try:
+        rows = await walk_table(
+            device_ip, community, OIDS["BRIDGE-MIB::dot1dBasePortIfIndex"],
+            version=version, timeout_sec=timeout_sec, port=port,
+        )
+    except SnmpError:
+        return bridge_to_ifindex
+
+    for row in rows:
+        for suffix, val in row.items():
+            try:
+                bridge_port = int(suffix)
+                ifindex = int(val)
+            except (ValueError, TypeError):
+                continue
+            if bridge_port > 0 and ifindex > 0:
+                bridge_to_ifindex[bridge_port] = ifindex
+
+    return bridge_to_ifindex
