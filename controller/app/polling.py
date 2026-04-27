@@ -505,36 +505,6 @@ async def collect_arp(device_name: str, device_id: str,
             "entries": entries, "count": len(entries), "duration": duration}
 
 
-# DEPRECATED — unreferenced as of Block C P3. Removal scheduled for
-# Block C P6 after a 1-cycle soak window. Do not call this from new
-# code. The active ARP collection path is :func:`collect_arp` above.
-async def _collect_arp_napalm_deprecated(device_name: str, device_id: str) -> dict:
-    """Original NAPALM-proxy ARP path. Replaced by direct SNMP in Block C P3."""
-    t0 = time.monotonic()
-    await _mark_attempt(device_name, "arp")
-    try:
-        data = await nautobot_client.napalm_get(device_id, "get_arp_table")
-        entries = data.get("get_arp_table", [])
-        try:
-            await endpoint_store.upsert_node_arp_bulk(device_name, entries)
-        except Exception:
-            pass
-        duration = time.monotonic() - t0
-        await _mark_success(device_name, "arp", duration)
-        log.info("poll_arp_done", "ARP collection complete",
-                 context={"device": device_name, "entries": len(entries), "duration": round(duration, 1)})
-        return {"device_name": device_name, "job_type": "arp", "success": True,
-                "entries": entries, "count": len(entries), "duration": duration}
-    except Exception as exc:
-        duration = time.monotonic() - t0
-        err = str(exc)[:500]
-        await _mark_failure(device_name, "arp", err, duration)
-        log.warning("poll_arp_failed", "ARP collection failed",
-                    context={"device": device_name, "error": err})
-        return {"device_name": device_name, "job_type": "arp", "success": False,
-                "error": err, "count": 0, "duration": duration}
-
-
 async def collect_mac(device_name: str, device_id: str,
                       device_ip: "str | None" = None) -> dict:
     """Collect MAC/FDB table from one device via direct SNMP (Block C P4).
@@ -645,36 +615,6 @@ async def collect_mac(device_name: str, device_id: str,
                       "duration": round(duration, 1)})
     return {"device_name": device_name, "job_type": "mac", "success": True,
             "entries": entries, "count": len(entries), "duration": duration}
-
-
-# DEPRECATED — unreferenced as of Block C P4. Removal scheduled for
-# Block C P6 after a 1-cycle soak window. Do not call this from new
-# code. The active MAC collection path is :func:`collect_mac` above.
-async def _collect_mac_napalm_deprecated(device_name: str, device_id: str) -> dict:
-    """Original NAPALM-proxy MAC path. Replaced by direct SNMP in Block C P4."""
-    t0 = time.monotonic()
-    await _mark_attempt(device_name, "mac")
-    try:
-        data = await nautobot_client.napalm_get(device_id, "get_mac_address_table")
-        entries = data.get("get_mac_address_table", [])
-        try:
-            await endpoint_store.upsert_node_mac_bulk(device_name, entries)
-        except Exception:
-            pass
-        duration = time.monotonic() - t0
-        await _mark_success(device_name, "mac", duration)
-        log.info("poll_mac_done", "MAC collection complete",
-                 context={"device": device_name, "entries": len(entries), "duration": round(duration, 1)})
-        return {"device_name": device_name, "job_type": "mac", "success": True,
-                "entries": entries, "count": len(entries), "duration": duration}
-    except Exception as exc:
-        duration = time.monotonic() - t0
-        err = str(exc)[:500]
-        await _mark_failure(device_name, "mac", err, duration)
-        log.warning("poll_mac_failed", "MAC collection failed",
-                    context={"device": device_name, "error": err})
-        return {"device_name": device_name, "job_type": "mac", "success": False,
-                "error": err, "count": 0, "duration": duration}
 
 
 async def collect_dhcp(device_name: str, device_id: str, device_ip: str | None = None,
@@ -824,37 +764,6 @@ async def collect_lldp(device_name: str, device_id: str,
                       "duration": round(duration, 1)})
     return {"device_name": device_name, "job_type": "lldp", "success": True,
             "entries": grouped, "count": persisted_count, "duration": duration}
-
-
-# DEPRECATED — unreferenced as of Block C P5. Removal scheduled for
-# Block C P6 after a 1-cycle soak window. Do not call this from new
-# code. The active LLDP collection path is :func:`collect_lldp` above.
-async def _collect_lldp_napalm_deprecated(device_name: str, device_id: str) -> dict:
-    """Original NAPALM-proxy LLDP path. Replaced by direct SNMP in Block C P5."""
-    t0 = time.monotonic()
-    await _mark_attempt(device_name, "lldp")
-    try:
-        data = await nautobot_client.napalm_get(device_id, "get_lldp_neighbors")
-        neighbors = data.get("get_lldp_neighbors", {})
-        count = sum(len(v) if isinstance(v, list) else 1 for v in neighbors.values())
-        try:
-            await endpoint_store.upsert_node_lldp_bulk(device_name, neighbors)
-        except Exception:
-            pass
-        duration = time.monotonic() - t0
-        await _mark_success(device_name, "lldp", duration)
-        log.info("poll_lldp_done", "LLDP collection complete",
-                 context={"device": device_name, "neighbors": count, "duration": round(duration, 1)})
-        return {"device_name": device_name, "job_type": "lldp", "success": True,
-                "entries": neighbors, "count": count, "duration": duration}
-    except Exception as exc:
-        duration = time.monotonic() - t0
-        err = str(exc)[:500]
-        await _mark_failure(device_name, "lldp", err, duration)
-        log.warning("poll_lldp_failed", "LLDP collection failed",
-                    context={"device": device_name, "error": err})
-        return {"device_name": device_name, "job_type": "lldp", "success": False,
-                "error": err, "count": 0, "duration": duration}
 
 
 async def collect_routes(device_name: str, device_id: str,

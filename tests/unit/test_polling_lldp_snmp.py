@@ -20,7 +20,6 @@ Covers the new :func:`app.polling.collect_lldp` (replaced the NAPALM path):
 - Credential leak guard: snmp_community never appears in any log record.
 - Status-gating non-duplication: collect_lldp doesn't read Nautobot
   status (gate lives in poll_loop).
-- ``_collect_lldp_napalm_deprecated`` still defined (P6 deletion target).
 
 Tests bypass the DB by patching ``polling._mark_attempt`` /
 ``polling._mark_success`` / ``polling._mark_failure`` to no-ops, and
@@ -616,13 +615,3 @@ async def test_collect_lldp_distinct_remote_port_not_deduped():
     assert len(captured["lldp_data"]["ge-0/0/24"]) == 2
 
 
-# ---------------------------------------------------------------------------
-# Deprecated NAPALM body still defined (P6 deletion target)
-# ---------------------------------------------------------------------------
-
-def test_napalm_lldp_function_still_defined_for_p6_deletion():
-    """``_collect_lldp_napalm_deprecated`` is the explicit P6 deletion target."""
-    from app import polling
-    assert hasattr(polling, "_collect_lldp_napalm_deprecated"), \
-        "P6 deletion target _collect_lldp_napalm_deprecated missing"
-    assert callable(polling._collect_lldp_napalm_deprecated)

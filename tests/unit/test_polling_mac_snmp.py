@@ -18,7 +18,6 @@ Covers the new :func:`app.polling.collect_mac` (replaced the NAPALM path):
 - Credential hygiene: SNMP_COMMUNITY never appears in any log record.
 - Status-gate non-duplication: collect_mac doesn't read Nautobot status.
 - Dedup discipline: (mac, interface, vlan) collisions deduped first-wins.
-- ``_collect_mac_napalm_deprecated`` is still defined — P6 deletion target.
 
 Tests bypass the DB by patching ``polling._mark_attempt`` /
 ``polling._mark_success`` / ``polling._mark_failure`` to no-ops, and patch
@@ -629,15 +628,3 @@ async def test_collect_mac_dedup_case_insensitive_on_mac():
     assert len(captured) == 1
 
 
-# ---------------------------------------------------------------------------
-# Deprecated NAPALM body still defined (P6 deletion target)
-# ---------------------------------------------------------------------------
-
-def test_napalm_mac_function_still_defined_for_p6_deletion():
-    """``_collect_mac_napalm_deprecated`` is the explicit P6 deletion target.
-    Confirm it's still callable from the polling module so the P6 deletion
-    has something to remove."""
-    from app import polling
-    assert hasattr(polling, "_collect_mac_napalm_deprecated"), \
-        "P6 deletion target _collect_mac_napalm_deprecated missing"
-    assert callable(polling._collect_mac_napalm_deprecated)

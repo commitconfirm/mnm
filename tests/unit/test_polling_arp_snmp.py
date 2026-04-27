@@ -12,8 +12,6 @@ Covers the new :func:`app.polling.collect_arp` (replaced the NAPALM path):
   graceful degradation, all entries get ``ifindex:N`` sentinels, polling
   row marked SUCCESS (we got useful data, just unresolved interfaces).
 - Credential hygiene: snmp_community must not appear in any log record.
-- ``_collect_arp_napalm_deprecated`` is still defined in the module —
-  belt-and-suspenders for the P6 deletion target.
 - Status-gating regression check: the gate is enforced in ``poll_loop``,
   not ``collect_arp``; the ARP collector itself doesn't read status.
   Verified by direct call: collect_arp does not consult Nautobot status.
@@ -434,20 +432,6 @@ async def test_collect_arp_dedup_case_insensitive_on_mac():
         result = await polling.collect_arp("dev", "uuid", device_ip="192.0.2.1")
     assert result["count"] == 1
     assert len(captured) == 1
-
-
-# ---------------------------------------------------------------------------
-# Deprecated NAPALM body still defined (P6 deletion target)
-# ---------------------------------------------------------------------------
-
-def test_napalm_arp_function_still_defined_for_p6_deletion():
-    """``_collect_arp_napalm_deprecated`` is the explicit P6 deletion
-    target. Confirm it's still callable from the polling module so the
-    P6 deletion has something to remove."""
-    from app import polling
-    assert hasattr(polling, "_collect_arp_napalm_deprecated"), \
-        "P6 deletion target _collect_arp_napalm_deprecated missing"
-    assert callable(polling._collect_arp_napalm_deprecated)
 
 
 # ---------------------------------------------------------------------------
