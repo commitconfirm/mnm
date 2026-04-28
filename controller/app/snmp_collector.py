@@ -136,6 +136,11 @@ OIDS: dict[str, str] = {
     # No enterprise scalar for chassis model name; ENTITY-MIB walk is the
     # fallback for product-name discovery.
     "FORTINET-CORE-MIB::fnSysSerial":     "1.3.6.1.4.1.12356.1.2.0",
+    # Cisco OLD-CISCO-CHASSIS-MIB::chassisType — pre-ENTITY-MIB chassis
+    # description scalar. Real classic-IOS devices on older trains may
+    # only populate this; modern IOS-XE populates ENTITY-MIB cleanly.
+    # Probe tries this first and falls back to entPhysicalTable.
+    "OLD-CISCO-CHASSIS-MIB::chassisType": "1.3.6.1.4.1.9.3.6.4.0",
 }
 
 

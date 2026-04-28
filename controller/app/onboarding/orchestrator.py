@@ -51,6 +51,7 @@ from app import nautobot_client
 from app.logging_config import StructuredLogger
 from app.onboarding.classifier import ClassifierResult, classify
 from app.onboarding.probes import arista as _arista_probe
+from app.onboarding.probes import cisco as _cisco_probe
 from app.onboarding.probes import fortinet as _fortinet_probe
 from app.onboarding.probes import junos as _junos_probe
 from app.onboarding.probes import paloalto as _paloalto_probe
@@ -123,7 +124,8 @@ CLASSIFICATION_TO_ROLE_NAME: dict[str, "str | None"] = {
 
 # Vendor allowlist — v1.0 minimum vendor matrix per operator Q3.
 # Prompt 4: juniper. Prompt 5: arista. Prompt 7: palo_alto. Prompt 7.5: fortinet.
-SUPPORTED_VENDORS: set[str] = {"juniper", "arista", "palo_alto", "fortinet"}
+# Block C.5: cisco (IOS-XE lab-validated on c8000v; classic IOS text-only).
+SUPPORTED_VENDORS: set[str] = {"juniper", "arista", "palo_alto", "fortinet", "cisco"}
 
 # Per-platform management interface name — the interface every vendor
 # auto-creates (via device-type template) or that we POST if absent. This
@@ -133,8 +135,13 @@ MGMT_INTERFACE_NAME: dict[str, str] = {
     "paloalto_panos":    "mgmt",
     "fortinet_fortios":  "mgmt",
     "arista_eos":        "Management1",
-    "cisco_iosxe":       "GigabitEthernet1",
-    "cisco_ios":         "GigabitEthernet0/0",
+    # Cisco SNMP agents (verified on c8000v 17.16.1a) return short-form
+    # interface names via ifName: ``Gi1``/``Gi2``/``Nu0`` rather than the
+    # full ``GigabitEthernet1``/etc form shown in CLI. Match the SNMP
+    # form so Phase 2's ifName walk doesn't create a *second* interface
+    # record for the same physical port.
+    "cisco_iosxe":       "Gi1",
+    "cisco_ios":         "Gi0/0",
 }
 
 
@@ -214,6 +221,8 @@ async def _probe_vendor(
         return await _paloalto_probe.probe_device_facts(ip, snmp_community)
     if vendor == "fortinet":
         return await _fortinet_probe.probe_device_facts(ip, snmp_community)
+    if vendor == "cisco":
+        return await _cisco_probe.probe_device_facts(ip, snmp_community)
     raise UnsupportedVendorError(
         f"Phase 1 onboarding for vendor={vendor!r} not implemented in v1.0"
     )
