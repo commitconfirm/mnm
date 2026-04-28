@@ -1,0 +1,348 @@
+---
+# ============================================================================
+# MNM — docker-compose.yml (expert variant)
+# ============================================================================
+# Lean inline comments only. See docker-compose.yml for full ops-manual
+# commentary. See docs/DEPLOYMENT.md for first-run walkthrough. See
+# .env.example for env-var documentation.
+#
+# MAINTENANCE: this file's YAML is identical to docker-compose.yml's. When
+# you change one, change the other. Verify:
+#   diff <(docker compose -f docker-compose.yml config) \
+#        <(docker compose -f docker-compose.expert.yml config)
+# ============================================================================
+
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+
+  traefik:
+    image: traefik:v2.11
+    container_name: mnm-traefik
+    restart: unless-stopped
+    logging: *default-logging
+    ports:
+      - "8080:8080"
+    environment:
+      DOCKER_API_VERSION: "1.40"   # traefik v2 expects pre-1.41 API
+    volumes:
+      - ./config/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - mnm-network
+
+  postgres:
+    image: postgres:15
+    container_name: mnm-postgres
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-nautobot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-nautobot}
+    volumes:
+      - mnm_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nautobot}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - mnm-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: mnm-redis
+    restart: unless-stopped
+    logging: *default-logging
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - mnm_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - mnm-network
+
+  nautobot:
+    build:
+      context: ./nautobot   # custom image: nautobot + napalm + plugins + 4 patches
+      dockerfile: Dockerfile
+    image: mnm-nautobot:latest
+    container_name: mnm-nautobot
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8443:8080"
+    environment:
+      NAUTOBOT_DB_HOST: postgres
+      NAUTOBOT_DB_PORT: "5432"
+      NAUTOBOT_DB_NAME: ${POSTGRES_DB:-nautobot}
+      NAUTOBOT_DB_USER: ${POSTGRES_USER:-nautobot}
+      NAUTOBOT_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      NAUTOBOT_REDIS_HOST: redis
+      NAUTOBOT_REDIS_PORT: "6379"
+      NAUTOBOT_REDIS_PASSWORD: ${REDIS_PASSWORD}
+      NAUTOBOT_SECRET_KEY: ${NAUTOBOT_SECRET_KEY}
+      NAUTOBOT_ALLOWED_HOSTS: ${NAUTOBOT_ALLOWED_HOSTS:-*}
+      # NAUTOBOT_NAPALM_* + bare NAPALM_* both required (core vs nornir)
+      NAUTOBOT_NAPALM_USERNAME: ${NAUTOBOT_NAPALM_USERNAME:-}
+      NAUTOBOT_NAPALM_PASSWORD: ${NAUTOBOT_NAPALM_PASSWORD:-}
+      NAUTOBOT_NAPALM_TIMEOUT: ${NAUTOBOT_NAPALM_TIMEOUT:-30}
+      NAPALM_USERNAME: ${NAUTOBOT_NAPALM_USERNAME:-}
+      NAPALM_PASSWORD: ${NAUTOBOT_NAPALM_PASSWORD:-}
+      NAUTOBOT_CONFIG: /opt/nautobot/nautobot_config.py
+    volumes:
+      - mnm_nautobot_media:/opt/nautobot/media
+      - mnm_nautobot_static:/opt/nautobot/static
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health/"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 300s   # first-boot django migrations ~4-5 min
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.nautobot.rule=PathPrefix(`/`)"
+      - "traefik.http.routers.nautobot.priority=1"
+      - "traefik.http.services.nautobot.loadbalancer.server.port=8080"
+    networks:
+      - mnm-network
+
+  nautobot-worker:
+    image: mnm-nautobot:latest
+    container_name: mnm-nautobot-worker
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      nautobot:
+        condition: service_healthy
+    command: nautobot-server celery worker -l INFO
+    environment:
+      NAUTOBOT_DB_HOST: postgres
+      NAUTOBOT_DB_PORT: "5432"
+      NAUTOBOT_DB_NAME: ${POSTGRES_DB:-nautobot}
+      NAUTOBOT_DB_USER: ${POSTGRES_USER:-nautobot}
+      NAUTOBOT_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      NAUTOBOT_REDIS_HOST: redis
+      NAUTOBOT_REDIS_PORT: "6379"
+      NAUTOBOT_REDIS_PASSWORD: ${REDIS_PASSWORD}
+      NAUTOBOT_SECRET_KEY: ${NAUTOBOT_SECRET_KEY}
+      NAUTOBOT_ALLOWED_HOSTS: ${NAUTOBOT_ALLOWED_HOSTS:-*}
+      NAUTOBOT_NAPALM_USERNAME: ${NAUTOBOT_NAPALM_USERNAME:-}
+      NAUTOBOT_NAPALM_PASSWORD: ${NAUTOBOT_NAPALM_PASSWORD:-}
+      NAUTOBOT_NAPALM_TIMEOUT: ${NAUTOBOT_NAPALM_TIMEOUT:-30}
+      NAPALM_USERNAME: ${NAUTOBOT_NAPALM_USERNAME:-}
+      NAPALM_PASSWORD: ${NAUTOBOT_NAPALM_PASSWORD:-}
+      NAUTOBOT_CONFIG: /opt/nautobot/nautobot_config.py
+    volumes:
+      - mnm_nautobot_media:/opt/nautobot/media
+      - mnm_nautobot_static:/opt/nautobot/static
+    healthcheck:
+      # $$HOSTNAME — double-$ escapes compose substitution; bash resolves at runtime
+      test: ["CMD-SHELL", "nautobot-server celery inspect ping -d celery@$$HOSTNAME 2>/dev/null | grep -q OK"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 300s
+    networks:
+      - mnm-network
+
+  nautobot-scheduler:
+    image: mnm-nautobot:latest
+    container_name: mnm-nautobot-scheduler
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      nautobot:
+        condition: service_healthy
+    command: nautobot-server celery beat -l INFO
+    environment:
+      NAUTOBOT_DB_HOST: postgres
+      NAUTOBOT_DB_PORT: "5432"
+      NAUTOBOT_DB_NAME: ${POSTGRES_DB:-nautobot}
+      NAUTOBOT_DB_USER: ${POSTGRES_USER:-nautobot}
+      NAUTOBOT_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      NAUTOBOT_REDIS_HOST: redis
+      NAUTOBOT_REDIS_PORT: "6379"
+      NAUTOBOT_REDIS_PASSWORD: ${REDIS_PASSWORD}
+      NAUTOBOT_SECRET_KEY: ${NAUTOBOT_SECRET_KEY}
+      NAUTOBOT_ALLOWED_HOSTS: ${NAUTOBOT_ALLOWED_HOSTS:-*}
+      NAUTOBOT_NAPALM_USERNAME: ${NAUTOBOT_NAPALM_USERNAME:-}
+      NAUTOBOT_NAPALM_PASSWORD: ${NAUTOBOT_NAPALM_PASSWORD:-}
+      NAUTOBOT_NAPALM_TIMEOUT: ${NAUTOBOT_NAPALM_TIMEOUT:-30}
+      NAPALM_USERNAME: ${NAUTOBOT_NAPALM_USERNAME:-}
+      NAPALM_PASSWORD: ${NAUTOBOT_NAPALM_PASSWORD:-}
+      NAUTOBOT_CONFIG: /opt/nautobot/nautobot_config.py
+    volumes:
+      - mnm_nautobot_media:/opt/nautobot/media
+      - mnm_nautobot_static:/opt/nautobot/static
+    healthcheck:
+      # beat has no API; check that PID 1 cmdline contains "celery beat"
+      test: ["CMD-SHELL", "test -f /proc/1/cmdline && cat /proc/1/cmdline | tr '\\0' ' ' | grep -q 'celery beat'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 300s
+    networks:
+      - mnm-network
+
+  prometheus:
+    image: prom/prometheus:v3.4.0
+    container_name: mnm-prometheus
+    restart: unless-stopped
+    logging: *default-logging
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=${PROMETHEUS_RETENTION_DAYS:-365}d"
+      - "--storage.tsdb.retention.size=10GB"
+      # both flags required for sub-path routing through traefik
+      - "--web.external-url=/prometheus/"
+      - "--web.route-prefix=/prometheus/"
+    volumes:
+      - ./config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - mnm_prometheus_data:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/prometheus/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.prometheus.rule=PathPrefix(`/prometheus`)"
+      - "traefik.http.services.prometheus.loadbalancer.server.port=9090"
+    networks:
+      - mnm-network
+
+  snmp-exporter:
+    image: prom/snmp-exporter:v0.29.0
+    container_name: mnm-snmp-exporter
+    restart: unless-stopped
+    logging: *default-logging
+    # uses the snmp.yml inside the image; ./config/snmp_exporter/ is a placeholder
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9116"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks:
+      - mnm-network
+
+  gnmic:
+    image: ghcr.io/openconfig/gnmic:latest
+    container_name: mnm-gnmic
+    restart: unless-stopped
+    logging: *default-logging
+    volumes:
+      - ./config/gnmic/gnmic.yml:/app/gnmic.yml:ro
+    command: subscribe --config /app/gnmic.yml
+    environment:
+      GNMI_USERNAME: ${GNMI_USERNAME:-}
+      GNMI_PASSWORD: ${GNMI_PASSWORD:-}
+    networks:
+      - mnm-network
+
+  grafana:
+    image: grafana/grafana-oss:12.0.1
+    container_name: mnm-grafana
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set in .env}"
+      # ROOT_URL templates from MNM_DOMAIN; default localhost works for lab-on-host, wrong elsewhere
+      GF_SERVER_ROOT_URL: "http://${MNM_DOMAIN:-localhost}:8080/grafana"
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/device-dashboard.json
+    volumes:
+      - mnm_grafana_data:/var/lib/grafana
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.grafana.rule=PathPrefix(`/grafana`)"
+      - "traefik.http.services.grafana.loadbalancer.server.port=3000"
+    networks:
+      - mnm-network
+
+  controller:
+    build:
+      context: ./controller
+      dockerfile: Dockerfile
+    image: mnm-controller:latest
+    container_name: mnm-controller
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      nautobot:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    ports:
+      - "9090:9090"
+    environment:
+      MNM_ADMIN_USER: ${MNM_ADMIN_USER:-mnm-admin}
+      MNM_ADMIN_PASSWORD: ${MNM_ADMIN_PASSWORD}
+      NAUTOBOT_URL: http://nautobot:8080
+      NAUTOBOT_SECRET_KEY: ${NAUTOBOT_SECRET_KEY}
+      MNM_DB_HOST: postgres
+      MNM_DB_PORT: "5432"
+      MNM_DB_NAME: ${MNM_CONTROLLER_DB:-mnm_controller}
+      MNM_DB_USER: ${POSTGRES_USER:-nautobot}
+      MNM_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      PROXMOX_HOST: ${PROXMOX_HOST:-}
+      PROXMOX_TOKEN_ID: ${PROXMOX_TOKEN_ID:-}
+      PROXMOX_TOKEN_SECRET: ${PROXMOX_TOKEN_SECRET:-}
+      PROXMOX_VERIFY_SSL: ${PROXMOX_VERIFY_SSL:-false}
+      PROXMOX_INTERVAL_SECONDS: ${PROXMOX_INTERVAL_SECONDS:-300}
+      ANOMALY_STALE_DAYS: ${ANOMALY_STALE_DAYS:-7}
+      MNM_RETENTION_DAYS: ${MNM_RETENTION_DAYS:-365}
+      MNM_PRUNE_INTERVAL_HOURS: ${MNM_PRUNE_INTERVAL_HOURS:-24}
+      # db 1 — celery result backend; controller falls back to reading celery-task-meta-* directly
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock   # RW — Container Status card
+      - mnm_controller_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:9090/api/health\")'"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks:
+      - mnm-network
+
+volumes:
+  mnm_postgres_data:        # BACKUP TARGET — nautobot + mnm_controller DBs
+  mnm_redis_data:           # disposable
+  mnm_nautobot_media:       # uploaded files; small backup target
+  mnm_nautobot_static:      # collectstatic output; disposable
+  mnm_prometheus_data:      # tsdb; backup target if metrics history matters
+  mnm_grafana_data:         # internal state; dashboards provisioned from ./config
+  mnm_controller_data:      # reserved; sparse today
+
+networks:
+  mnm-network:
+    name: mnm-network   # explicit name → no projectdir prefix; bootstrap.sh refs it
+    driver: bridge

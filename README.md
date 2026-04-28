@@ -83,13 +83,22 @@ A FastAPI + vanilla-JS web app on port 9090 that's the primary operator entry po
 git clone https://github.com/commitconfirm/mnm.git
 cd mnm
 cp .env.example .env
-# Edit .env — set MNM_ADMIN_PASSWORD, NAUTOBOT_NAPALM_USERNAME/PASSWORD,
-# SNMP_COMMUNITY, and (optionally) PROXMOX_HOST/TOKEN if you have a Proxmox host
+# Edit .env — see the file itself for a guided tour. Required values
+# are clearly marked [REQUIRED]; secrets are marked [SECRET].
 docker compose up -d
-./bootstrap/bootstrap.sh
+bash bootstrap/bootstrap.sh
 ```
 
-The bootstrap script is idempotent — it creates the Nautobot superuser, locations, roles, manufacturers, secrets, the controller's PostgreSQL database, and the device-type library. Safe to re-run.
+The bootstrap script is idempotent — it creates the Nautobot superuser, locations, roles, manufacturers, platforms, ~5,200 community device types, the controller's PostgreSQL database, and (when NAPALM credentials are set in `.env`) a default Nautobot SecretsGroup. Safe to re-run. See [docs/BOOTSTRAP.md](docs/BOOTSTRAP.md) for what gets created and how to extend the bootstrap library when new vendors enter your network.
+
+#### Two compose-file variants
+
+MNM ships two functionally-identical Compose files:
+
+- **`docker-compose.yml`** (default) — production-grade ops manual. Top-of-file orientation, per-service comment blocks (purpose, dependencies, exposed ports, persistent storage, failure modes), inline annotations on every non-obvious choice. Recommended for first-deploy operators and as ongoing reference.
+- **`docker-compose.expert.yml`** — same YAML, lean inline-only commentary. For operators already familiar with the stack who don't want the full annotation pass.
+
+Both files produce identical `docker compose config` output. Use the expert variant by passing `-f docker-compose.expert.yml` to every Compose command. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the full first-deploy walkthrough.
 
 ### First Login
 
