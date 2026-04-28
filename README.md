@@ -55,7 +55,7 @@ Once a device is onboarded, MNM polls it on a schedule for forwarding-plane data
 ### Controller UI
 A FastAPI + vanilla-JS web app on port 9090 that's the primary operator entry point:
 - **Dashboard** — container health, device count, IPs tracked, recent events, Proxmox node status, advisory cards (incomplete devices, discovered subnets, LLDP neighbors)
-- **Discovery** — trigger sweeps, view live progress, manage CIDR ranges and schedules
+- **Discovery** — trigger sweeps, view live progress, manage CIDR ranges and schedules. Includes an **Unsupported vendors / unclassified hosts** panel that surfaces sweep-discovered IPs MNM didn't onboard, with raw signals (sysDescr, OUI vendor, open ports) and CSV/JSON export, so operators can see which vendors to prioritise for future support.
 - **Endpoints** — sortable / filterable table, per-MAC detail page with full movement timeline
 - **Events** — network activity feed with filtering, IP conflict detection, anomaly buckets
 - **Logs** — structured log viewer with level/module filters and a one-click export bundle for GitHub issue reports

@@ -403,7 +403,8 @@ After a successful installation:
 1. **Configure device credentials** — Add your network device SSH/NETCONF credentials to `.env` (`NAUTOBOT_NAPALM_USERNAME`, `NAUTOBOT_NAPALM_PASSWORD`), re-run `bootstrap/bootstrap.sh` to create the credential set in Nautobot
 2. **Run a real sweep** — Add a real CIDR range on the Discovery page, select the credential set, start a sweep
 3. **Review LLDP advisories** — After onboarding seed devices, the dashboard advisory cards show newly discovered LLDP neighbors for your review
-4. **Configure Proxmox** (optional) — Set `PROXMOX_HOST`, `PROXMOX_TOKEN_ID`, `PROXMOX_TOKEN_SECRET` in `.env`, recreate the controller container: `docker compose up -d --force-recreate controller`
+4. **Check the unsupported-vendor panel** — After your first sweep, scroll down on `/discover` to the **"Unsupported vendors / unclassified hosts found"** card. It lists IPs MNM saw during sweep but couldn't onboard, with vendor classification (where derivable), the raw sysDescr excerpt, OUI vendor, and open ports. The panel auto-hides when there's nothing to surface; when populated, the card shows the count, expanding into a sortable table with CSV / JSON export. Use it to plan which vendors you'd like to see supported in future MNM releases — vendor frequency in this panel directly informs v1.1 prioritisation.
+5. **Configure Proxmox** (optional) — Set `PROXMOX_HOST`, `PROXMOX_TOKEN_ID`, `PROXMOX_TOKEN_SECRET` in `.env`, recreate the controller container: `docker compose up -d --force-recreate controller`
 
 See [DISCOVERY.md](DISCOVERY.md) for the sweep pipeline in detail, and [CONNECTORS.md](CONNECTORS.md) for the Proxmox connector setup.
 
