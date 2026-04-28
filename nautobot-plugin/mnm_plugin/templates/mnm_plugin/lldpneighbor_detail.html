@@ -1,0 +1,60 @@
+{% extends "generic/object_detail.html" %}
+{% load helpers %}
+
+{% block title %}{{ object.local_interface }} ↔ {{ object.remote_system_name|default:"?" }}{% endblock %}
+
+{% block content_left_page %}
+  <div class="panel panel-default">
+    <div class="panel-heading">
+      <strong>LLDP Neighbor</strong>
+    </div>
+    <table class="table table-hover panel-body attr-table">
+      <tr><td>Node</td><td>{{ object.node_name }}</td></tr>
+      <tr><td>Local interface</td><td>{{ object.local_interface }}</td></tr>
+      <tr><td>Remote system</td><td>{{ object.remote_system_name|default:"—" }}</td></tr>
+      <tr><td>Remote port</td><td>{{ object.remote_port|default:"—" }}</td></tr>
+      <tr><td>Remote chassis ID</td><td><code>{{ object.remote_chassis_id|default:"—" }}</code></td></tr>
+      <tr><td>Remote management IP</td><td>{{ object.remote_management_ip|default:"—" }}</td></tr>
+      <tr><td>Local ifIndex</td><td>{{ object.local_port_ifindex|default:"—" }}</td></tr>
+      <tr><td>Local ifName</td><td>{{ object.local_port_name|default:"—" }}</td></tr>
+      <tr><td>Chassis ID subtype</td><td>{{ object.remote_chassis_id_subtype|default:"—" }}</td></tr>
+      <tr><td>Port ID subtype</td><td>{{ object.remote_port_id_subtype|default:"—" }}</td></tr>
+      <tr><td>Collected</td><td>{{ object.collected_at }}</td></tr>
+    </table>
+  </div>
+
+  {% if object.remote_system_description %}
+    <div class="panel panel-default">
+      <div class="panel-heading">
+        <strong>Remote sysDescr</strong>
+      </div>
+      <pre class="panel-body">{{ object.remote_system_description }}</pre>
+    </div>
+  {% endif %}
+{% endblock %}
+
+{% block content_right_page %}
+  <div class="panel panel-default">
+    <div class="panel-heading">
+      <strong>Other neighbors on the same local interface</strong>
+      <span class="badge">{{ same_port_neighbors|length }}</span>
+    </div>
+    <table class="table table-hover panel-body">
+      <thead>
+        <tr><th>Remote system</th><th>Remote port</th><th>Chassis ID</th><th>Collected</th></tr>
+      </thead>
+      <tbody>
+        {% for row in same_port_neighbors %}
+          <tr>
+            <td>{{ row.remote_system_name|default:"—" }}</td>
+            <td>{{ row.remote_port|default:"—" }}</td>
+            <td><code>{{ row.remote_chassis_id|default:"—" }}</code></td>
+            <td>{{ row.collected_at }}</td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="4" class="text-muted text-center">No other neighbors</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endblock %}

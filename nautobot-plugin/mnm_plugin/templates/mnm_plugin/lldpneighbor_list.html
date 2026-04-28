@@ -1,0 +1,18 @@
+{% extends "generic/object_list.html" %}
+{% load helpers %}
+
+{% block title %}LLDP Neighbors{% endblock %}
+
+{% block content %}
+  <p class="text-muted">
+    Per-node LLDP neighbor snapshots collected via SNMP
+    (<code>lldpRemTable</code>). Default columns show the
+    minimal identity set; toggle the column-chooser for the
+    five expansion fields (local ifIndex / ifName, chassis-ID
+    subtype, port-ID subtype, remote sysDescr) added by Block C
+    P2. Empty result for a node that should have neighbors
+    usually means a virtual underlay consuming LLDP at L2 — see
+    the <em>vEOS-on-virthost</em> note in CLAUDE.md.
+  </p>
+  {{ block.super }}
+{% endblock %}
