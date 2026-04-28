@@ -6,7 +6,12 @@ from mnm_plugin.api import views
 
 
 router = OrderedDefaultRouter()
-router.APIRootView = None  # use Nautobot's default API root view
+
+# Don't override ``APIRootView`` here — Nautobot's
+# ``OrderedDefaultRouter.get_api_root_view`` does
+# ``issubclass(self.APIRootView, AuthenticatedAPIRootView)`` and
+# ``issubclass(None, ...)`` raises TypeError. Default class
+# (Nautobot's authenticated root) is what we want.
 
 router.register("endpoints", views.EndpointViewSet)
 

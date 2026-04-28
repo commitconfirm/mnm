@@ -28,3 +28,12 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 include = ["mnm_plugin*"]
+
+# Include non-Python files (HTML templates, static assets,
+# migration data) when pip-installing — without this, Django
+# can't find ``mnm_plugin/templates/...`` at runtime.
+[tool.setuptools.package-data]
+mnm_plugin = [
+    "templates/**/*.html",
+    "static/**/*",
+]
