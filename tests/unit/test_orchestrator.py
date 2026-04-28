@@ -45,6 +45,7 @@ class _Ctx:
     arista_probe: AsyncMock
     paloalto_probe: AsyncMock
     fortinet_probe: AsyncMock
+    cisco_probe: AsyncMock
     find_device_at_location: AsyncMock
     get_role_by_name: AsyncMock
     get_devicetype_by_model: AsyncMock
@@ -104,6 +105,7 @@ def orch_mocks():
         "arista_probe": AsyncMock(return_value=facts),
         "paloalto_probe": AsyncMock(return_value=facts),
         "fortinet_probe": AsyncMock(return_value=facts),
+        "cisco_probe": AsyncMock(return_value=facts),
         "find_device_at_location": AsyncMock(return_value=None),
         "get_role_by_name": AsyncMock(return_value={"id": "role-uuid",
                                                      "name": "Switch"}),
@@ -147,6 +149,7 @@ def orch_mocks():
         (orch._arista_probe, "probe_device_facts", patches["arista_probe"]),
         (orch._paloalto_probe, "probe_device_facts", patches["paloalto_probe"]),
         (orch._fortinet_probe, "probe_device_facts", patches["fortinet_probe"]),
+        (orch._cisco_probe, "probe_device_facts", patches["cisco_probe"]),
         (nautobot_client, "find_device_at_location", patches["find_device_at_location"]),
         (nautobot_client, "get_role_by_name", patches["get_role_by_name"]),
         (nautobot_client, "get_devicetype_by_model", patches["get_devicetype_by_model"]),
@@ -282,12 +285,13 @@ async def test_vendor_none_classification_failed_error(orch_mocks):
     assert orch_mocks.probe.await_count == 0
 
 
-async def test_cisco_vendor_raises_unsupported(orch_mocks):
-    # Prompt 5 added `arista` to SUPPORTED_VENDORS; cisco is the honest
-    # remaining unsupported vendor (classic IOS still text-sourced; no
-    # cisco probe module yet).
+async def test_huawei_vendor_raises_unsupported(orch_mocks):
+    # Block C.5 added `cisco` to SUPPORTED_VENDORS. Huawei is the honest
+    # remaining unsupported vendor (no Huawei in the lab; no probe
+    # module). Any vendor outside SUPPORTED_VENDORS still routes through
+    # the orchestrator's UnsupportedVendorError branch.
     orch_mocks.classify.return_value = _make_classifier_result(
-        vendor="cisco", platform="cisco_iosxe",
+        vendor="huawei", platform="huawei_vrp",
     )
     result = await _call()
     assert result.success is False
@@ -615,4 +619,74 @@ async def test_fortinet_happy_path_uses_mgmt_interface(orch_mocks):
     assert result.success is True
     orch_mocks.ensure_management_interface.assert_awaited_once_with(
         "dev-uuid", "mgmt", "status-active",
+    )
+
+
+async def test_cisco_vendor_dispatches_to_cisco_probe(orch_mocks):
+    """Block C.5: cisco is in SUPPORTED_VENDORS; _probe_vendor must
+    route to the Cisco probe module, not any other vendor probe."""
+    orch_mocks.classify.return_value = _make_classifier_result(
+        vendor="cisco", platform="cisco_iosxe", classification="router",
+    )
+    orch_mocks.get_platform_by_name.return_value = {
+        "id": "plat-cisco-iosxe", "name": "cisco_iosxe",
+    }
+    orch_mocks.get_devicetype_by_model.return_value = {
+        "id": "dt-c8000v", "model": "C8000V",
+    }
+    orch_mocks.get_role_by_name.return_value = {"id": "role-router", "name": "Router"}
+    result = await _call()
+    assert result.success is True
+    assert orch_mocks.cisco_probe.await_count == 1
+    # No other vendor probe called.
+    assert orch_mocks.probe.await_count == 0          # Junos
+    assert orch_mocks.arista_probe.await_count == 0
+    assert orch_mocks.paloalto_probe.await_count == 0
+    assert orch_mocks.fortinet_probe.await_count == 0
+
+
+async def test_cisco_iosxe_happy_path_uses_gi1_interface(orch_mocks):
+    """cisco_iosxe MGMT_INTERFACE_NAME entry must resolve to ``Gi1``
+    (the short form Cisco SNMP returns via ifName, NOT the long
+    ``GigabitEthernet1`` form shown in the CLI). Pinned so a rename
+    in the orchestrator map fails the test loudly — using the long
+    form would cause Phase 2's SNMP walk to create a second interface
+    record for the same physical port (caught live on c8000v 17.16.1a)."""
+    orch_mocks.classify.return_value = _make_classifier_result(
+        vendor="cisco", platform="cisco_iosxe", classification="router",
+    )
+    orch_mocks.get_platform_by_name.return_value = {
+        "id": "plat-cisco-iosxe", "name": "cisco_iosxe",
+    }
+    orch_mocks.get_devicetype_by_model.return_value = {
+        "id": "dt-c8000v", "model": "C8000V",
+    }
+    orch_mocks.get_role_by_name.return_value = {"id": "role-router", "name": "Router"}
+    result = await _call()
+    assert result.success is True
+    orch_mocks.ensure_management_interface.assert_awaited_once_with(
+        "dev-uuid", "Gi1", "status-active",
+    )
+
+
+async def test_cisco_ios_classic_happy_path_uses_gi00_interface(orch_mocks):
+    """Classic IOS MGMT_INTERFACE_NAME entry must resolve to ``Gi0/0``
+    (short form, matching the SNMP-agent ifName convention shared
+    with IOS-XE). Different from IOS-XE's ``Gi1``. Pinned so the
+    two-stage classifier discrimination's downstream effect is
+    regression-tested even without a classic-IOS lab device."""
+    orch_mocks.classify.return_value = _make_classifier_result(
+        vendor="cisco", platform="cisco_ios", classification="router",
+    )
+    orch_mocks.get_platform_by_name.return_value = {
+        "id": "plat-cisco-ios", "name": "cisco_ios",
+    }
+    orch_mocks.get_devicetype_by_model.return_value = {
+        "id": "dt-2960", "model": "WS-C2960-24TT-L",
+    }
+    orch_mocks.get_role_by_name.return_value = {"id": "role-router", "name": "Router"}
+    result = await _call()
+    assert result.success is True
+    orch_mocks.ensure_management_interface.assert_awaited_once_with(
+        "dev-uuid", "Gi0/0", "status-active",
     )
