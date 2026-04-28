@@ -264,9 +264,9 @@ services:
     ports:
       - "3000:3000"
     environment:
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-mnm-admin}
-      # ROOT_URL hardcoded localhost — share-link generation will break for non-localhost reach
-      GF_SERVER_ROOT_URL: "http://localhost:8080/grafana"
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set in .env}"
+      # ROOT_URL templates from MNM_DOMAIN; default localhost works for lab-on-host, wrong elsewhere
+      GF_SERVER_ROOT_URL: "http://${MNM_DOMAIN:-localhost}:8080/grafana"
       GF_SERVER_SERVE_FROM_SUB_PATH: "true"
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer

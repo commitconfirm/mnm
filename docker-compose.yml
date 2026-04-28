@@ -616,18 +616,21 @@ services:
       # convenient for your dashboards.
       - "3000:3000"
     environment:
-      # Default password is "mnm-admin" if .env doesn't set this. Bad
-      # default outside a lab — set a real password before deploying
-      # anywhere reachable from beyond the host.
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-mnm-admin}
-      # Sub-path setup for Traefik routing. The hardcoded localhost
-      # below is a known limitation: GF_SERVER_ROOT_URL is set at
-      # container creation, so deployments where operators hit the
-      # host by name or external IP will see "localhost" in some
-      # generated URLs (e.g., share links). Workaround: hit Grafana
-      # directly on :3000 instead of through Traefik for share-link
-      # generation.
-      GF_SERVER_ROOT_URL: "http://localhost:8080/grafana"
+      # GRAFANA_ADMIN_PASSWORD is mandatory — the :? syntax causes
+      # docker compose to fail loudly with the error message below
+      # if the variable is unset or empty. Better than silently
+      # defaulting to a known weak value. Set it in .env before
+      # `docker compose up -d` or the container will refuse to
+      # start.
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set in .env}"
+      # Sub-path setup for Traefik routing. ROOT_URL templates from
+      # MNM_DOMAIN so Grafana's generated URLs (share links,
+      # snapshot URLs, alert callback links) point at the host
+      # operators actually reach. Set MNM_DOMAIN in .env to your
+      # reachable hostname (or external IP) for share links to work
+      # correctly. Defaults to "localhost" — fine for lab on the
+      # host itself, wrong for any other deployment.
+      GF_SERVER_ROOT_URL: "http://${MNM_DOMAIN:-localhost}:8080/grafana"
       GF_SERVER_SERVE_FROM_SUB_PATH: "true"
       # Anonymous read-only access. Operators viewing dashboards
       # without a login is intentional — the data is intended to be
