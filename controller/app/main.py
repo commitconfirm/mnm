@@ -955,6 +955,178 @@ async def auto_discover_recent(hours: int = 24):
 
 
 # -------------------------------------------------------------------------
+# Unsupported / unclassified visibility (Block D5)
+# -------------------------------------------------------------------------
+@app.get("/api/sweeps/unsupported", dependencies=[Depends(require_auth)])
+async def get_unsupported_classifications(
+    limit: int = 100,
+    offset: int = 0,
+    order_by: str = "classified_vendor",
+    order_dir: str = "asc",
+):
+    """Catalog of sweep-discovered IPs that did not get onboarded as a
+    Nautobot Device, classified by status.
+
+    Reads existing IPAM custom fields written by the sweep pipeline; runs
+    the classifier at read time on the stored signals (sysDescr, ports,
+    OUI vendor) to derive a vendor + platform per IP. No new schema, no
+    new collector path.
+
+    The vendor field is NOT persisted by the sweep pipeline today —
+    `discovery_classification` only stores the role (switch/router/etc.).
+    Re-classifying at read time also benefits from any classifier
+    improvements between sweep and read time. Sweep-pipeline gap to
+    persist vendor directly is a v1.0.1 cleanup candidate.
+
+    Status enum (computed at read time, not stored):
+      - "unsupported_vendor": classifier identified a vendor not in
+        SUPPORTED_VENDORS
+      - "unclassified": classifier returned vendor=None
+      - "classification_error": currently unreachable from stored data
+        (kept in the enum for forward compatibility — sweep-pipeline
+        gap means errors aren't persisted)
+
+    Pagination is in-memory after the IPAM fetch — D5's expected data
+    volume (unsupported set is small relative to total IPAM) makes this
+    fine; revisit if real deployments push this past a few hundred rows.
+    """
+    from app.onboarding.classifier import classify_from_signals
+    from app.onboarding.orchestrator import SUPPORTED_VENDORS
+
+    try:
+        ip_records = await nautobot_client.get_ip_addresses()
+        devices = await nautobot_client.get_devices()
+    except Exception as e:  # noqa: BLE001 — endpoint reports rather than 500s
+        return {"results": [], "count": 0, "limit": limit, "offset": offset,
+                "error": str(e)}
+
+    # Set of IPs (host portion) that have a Device record. Excluded from
+    # the response — they're already onboarded, by definition not the
+    # operator's "what didn't make it through" question.
+    onboarded_ips: set[str] = set()
+    for dev in devices:
+        primary = dev.get("primary_ip4") or dev.get("primary_ip6")
+        if isinstance(primary, dict):
+            disp = (primary.get("display") or primary.get("address") or "")
+            host = disp.split("/")[0]
+            if host:
+                onboarded_ips.add(host)
+
+    rows: list[dict] = []
+    for rec in ip_records:
+        cf = rec.get("custom_fields") or {}
+        # Skip IPs the sweep pipeline never touched — discovery_method
+        # is empty for IPs created via other paths (manual, onboarding).
+        if not cf.get("discovery_method"):
+            continue
+        host_ip = (rec.get("display") or rec.get("address") or "").split("/")[0]
+        if not host_ip or host_ip in onboarded_ips:
+            continue
+
+        # Re-classify at read time from stored signals.
+        sysdescr_raw = cf.get("discovery_snmp_sysdescr") or ""
+        ports_raw = cf.get("discovery_ports_open") or ""
+        ports_open: list[str] = []
+        if ports_raw:
+            ports_open = [p.strip() for p in str(ports_raw).split(",") if p.strip()]
+        try:
+            cls_result = classify_from_signals(
+                sysdescr=sysdescr_raw or None,
+                sysobjectid=None,  # not persisted by sweep pipeline today
+                ports_open=ports_open or None,
+                mac_vendor=cf.get("discovery_mac_vendor", "") or "",
+                snmp_responds=bool(sysdescr_raw),
+            )
+        except Exception:  # noqa: BLE001 — re-classification never crashes the endpoint
+            # classification_error path: re-classify itself raised. Leave
+            # vendor null and mark the row so the operator can investigate.
+            rows.append({
+                "ip": host_ip,
+                "classified_vendor": None,
+                "classification_status": "classification_error",
+                "platform_hint": None,
+                "chassis_model_hint": None,
+                "sys_descr_excerpt": _excerpt(sysdescr_raw, 200),
+                "sys_object_id": None,
+                "oui_vendor": cf.get("discovery_mac_vendor") or None,
+                "open_ports": ports_open or None,
+                "last_seen": cf.get("discovery_last_seen") or None,
+                "first_seen": cf.get("discovery_first_seen") or None,
+                "in_supported_vendors": False,
+            })
+            continue
+
+        in_supported = (cls_result.vendor in SUPPORTED_VENDORS) if cls_result.vendor else False
+        if cls_result.vendor and in_supported:
+            # Classifier says we support this vendor but it isn't onboarded.
+            # That's an "operator action available" case, not D5's surface
+            # (which is "MNM doesn't support this"). Skip — Discover page
+            # already exposes retry-onboarding for these via the sweep
+            # results table.
+            continue
+
+        if cls_result.vendor is None:
+            status = "unclassified"
+        else:
+            status = "unsupported_vendor"
+
+        rows.append({
+            "ip": host_ip,
+            "classified_vendor": cls_result.vendor,
+            "classification_status": status,
+            "platform_hint": cls_result.platform,
+            # chassis_model_hint not derivable from sweep signals; only
+            # vendor probes (post-onboarding) extract chassis model.
+            "chassis_model_hint": None,
+            "sys_descr_excerpt": _excerpt(sysdescr_raw, 200),
+            "sys_object_id": None,  # not persisted; v1.0.1 candidate
+            "oui_vendor": cf.get("discovery_mac_vendor") or None,
+            "open_ports": ports_open or None,
+            "last_seen": cf.get("discovery_last_seen") or None,
+            "first_seen": cf.get("discovery_first_seen") or None,
+            "in_supported_vendors": False,
+        })
+
+    # Ordering. Default: classified_vendor ASC then last_seen DESC.
+    # Nulls sort last on ASC, first on DESC — match Postgres NULLS LAST/FIRST
+    # semantics by handling explicitly.
+    primary = order_by or "classified_vendor"
+    desc = (order_dir or "asc").lower() == "desc"
+    valid_keys = {"ip", "classified_vendor", "classification_status",
+                  "last_seen", "first_seen"}
+    if primary not in valid_keys:
+        primary = "classified_vendor"
+
+    def _sort_key(row: dict):
+        primary_val = row.get(primary)
+        secondary_val = row.get("last_seen") or ""
+        # None values: sort last regardless of direction
+        return (primary_val is None, primary_val or "", secondary_val)
+
+    rows.sort(key=_sort_key, reverse=desc)
+    if primary != "last_seen":
+        # Stable secondary by last_seen DESC when not the primary key
+        rows.sort(key=lambda r: r.get("last_seen") or "", reverse=True)
+        rows.sort(key=_sort_key, reverse=desc)
+
+    total = len(rows)
+    page = rows[offset:offset + limit]
+    return {
+        "results": page,
+        "count": total,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+def _excerpt(text: str | None, n: int) -> str | None:
+    if not text:
+        return None
+    s = str(text)
+    return s[:n] + ("…" if len(s) > n else "")
+
+
+# -------------------------------------------------------------------------
 # Sweep schedule management
 # -------------------------------------------------------------------------
 class SweepSchedule(BaseModel):

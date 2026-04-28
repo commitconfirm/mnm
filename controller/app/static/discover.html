@@ -185,6 +185,26 @@
       </table>
     </div>
 
+    <!-- Block D5: Unsupported / unclassified hosts found by sweep -->
+    <div class="card" id="unsupported-card">
+      <h2>
+        Unsupported vendors / unclassified hosts found
+        <span data-col-help="unsupported-status"></span>
+        <span id="unsupported-count" class="badge" style="margin-left:8px"></span>
+        <button id="unsupported-toggle" class="btn small" style="float:right">Show details</button>
+      </h2>
+      <p style="color:var(--text-muted); font-size:0.85rem; margin-top:-8px">
+        Hosts MNM saw during sweep but couldn't onboard — either the vendor
+        isn't yet supported or classification couldn't determine the vendor.
+        Use this to plan which vendors you'd like supported in future MNM
+        releases.
+      </p>
+      <div id="unsupported-detail" hidden>
+        <div id="unsupported-export" class="table-export-buttons" style="margin-bottom:8px"></div>
+        <div id="unsupported-dt"><div class="loading-indicator">Loading...</div></div>
+      </div>
+    </div>
+
     <!-- Sweep History -->
     <div class="card">
       <h2>Sweep History</h2>
@@ -209,6 +229,7 @@
 
   <script src="/static/js/datatable.js"></script>
   <script src="/static/js/col-help.js"></script>
+  <script src="/static/js/table-export.js"></script>
   <script src="/static/js/service-urls.js"></script>
   <script src="/static/js/preferences.js"></script>
   <script src="/static/js/discover.js"></script>

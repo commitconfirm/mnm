@@ -786,3 +786,132 @@ async function retryOnboard(ip) {
   }
 }
 window.retryOnboard = retryOnboard;
+
+
+// ---------------------------------------------------------------------------
+// Block D5 — Unsupported / unclassified hosts panel
+// ---------------------------------------------------------------------------
+//
+// Reads /api/sweeps/unsupported. Renders a collapsed-by-default card
+// with a count badge; expand reveals a sortable DataTable. CSV/JSON
+// export reuses the shared table-export helper.
+//
+// "Unsupported vendor" status is currently rare in real data — see
+// CLAUDE.md "v1.0.1 cleanup backlog" for the classifier-vendor-rule
+// gap. Most hosts surface here as "unclassified" today; the panel's
+// utility is the same regardless (operators see what didn't onboard
+// and can decide what to prioritise).
+
+const unsupportedDT = new DataTable({
+  containerId: 'unsupported-dt',
+  pageSize: 50,
+  storageKey: 'mnm-unsupported-dt',
+  columns: [
+    { key: 'ip', label: 'IP', sortable: true },
+    {
+      key: 'classified_vendor',
+      label: 'Vendor' + MNMColHelp.icon({
+        title: 'Classifier-derived vendor',
+        values: [
+          ['(blank)',     'Classifier could not identify a vendor — see Status / sysDescr columns for raw signals.'],
+          ['<vendor>',    'Classifier identified a vendor; if shown here it is NOT in MNM\'s SUPPORTED_VENDORS set.'],
+        ],
+        docsLink: '/docs/DEPLOYMENT.md',
+      }),
+      exportLabel: 'Vendor',
+      sortable: true,
+      render: function(v) { return v ? escHtml(v) : '<em style="color:var(--text-muted)">unknown</em>'; },
+    },
+    {
+      key: 'classification_status',
+      label: 'Status' + MNMColHelp.icon({
+        title: 'Why this host did not get onboarded',
+        values: [
+          ['unsupported_vendor', 'Classifier identified a vendor not in MNM\'s SUPPORTED_VENDORS set (juniper, arista, palo_alto, fortinet, cisco).'],
+          ['unclassified',       'Classifier could not identify a vendor from the available signals (sysDescr, ports, OUI). Most non-supported vendors surface here today.'],
+          ['classification_error', 'Classifier raised when re-running on stored signals. Rare — investigate the sysDescr excerpt.'],
+        ],
+      }),
+      exportLabel: 'Status',
+      sortable: true,
+      render: function(v) {
+        if (v === 'unsupported_vendor') return '<span class="badge warning">unsupported vendor</span>';
+        if (v === 'unclassified')        return '<span class="badge">unclassified</span>';
+        if (v === 'classification_error') return '<span class="badge danger">classification error</span>';
+        return escHtml(v || '-');
+      },
+    },
+    { key: 'platform_hint', label: 'Platform Hint', sortable: true,
+      render: function(v) { return v ? escHtml(v) : '-'; } },
+    { key: 'oui_vendor', label: 'OUI Vendor', sortable: true,
+      render: function(v) { return v ? escHtml(v) : '-'; } },
+    { key: 'last_seen', label: 'Last Seen', sortable: true,
+      render: function(v) { return v ? '<span title="' + escHtml(v) + '">' + timeAgo(v) + '</span>' : '-'; } },
+    { key: 'sys_descr_excerpt', label: 'sysDescr', sortable: false,
+      render: function(v) { return v ? '<code style="font-size:0.78rem">' + escHtml(v) + '</code>' : '-'; } },
+  ],
+});
+
+let unsupportedLoaded = false;
+let unsupportedExpanded = false;
+
+async function loadUnsupportedCount() {
+  try {
+    const r = await fetch('/api/sweeps/unsupported?limit=1');
+    if (!r.ok) return;
+    const d = await r.json();
+    const badge = document.getElementById('unsupported-count');
+    if (badge) {
+      badge.textContent = d.count + (d.count === 1 ? ' host' : ' hosts');
+      // Hide the entire card when count is zero — operators with a
+      // fully-supported network shouldn't see a "0 hosts" advisory
+      // taking up screen space.
+      const card = document.getElementById('unsupported-card');
+      if (card) card.style.display = d.count > 0 ? '' : 'none';
+    }
+  } catch (e) { /* silent — non-critical */ }
+}
+
+async function loadUnsupportedDetails() {
+  if (unsupportedLoaded) return;
+  try {
+    // Fetch up to 1000; pagination + sort happen in the DataTable.
+    const r = await fetch('/api/sweeps/unsupported?limit=1000');
+    if (!r.ok) return;
+    const d = await r.json();
+    unsupportedDT.setData(d.results || []);
+    unsupportedDT.render();
+    unsupportedLoaded = true;
+  } catch (e) {
+    const wrap = document.getElementById('unsupported-dt');
+    if (wrap) wrap.innerHTML = '<p style="color:var(--red)">Failed to load: ' + escHtml(e.message) + '</p>';
+  }
+}
+
+(function initUnsupportedPanel() {
+  const toggle = document.getElementById('unsupported-toggle');
+  const detail = document.getElementById('unsupported-detail');
+  if (!toggle || !detail) return;
+  toggle.addEventListener('click', async () => {
+    unsupportedExpanded = !unsupportedExpanded;
+    detail.hidden = !unsupportedExpanded;
+    toggle.textContent = unsupportedExpanded ? 'Hide details' : 'Show details';
+    if (unsupportedExpanded) {
+      await loadUnsupportedDetails();
+      // Wire the export buttons after the table has data so they
+      // re-resolve the table selector cleanly (per UI_CONVENTIONS §3).
+      const host = document.getElementById('unsupported-export');
+      if (host && typeof MNMTableExport !== 'undefined' && !host.hasChildNodes()) {
+        host.replaceWith(
+          MNMTableExport.makeButtons('#unsupported-dt table', 'mnm-unsupported')
+        );
+      }
+    }
+  });
+  // Refresh the count on page load, and again whenever a sweep
+  // completes so the operator sees the new advisory promptly.
+  loadUnsupportedCount();
+  // Hook into the existing pollStatus cycle — re-fetch the count
+  // whenever the status display refreshes.
+  setInterval(loadUnsupportedCount, 30000);
+})();
