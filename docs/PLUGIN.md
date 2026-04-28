@@ -30,19 +30,67 @@ architectural design.
 
 ## What the plugin provides
 
-After `Endpoint` ships in E1:
+After E1 + E2 ship, the plugin surfaces four models as
+Nautobot-native list and detail views, all reachable from a
+top-level **MNM** navigation tab.
+
+### Endpoint (E1)
 
 - `/plugins/mnm/endpoints/` — list view with filtering, sortable
-  columns, and pagination. Cross-links from `current_switch` to
-  the Nautobot Device, from `current_port` to the Interface
-  (using a cross-vendor naming helper), and from `current_ip` to
-  the IPAddress when one matches.
+  columns, pagination. Cross-links from `current_switch` to the
+  Nautobot Device, from `current_port` to the Interface (via
+  the cross-vendor naming helper), and from `current_ip` to the
+  IPAddress.
 - `/plugins/mnm/endpoints/<uuid>/` — detail view with the
-  primary fields panel and an "All locations seen" history
-  panel showing every `(switch, port, vlan)` row this MAC has
-  been observed on.
-- `/api/plugins/mnm/endpoints/` — REST API with filtering and
-  pagination matching the list view.
+  primary-fields panel, an "All locations seen" history panel
+  (every `(switch, port, vlan)` row this MAC has been observed
+  on), and an "All IPs ever seen" panel.
+- `/api/plugins/mnm/endpoints/` — REST API.
+
+### ARP entries (E2)
+
+- `/plugins/mnm/arp-entries/` — per-node ARP table snapshots
+  (one row per `(node, ip, mac, vrf)` tuple). Source: SNMP
+  `ipNetToMediaTable` walked by `controller/app/arp_snmp.py`.
+- `/plugins/mnm/arp-entries/<uuid>/` — detail view with an
+  "Other ARP entries for this IP" sidebar surfacing other MAC
+  bindings the network has recorded for the same address (e.g.,
+  the same IP on multiple VRFs or a recent MAC change).
+- `/api/plugins/mnm/arp-entries/` — REST API.
+
+### MAC entries (E2)
+
+- `/plugins/mnm/mac-entries/` — per-node MAC/FDB snapshots
+  (`(node, mac, interface, vlan)` tuples). The `Type` column
+  renders a green **Static** chip for administratively-set
+  entries (Junos `entry_status` of `self`/`mgmt` per Block C
+  P4 remap) and a grey **Dynamic** chip for everything else.
+- `/plugins/mnm/mac-entries/<uuid>/` — detail with "Other
+  locations for this MAC on the same node" sidebar (catches
+  MACs that roam within one switch).
+- `/api/plugins/mnm/mac-entries/` — REST API.
+
+### LLDP neighbors (E2)
+
+- `/plugins/mnm/lldp-neighbors/` — per-node LLDP neighbor
+  snapshots (`(node, local_interface, remote_system_name,
+  remote_port)` tuples). Default columns show the minimal
+  identity set; the column-chooser unlocks the five Block C P2
+  expansion fields (local ifIndex/ifName, chassis-ID subtype,
+  port-ID subtype, remote sysDescr).
+- `/plugins/mnm/lldp-neighbors/<uuid>/` — detail with "Other
+  neighbors on the same local interface" sidebar (rare in
+  well-formed networks; useful for daisy-chained phones).
+- `/api/plugins/mnm/lldp-neighbors/` — REST API.
+
+### Sentinel rendering
+
+Any `interface` / `local_interface` value matching `ifindex:N`
+indicates the controller's bridge-port → ifIndex resolution
+failed during collection (Block C P3/P4/P5 fallback). Such
+values render with a yellow warning badge and a tooltip; data
+is preserved per Rule 7 but no link to a Nautobot Interface is
+possible.
 
 ## Prerequisites
 
@@ -67,15 +115,18 @@ After the stack comes up:
 
 1. **Bootstrap output:** look for the line
    `mnm_plugin: <N> migration(s) applied` near the end of
-   `bootstrap.sh`'s output. A WARNING line indicates the plugin
-   isn't installed or migrations didn't run.
-2. **HTTP smoke test:** `curl -sI
-   http://localhost:8443/plugins/mnm/endpoints/` returns 200
-   (after authentication via the Nautobot session cookie or
-   API token) or 302 (redirecting to the login page).
+   `bootstrap.sh`'s output. After E2, expect `2 migration(s)
+   applied`. A WARNING line indicates the plugin isn't installed
+   or migrations didn't run.
+2. **HTTP smoke test:** all four model list views serve HTTP
+   200 (or 302 redirect to login) for the unauthenticated path:
+   - `/plugins/mnm/endpoints/`
+   - `/plugins/mnm/arp-entries/`
+   - `/plugins/mnm/mac-entries/`
+   - `/plugins/mnm/lldp-neighbors/`
 3. **Migration introspection:**
    `docker exec mnm-nautobot nautobot-server showmigrations mnm_plugin`
-   should list `[X] 0001_initial`.
+   should list `[X] 0001_initial` and `[X] 0002_arp_mac_lldp`.
 
 ## Permissions
 

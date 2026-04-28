@@ -1,0 +1,55 @@
+{% extends "generic/object_detail.html" %}
+{% load helpers %}
+
+{% block title %}{{ object.mac }} on {{ object.interface }}{% endblock %}
+
+{% block content_left_page %}
+  <div class="panel panel-default">
+    <div class="panel-heading">
+      <strong>MAC Entry</strong>
+    </div>
+    <table class="table table-hover panel-body attr-table">
+      <tr><td>Node</td><td>{{ object.node_name }}</td></tr>
+      <tr><td>MAC</td><td><code>{{ object.mac }}</code></td></tr>
+      <tr><td>Interface</td><td>{{ object.interface|default:"—" }}</td></tr>
+      <tr><td>VLAN</td><td>{{ object.vlan }}</td></tr>
+      <tr>
+        <td>Type</td>
+        <td>
+          {% if object.entry_type == "static" %}
+            <span class="label label-success">Static</span>
+          {% else %}
+            <span class="label label-default">Dynamic</span>
+          {% endif %}
+        </td>
+      </tr>
+      <tr><td>Collected</td><td>{{ object.collected_at }}</td></tr>
+    </table>
+  </div>
+{% endblock %}
+
+{% block content_right_page %}
+  <div class="panel panel-default">
+    <div class="panel-heading">
+      <strong>Other locations for this MAC on the same node</strong>
+      <span class="badge">{{ same_mac_other_locations|length }}</span>
+    </div>
+    <table class="table table-hover panel-body">
+      <thead>
+        <tr><th>Interface</th><th>VLAN</th><th>Type</th><th>Collected</th></tr>
+      </thead>
+      <tbody>
+        {% for row in same_mac_other_locations %}
+          <tr>
+            <td>{{ row.interface|default:"—" }}</td>
+            <td>{{ row.vlan }}</td>
+            <td>{{ row.entry_type }}</td>
+            <td>{{ row.collected_at }}</td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="4" class="text-muted text-center">No other locations</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endblock %}

@@ -495,6 +495,23 @@ async def collect_arp(device_name: str, device_id: str,
     except Exception:  # noqa: BLE001 — persistence failure shouldn't kill collection
         pass
 
+    # Two-tier write per E0 §5d: mirror to mnm-plugin Nautobot DB
+    # alongside the controller-DB write. plugin_writer is fail-soft
+    # (BLE001 internal); the outer guard here is belt-and-suspenders
+    # for any synchronous error path (e.g. import failure on first call).
+    try:
+        from app import plugin_writer
+        await plugin_writer.upsert_arp_bulk(device_name, entries)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "plugin_writer_dispatch_failed",
+            "Plugin ARP mirror failed (non-fatal — controller DB is "
+            "authoritative)",
+            context={"device": device_name,
+                     "error": str(exc),
+                     "error_class": type(exc).__name__,
+                     "count": len(entries)})
+
     duration = time.monotonic() - t0
     await _mark_success(device_name, "arp", duration)
     log.info("arp_snmp_collect_complete",
@@ -605,6 +622,20 @@ async def collect_mac(device_name: str, device_id: str,
         await endpoint_store.upsert_node_mac_bulk(device_name, entries)
     except Exception:  # noqa: BLE001 — persistence failure shouldn't kill collection
         pass
+
+    # Two-tier write per E0 §5d.
+    try:
+        from app import plugin_writer
+        await plugin_writer.upsert_mac_bulk(device_name, entries)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "plugin_writer_dispatch_failed",
+            "Plugin MAC mirror failed (non-fatal — controller DB is "
+            "authoritative)",
+            context={"device": device_name,
+                     "error": str(exc),
+                     "error_class": type(exc).__name__,
+                     "count": len(entries)})
 
     duration = time.monotonic() - t0
     await _mark_success(device_name, "mac", duration)
@@ -750,6 +781,22 @@ async def collect_lldp(device_name: str, device_id: str,
         await endpoint_store.upsert_node_lldp_bulk(device_name, grouped)
     except Exception:  # noqa: BLE001 — persistence failure shouldn't kill collection
         pass
+
+    # Two-tier write per E0 §5d. Plugin schema is flat (one row per
+    # neighbor with local_interface denormalized); the writer
+    # iterates-and-flattens the grouped dict internally.
+    try:
+        from app import plugin_writer
+        await plugin_writer.upsert_lldp_bulk(device_name, grouped)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "plugin_writer_dispatch_failed",
+            "Plugin LLDP mirror failed (non-fatal — controller DB is "
+            "authoritative)",
+            context={"device": device_name,
+                     "error": str(exc),
+                     "error_class": type(exc).__name__,
+                     "count": sum(len(v) for v in (grouped or {}).values())})
 
     persisted_count = sum(len(v) for v in grouped.values())
     duration = time.monotonic() - t0

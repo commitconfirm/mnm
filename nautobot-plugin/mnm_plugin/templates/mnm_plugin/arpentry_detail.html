@@ -1,0 +1,47 @@
+{% extends "generic/object_detail.html" %}
+{% load helpers %}
+
+{% block title %}{{ object.ip }} → {{ object.mac }}{% endblock %}
+
+{% block content_left_page %}
+  <div class="panel panel-default">
+    <div class="panel-heading">
+      <strong>ARP Entry</strong>
+    </div>
+    <table class="table table-hover panel-body attr-table">
+      <tr><td>Node</td><td>{{ object.node_name }}</td></tr>
+      <tr><td>IP</td><td><code>{{ object.ip }}</code></td></tr>
+      <tr><td>MAC</td><td><code>{{ object.mac }}</code></td></tr>
+      <tr><td>Interface</td><td>{{ object.interface|default:"—" }}</td></tr>
+      <tr><td>VRF</td><td>{{ object.vrf }}</td></tr>
+      <tr><td>Collected</td><td>{{ object.collected_at }}</td></tr>
+    </table>
+  </div>
+{% endblock %}
+
+{% block content_right_page %}
+  <div class="panel panel-default">
+    <div class="panel-heading">
+      <strong>Other ARP entries for this IP</strong>
+      <span class="badge">{{ same_ip_other_macs|length }}</span>
+    </div>
+    <table class="table table-hover panel-body">
+      <thead>
+        <tr><th>Node</th><th>MAC</th><th>Interface</th><th>VRF</th><th>Collected</th></tr>
+      </thead>
+      <tbody>
+        {% for row in same_ip_other_macs %}
+          <tr>
+            <td>{{ row.node_name }}</td>
+            <td><code>{{ row.mac }}</code></td>
+            <td>{{ row.interface|default:"—" }}</td>
+            <td>{{ row.vrf }}</td>
+            <td>{{ row.collected_at }}</td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="5" class="text-muted text-center">No other entries</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endblock %}

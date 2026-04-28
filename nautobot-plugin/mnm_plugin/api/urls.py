@@ -14,6 +14,9 @@ router = OrderedDefaultRouter()
 # (Nautobot's authenticated root) is what we want.
 
 router.register("endpoints", views.EndpointViewSet)
+router.register("arp-entries", views.ArpEntryViewSet)
+router.register("mac-entries", views.MacEntryViewSet)
+router.register("lldp-neighbors", views.LldpNeighborViewSet)
 
 app_name = "mnm_plugin-api"
 
