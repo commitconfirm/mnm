@@ -72,8 +72,8 @@ services:
 
   nautobot:
     build:
-      context: ./nautobot   # custom image: nautobot + napalm + plugins + 4 patches
-      dockerfile: Dockerfile
+      context: .            # project root so Dockerfile can COPY ./nautobot-plugin/ (mnm-plugin)
+      dockerfile: nautobot/Dockerfile
     image: mnm-nautobot:latest
     container_name: mnm-nautobot
     restart: unless-stopped

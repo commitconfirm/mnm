@@ -588,6 +588,30 @@ for FIELD_DEF in "${DISCOVERY_FIELDS[@]}"; do
 done
 
 # ---------------------------------------------------------------------------
+# Section 6c — verify mnm-plugin migrations applied
+# ---------------------------------------------------------------------------
+# v1.0 Block E adds a Nautobot Django app (mnm-plugin) providing
+# the Endpoint, ARP, MAC, LLDP, Route, BGP, and Fingerprint
+# models. Plugin migrations run as part of Nautobot's startup.
+# This section asserts they actually applied — catches the case
+# where Nautobot started without picking up the plugin (config
+# error, install failure during build, etc.).
+echo ""
+echo "Verifying mnm_plugin migrations..." >&2
+PLUGIN_MIGRATIONS=$(docker exec "$CONTAINER" \
+    nautobot-server showmigrations mnm_plugin 2>/dev/null | \
+    grep -c '\[X\]' || true)
+
+if [ "${PLUGIN_MIGRATIONS:-0}" -lt 1 ]; then
+    echo "  WARNING: mnm_plugin migrations not detected." >&2
+    echo "  Run: docker exec ${CONTAINER} nautobot-server migrate mnm_plugin" >&2
+    echo "  If the plugin isn't installed, rebuild nautobot:" >&2
+    echo "    docker compose build nautobot && docker compose up -d --force-recreate nautobot" >&2
+else
+    echo "  mnm_plugin: ${PLUGIN_MIGRATIONS} migration(s) applied" >&2
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""

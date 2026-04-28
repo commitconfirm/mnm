@@ -74,7 +74,7 @@ RUN find /opt/nautobot -path "*/nautobot_device_onboarding/nornir_plays/command_
 # replacement text.
 #
 # Tracking: https://github.com/nautobot/nautobot-app-device-onboarding/issues
-COPY patches/patch_diffsync_utils.py /tmp/patch_diffsync_utils.py
+COPY nautobot/patches/patch_diffsync_utils.py /tmp/patch_diffsync_utils.py
 RUN python3 /tmp/patch_diffsync_utils.py && \
     rm /tmp/patch_diffsync_utils.py && \
     find /opt/nautobot -path "*/nautobot_device_onboarding/utils/__pycache__" \
@@ -88,14 +88,22 @@ RUN python3 /tmp/patch_diffsync_utils.py && \
 # log calls to WARNING so the actionable detail is always recorded in the
 # JobResult log without operator action. Surgical sed: only the two
 # Schema-validation lines change; other DEBUG logging is untouched.
-COPY patches/patch_processor_schema_logging.py /tmp/patch_processor_schema_logging.py
+COPY nautobot/patches/patch_processor_schema_logging.py /tmp/patch_processor_schema_logging.py
 RUN python3 /tmp/patch_processor_schema_logging.py && \
     rm /tmp/patch_processor_schema_logging.py && \
     find /opt/nautobot -path "*/nautobot_device_onboarding/nornir_plays/__pycache__" \
         -exec rm -rf {} + 2>/dev/null || true
 
+# Install mnm-plugin (v1.0 Block E). Build context is the project
+# root so we can COPY both the nautobot config and the plugin
+# subdirectory. See docker-compose.yml `build.context: .`.
+USER root
+COPY --chown=nautobot:nautobot nautobot-plugin /opt/mnm-plugin
+RUN pip install --no-cache-dir /opt/mnm-plugin
+USER nautobot
+
 # Copy custom Nautobot configuration
-COPY --chown=nautobot:nautobot nautobot_config.py /opt/nautobot/nautobot_config.py
+COPY --chown=nautobot:nautobot nautobot/nautobot_config.py /opt/nautobot/nautobot_config.py
 
 # Ensure volume mount points exist with correct ownership
 RUN mkdir -p /opt/nautobot/media /opt/nautobot/static && \

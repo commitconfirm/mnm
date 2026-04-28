@@ -1,0 +1,132 @@
+{% extends "generic/object_detail.html" %}
+{% load helpers %}
+
+{% block title %}{{ object.mac_address }}{% endblock %}
+
+{% block content_left_page %}
+  <div class="panel panel-default">
+    <div class="panel-heading">
+      <strong>Endpoint</strong>
+    </div>
+    <table class="table table-hover panel-body attr-table">
+      <tr>
+        <td>MAC address</td>
+        <td><code>{{ object.mac_address }}</code></td>
+      </tr>
+      <tr>
+        <td>Current IP</td>
+        <td>{{ object.current_ip|default:"—" }}</td>
+      </tr>
+      <tr>
+        <td>Switch</td>
+        <td>{{ object.current_switch|default:"—" }}</td>
+      </tr>
+      <tr>
+        <td>Port</td>
+        <td>{{ object.current_port|default:"—" }}</td>
+      </tr>
+      <tr>
+        <td>VLAN</td>
+        <td>{{ object.current_vlan }}</td>
+      </tr>
+      <tr>
+        <td>Hostname</td>
+        <td>{{ object.hostname|default:"—" }}</td>
+      </tr>
+      <tr>
+        <td>Classification</td>
+        <td>
+          {{ object.classification|default:"—" }}
+          {% if object.classification_confidence %}
+            <span class="text-muted">({{ object.classification_confidence }})</span>
+          {% endif %}
+        </td>
+      </tr>
+      <tr>
+        <td>MAC vendor</td>
+        <td>{{ object.mac_vendor|default:"—" }}</td>
+      </tr>
+      <tr>
+        <td>Active</td>
+        <td>
+          {% if object.active %}
+            <span class="label label-success">Yes</span>
+          {% else %}
+            <span class="label label-default">No (historical)</span>
+          {% endif %}
+        </td>
+      </tr>
+      <tr>
+        <td>Uplink port</td>
+        <td>{{ object.is_uplink|yesno:"Yes,No" }}</td>
+      </tr>
+      <tr>
+        <td>First seen</td>
+        <td>{{ object.first_seen }}</td>
+      </tr>
+      <tr>
+        <td>Last seen</td>
+        <td>{{ object.last_seen }}</td>
+      </tr>
+      <tr>
+        <td>Data source</td>
+        <td>{{ object.data_source|default:"—" }}</td>
+      </tr>
+    </table>
+  </div>
+{% endblock %}
+
+{% block content_right_page %}
+  <div class="panel panel-default">
+    <div class="panel-heading">
+      <strong>All locations seen</strong>
+      <span class="badge">{{ all_locations.count }}</span>
+    </div>
+    <table class="table table-hover panel-body">
+      <thead>
+        <tr>
+          <th>Switch</th>
+          <th>Port</th>
+          <th>VLAN</th>
+          <th>IP</th>
+          <th>Active</th>
+          <th>Last seen</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in all_locations %}
+          <tr>
+            <td>{{ row.current_switch }}</td>
+            <td>{{ row.current_port }}</td>
+            <td>{{ row.current_vlan }}</td>
+            <td>{{ row.current_ip|default:"—" }}</td>
+            <td>{{ row.active|yesno:"yes,no" }}</td>
+            <td>{{ row.last_seen }}</td>
+          </tr>
+        {% empty %}
+          <tr>
+            <td colspan="6" class="text-muted text-center">No locations recorded</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="panel panel-default">
+    <div class="panel-heading">
+      <strong>All IPs ever seen</strong>
+      <span class="badge">{{ all_ips|length }}</span>
+    </div>
+    <div class="panel-body">
+      {% if all_ips %}
+        <ul class="list-unstyled">
+          {% for ip in all_ips %}
+            <li><code>{{ ip }}</code></li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p class="text-muted">No IPs recorded for this MAC.</p>
+      {% endif %}
+    </div>
+  </div>
+{% endblock %}

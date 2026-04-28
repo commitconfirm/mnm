@@ -267,8 +267,11 @@ services:
   # ==========================================================================
   nautobot:
     build:
-      context: ./nautobot
-      dockerfile: Dockerfile
+      # Build context is the project root so the Dockerfile can
+      # COPY both ./nautobot/ files and ./nautobot-plugin/ (the
+      # mnm-plugin Nautobot Django app shipped with v1.0 Block E).
+      context: .
+      dockerfile: nautobot/Dockerfile
     image: mnm-nautobot:latest
     container_name: mnm-nautobot
     restart: unless-stopped

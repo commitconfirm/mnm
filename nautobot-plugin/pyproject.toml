@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mnm-plugin"
+version = "1.0.0a1"
+description = "MNM Nautobot plugin — Endpoint, ARP, MAC, LLDP, Route, BGP, and Fingerprint models for Modular Network Monitor."
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [
+    {name = "Jimmy (commitconfirm)"},
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: Django",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+]
+
+dependencies = [
+    "nautobot>=3.0,<3.1",
+]
+
+[project.urls]
+"Source" = "https://github.com/commitconfirm/mnm"
+
+[tool.setuptools.packages.find]
+include = ["mnm_plugin*"]
+
+# Include non-Python files (HTML templates, static assets,
+# migration data) when pip-installing — without this, Django
+# can't find ``mnm_plugin/templates/...`` at runtime.
+[tool.setuptools.package-data]
+mnm_plugin = [
+    "templates/**/*.html",
+    "static/**/*",
+]

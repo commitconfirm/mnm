@@ -62,7 +62,14 @@ PLUGINS.extend([
     "nautobot_ssot",
     "nautobot_device_onboarding",
     "welcome_wizard",
+    # MNM plugin (v1.0 Block E) — Endpoint, ARP, MAC, LLDP,
+    # Route, BGP, Fingerprint models. E1 ships Endpoint only;
+    # E2-E6 add the remaining models, the interface-detail
+    # extension, and the filter framework.
+    "mnm_plugin",
 ])
+
+PLUGINS_CONFIG["mnm_plugin"] = {}
 
 PLUGINS_CONFIG["nautobot_plugin_nornir"] = {
     "nornir_settings": {

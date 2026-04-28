@@ -1292,6 +1292,12 @@ async def _correlate_and_record(all_results: list[dict]) -> dict:
     total_recorded = 0
     total_failed = 0
 
+    # Collected endpoints to mirror to the mnm-plugin Nautobot DB
+    # after the per-endpoint controller-DB writes complete.
+    # Per E0 §5d two-tier write: controller DB is authoritative,
+    # plugin DB is the mirror; plugin failures are non-fatal.
+    plugin_batch: list[dict] = []
+
     for device_name, data in by_device.items():
         arp_entries = data.get("arp", [])
         mac_entries = data.get("mac", [])
@@ -1344,6 +1350,10 @@ async def _correlate_and_record(all_results: list[dict]) -> dict:
                     change_source=change_source,
                 )
                 total_recorded += 1
+                # Stage for plugin mirror — only endpoints the
+                # controller DB accepted; uplink-skipped /
+                # exception rows don't propagate.
+                plugin_batch.append(ep)
             except Exception:
                 total_failed += 1
 
@@ -1353,6 +1363,26 @@ async def _correlate_and_record(all_results: list[dict]) -> dict:
                     await _record_endpoint(ip, ep)
                 except Exception:
                     pass
+
+    # Two-tier write: mirror endpoints to mnm-plugin Nautobot DB.
+    # Failures are logged inside plugin_writer; this outer guard is
+    # belt-and-suspenders for any synchronous error path that
+    # escapes the writer.
+    if plugin_batch:
+        try:
+            from app import plugin_writer
+            await plugin_writer.upsert_endpoint_bulk(plugin_batch)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "plugin_writer_dispatch_failed",
+                "Plugin endpoint mirror failed (non-fatal — "
+                "controller DB is authoritative)",
+                context={
+                    "error": str(exc),
+                    "error_class": type(exc).__name__,
+                    "count": len(plugin_batch),
+                },
+            )
 
     return {
         "endpoints_found": total_found,
