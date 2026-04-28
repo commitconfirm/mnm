@@ -103,6 +103,49 @@ class ProbeFailedError(OnboardingError):
     """The vendor probe (e.g. junos.probe_device_facts) raised."""
 
 
+class MissingReferenceError(OnboardingError):
+    """One or more required Nautobot reference records (DeviceType,
+    Platform, Role, Status) are missing.
+
+    Surfaced before Step A so no Nautobot writes happen. The exception
+    carries a structured ``missing_entries`` list — each entry includes
+    a one-line ``fix`` command the operator can paste at a REST client
+    (or copy into ``bootstrap/bootstrap.sh`` for a permanent fix).
+
+    This deliberately does NOT auto-create the missing records. Auto-
+    create would violate Rule 5 (Pre-load all reference data) by hiding
+    real data-quality issues — better to fail loud and let the operator
+    add the entry once, properly, in bootstrap so future devices benefit.
+    """
+
+    def __init__(
+        self,
+        missing_entries: list[dict],
+        vendor: "str | None" = None,
+        chassis_model: "str | None" = None,
+    ):
+        self.missing_entries = missing_entries
+        self.vendor = vendor
+        self.chassis_model = chassis_model
+        lines = [
+            "Cannot onboard: required Nautobot reference data missing.",
+            f"Vendor: {vendor or '(unknown)'}; "
+            f"Chassis model: {chassis_model or '(unknown)'}",
+            "",
+            "Missing entries:",
+        ]
+        for entry in missing_entries:
+            lines.append(f"  - {entry['type']}: {entry['name']}")
+            lines.append(f"    Fix: {entry['fix']}")
+        lines.extend([
+            "",
+            "After adding the missing entries, retry onboarding. To make the "
+            "fix permanent, add the entry to bootstrap/bootstrap.sh "
+            "(see docs/BOOTSTRAP.md).",
+        ])
+        super().__init__("\n".join(lines))
+
+
 # ---------------------------------------------------------------------------
 # Classification → Role + vendor → probe dispatch
 # ---------------------------------------------------------------------------
@@ -177,6 +220,117 @@ async def _resolve_platform_id(platform_slug: "str | None") -> "str | None":
 async def _resolve_active_status_id() -> "str | None":
     rec = await nautobot_client.get_status_by_name("Active", content_type="dcim.device")
     return rec["id"] if rec else None
+
+
+async def _validate_required_references(
+    classification: ClassifierResult,
+    chassis_model: "str | None",
+    role_name: "str | None",
+) -> dict:
+    """Resolve every Nautobot reference Step A needs. Returns a dict of
+    resolved IDs (``role_id``, ``devicetype_id``, ``platform_id``,
+    ``active_status_id``). Raises :class:`MissingReferenceError` listing
+    every missing reference (not just the first) so operators fix them
+    in one pass.
+
+    Platform is optional — devices can onboard without one and still
+    participate in polling, but a missing Platform usually means the
+    classifier's ``platform`` value lacks a matching Nautobot record
+    (the Block C.5 cisco_iosxe gap). We surface the miss so the operator
+    can decide: add the Platform via bootstrap, or accept platform=None
+    by falling through. Today we surface it as a hard miss because
+    silent platform=None loss is the worse failure mode (devices polled
+    without a NAPALM driver bound).
+    """
+    missing: list[dict] = []
+    role_id: "str | None" = None
+    devicetype_id: "str | None" = None
+    platform_id: "str | None" = None
+    active_status_id: "str | None" = None
+
+    # Role — required. Bootstrap creates Router/Switch/Firewall/Access
+    # Point/Endpoint/Unknown; missing means bootstrap was incomplete or
+    # the operator deleted a stock role.
+    if role_name:
+        role_id = await _resolve_role_id(role_name)
+        if role_id is None:
+            missing.append({
+                "type": "Role",
+                "name": role_name,
+                "fix": (
+                    f"POST /api/extras/roles/ "
+                    f"{{\"name\": \"{role_name}\", "
+                    f"\"content_types\": [\"dcim.device\"]}}  "
+                    f"(or re-run bootstrap/bootstrap.sh)"
+                ),
+            })
+
+    # DeviceType — required. Bootstrap imports ~5,200 device types from
+    # the welcome-wizard library; gaps surface for virtual platforms
+    # (vEOS-lab, C8000V) and for unusual physical hardware not in the
+    # community library.
+    if chassis_model:
+        devicetype_id = await _resolve_devicetype_id(chassis_model)
+        if devicetype_id is None:
+            mfg = (classification.vendor or "").replace("_", " ").title() or "<vendor>"
+            missing.append({
+                "type": "DeviceType",
+                "name": chassis_model,
+                "fix": (
+                    f"POST /api/dcim/device-types/ "
+                    f"{{\"model\": \"{chassis_model}\", "
+                    f"\"manufacturer\": \"<{mfg} UUID>\", "
+                    f"\"u_height\": 0}}  "
+                    f"(or add to LAB_DEVICETYPES in bootstrap/bootstrap.sh)"
+                ),
+            })
+
+    # Platform — surfaced as missing too; see docstring rationale.
+    if classification.platform:
+        platform_id = await _resolve_platform_id(classification.platform)
+        if platform_id is None:
+            # NAPALM-driver hint: every existing PLATFORMS entry in
+            # bootstrap.sh maps a network_driver onto an installed napalm
+            # driver. Operators usually want network_driver==slug.
+            missing.append({
+                "type": "Platform",
+                "name": classification.platform,
+                "fix": (
+                    f"POST /api/dcim/platforms/ "
+                    f"{{\"name\": \"{classification.platform}\", "
+                    f"\"network_driver\": \"{classification.platform}\", "
+                    f"\"napalm_driver\": \"<ios|junos|eos|panos|...>\"}}  "
+                    f"(or add to PLATFORMS in bootstrap/bootstrap.sh)"
+                ),
+            })
+
+    # Active Status — bootstrap-created stock value; if missing, the whole
+    # bootstrap is incomplete.
+    active_status_id = await _resolve_active_status_id()
+    if active_status_id is None:
+        missing.append({
+            "type": "Status",
+            "name": "Active",
+            "fix": (
+                "Re-run bootstrap/bootstrap.sh — the stock 'Active' status "
+                "for content_type=dcim.device is missing. This usually means "
+                "the bootstrap script never completed."
+            ),
+        })
+
+    if missing:
+        raise MissingReferenceError(
+            missing_entries=missing,
+            vendor=classification.vendor,
+            chassis_model=chassis_model,
+        )
+
+    return {
+        "role_id": role_id,
+        "devicetype_id": devicetype_id,
+        "platform_id": platform_id,
+        "active_status_id": active_status_id,
+    }
 
 
 async def _resolve_incomplete_status_id() -> "str | None":
@@ -412,36 +566,31 @@ async def onboard_device(
                    f"has no Nautobot Role mapping"),
         )
 
-    role_id = await _resolve_role_id(role_name)
-    if role_id is None:
+    try:
+        refs = await _validate_required_references(
+            classification, facts.chassis_model, role_name,
+        )
+    except MissingReferenceError as exc:
+        log.warning(
+            "onboarding_missing_references",
+            "Required Nautobot reference data missing — refusing Step A",
+            context={**ctx,
+                     "vendor": classification.vendor,
+                     "chassis_model": facts.chassis_model,
+                     "missing": [m["name"] for m in exc.missing_entries],
+                     "missing_types": [m["type"] for m in exc.missing_entries]},
+        )
         return OnboardingResult(
             success=False,
             classification=classification,
+            device_name=facts.hostname,
             phase1_steps_completed=steps_done,
-            error=(f"NautobotWriteError: Role {role_name!r} not found in "
-                   "Nautobot. Ensure bootstrap created standard roles."),
+            error=f"MissingReferenceError: {exc}",
         )
-
-    devicetype_id = await _resolve_devicetype_id(facts.chassis_model)
-    if devicetype_id is None:
-        return OnboardingResult(
-            success=False,
-            classification=classification,
-            phase1_steps_completed=steps_done,
-            error=(f"NautobotWriteError: DeviceType {facts.chassis_model!r} "
-                   "not found. Run welcome-wizard device-type library import."),
-        )
-
-    platform_id = await _resolve_platform_id(classification.platform)
-
-    active_status_id = await _resolve_active_status_id()
-    if active_status_id is None:
-        return OnboardingResult(
-            success=False,
-            classification=classification,
-            phase1_steps_completed=steps_done,
-            error="NautobotWriteError: stock 'Active' status missing in Nautobot",
-        )
+    role_id = refs["role_id"]
+    devicetype_id = refs["devicetype_id"]
+    platform_id = refs["platform_id"]
+    active_status_id = refs["active_status_id"]
 
     # ---------- Step A: POST /api/dcim/devices/ ----------
     device_id: "str | None" = None

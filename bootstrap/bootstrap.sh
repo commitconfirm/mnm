@@ -284,7 +284,15 @@ PLATFORMS=(
     # Juniper (built-in junos driver)
     "juniper_junos|junos|Juniper Junos|Juniper"
     # Cisco (built-in ios, nxos, iosxr drivers)
-    "cisco_ios|ios|Cisco IOS/IOS-XE|Cisco"
+    # cisco_ios = classic IOS; cisco_iosxe = IOS-XE (separate Platform so the
+    # MNM classifier's two-stage Cisco discrimination can target the right
+    # network_driver). Both use the NAPALM ``ios`` driver — IOS-XE's CLI is
+    # close enough that the ios driver works (lab-validated against c8000v
+    # 17.16.1a). Discovered during Block C.5 live onboarding when the
+    # community welcome-wizard library only ships ``cisco_ios``; without
+    # this row, IOS-XE devices land with platform=null.
+    "cisco_ios|ios|Cisco IOS|Cisco"
+    "cisco_iosxe|ios|Cisco IOS-XE|Cisco"
     "cisco_nxos|nxos|Cisco NX-OS|Cisco"
     "cisco_nxos_ssh|nxos_ssh|Cisco NX-OS SSH|Cisco"
     "cisco_iosxr|iosxr|Cisco IOS-XR|Cisco"
@@ -409,6 +417,48 @@ else
         fi
     fi
 fi
+
+# ---------------------------------------------------------------------------
+# 6b. Lab-only virtual DeviceTypes not present in the community library
+# ---------------------------------------------------------------------------
+# The welcome-wizard / netbox-community devicetype-library does not ship
+# definitions for several common virtual lab platforms. Without these rows
+# pre-populated, onboarding a virtual device fails with a cryptic 400 from
+# Step A because get_devicetype_by_model returns None. Block D3 closes the
+# three known gaps (vEOS-lab, C8000V, cisco_iosxe Platform — see section
+# 4b for the Platform). Operators adding new virtual devices should extend
+# this section rather than creating DeviceTypes by hand each time.
+#
+# u_height=0 because these are virtual; physical specs (port count, etc.)
+# come from the device-type templates Phase 2 walks via SNMP, so the
+# DeviceType record itself only needs to satisfy the Nautobot foreign-key
+# constraint.
+echo ""
+echo "--- Lab Virtual DeviceTypes ---"
+
+# Format: model|manufacturer
+LAB_DEVICETYPES=(
+    # Arista vEOS-lab — virtual EOS image used in lab environments. Closes
+    # the v0.9.x vEOS onboarding blocker discovered during Prompt 5.
+    "vEOS-lab|Arista"
+    # Cisco C8000V — virtual Catalyst 8000V (IOS-XE on x86). Lab-validated
+    # at 17.16.1a during Block C.5; community library has C8000K (the
+    # physical chassis) but not the virtual variant.
+    "C8000V|Cisco"
+)
+
+for entry in "${LAB_DEVICETYPES[@]}"; do
+    IFS='|' read -r MODEL MFG_NAME <<< "$entry"
+    MFG_ID=$(api_get_id "dcim/manufacturers" "$MFG_NAME" 2>/dev/null) || MFG_ID=""
+    if [ -z "$MFG_ID" ]; then
+        echo "  DeviceType '${MODEL}': skipped — manufacturer '${MFG_NAME}' missing" >&2
+        continue
+    fi
+    PAYLOAD="{\"model\":\"${MODEL}\",\"manufacturer\":\"${MFG_ID}\",\"u_height\":0}"
+    api_create "dcim/device-types" "$MODEL" "model" \
+        "$PAYLOAD" \
+        "DeviceType '${MODEL}' (${MFG_NAME})" >/dev/null
+done
 
 # ---------------------------------------------------------------------------
 # 7. Secrets and Secrets Group (only if NAPALM credentials are set)
