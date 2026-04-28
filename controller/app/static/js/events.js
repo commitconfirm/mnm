@@ -149,4 +149,22 @@ function setTheme(t) {
   });
 })();
 
+// Column-help tooltip on the Event column (static <th>; see
+// docs/UI_CONVENTIONS.md). Injected once at page load.
+(function injectColHelp() {
+  if (typeof MNMColHelp === 'undefined') return;
+  const el = document.querySelector('[data-col-help="event-type"]');
+  if (!el) return;
+  el.innerHTML = MNMColHelp.icon({
+    title: 'What changed for this MAC',
+    values: [
+      ['appeared',         'First sighting of this MAC anywhere on the network.'],
+      ['moved_port',       'MAC moved to a different port on the same switch.'],
+      ['moved_switch',     'MAC appeared on a different switch than before.'],
+      ['ip_changed',       'MAC kept its location but its observed IP changed.'],
+      ['hostname_changed', 'MAC kept its location but its observed hostname changed.'],
+    ],
+  });
+})();
+
 checkAuth().then(() => { loadEvents(); loadConflicts(); });

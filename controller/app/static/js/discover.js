@@ -554,6 +554,49 @@ function setTheme(theme) {
 // Init preferences
 MNMPreferences.init();
 
+// Column-help tooltips on the sweep-results header cells (static <th>;
+// see docs/UI_CONVENTIONS.md). Injected once at page load.
+(function injectColHelp() {
+  if (typeof MNMColHelp === 'undefined') return;
+  const targets = [
+    {
+      sel: '[data-col-help="sweep-classification"]',
+      opts: {
+        title: 'How the sweep classified this host',
+        values: [
+          ['switch',         'Layer-2 switch (sysDescr / OUI / banner match).'],
+          ['router',         'Router or L3 switch.'],
+          ['firewall',       'Firewall appliance.'],
+          ['network_device', 'Network gear with no specific subtype identified.'],
+          ['server',         'Server-class host (web / SSH / NetBIOS / etc).'],
+          ['access_point',   'Wireless access point.'],
+          ['endpoint',       'Generic endpoint (workstation, printer, IoT).'],
+          ['unknown',        'No useful signals — could not classify.'],
+        ],
+      },
+    },
+    {
+      sel: '[data-col-help="sweep-status"]',
+      opts: {
+        title: 'Sweep + onboarding state for this host',
+        values: [
+          ['alive',      'Responded to probes; not yet recorded.'],
+          ['dead',       'No response (hidden by default; toggle "Show all").'],
+          ['known',      'Already onboarded as a Node in Nautobot — skipped.'],
+          ['onboarding', 'Onboarding job submitted, in progress.'],
+          ['onboarded',  'Successfully onboarded as a Node.'],
+          ['recorded',   'Stored as a passive endpoint (not onboarded).'],
+          ['failed',     'Onboarding attempt failed; see Details for error.'],
+        ],
+      },
+    },
+  ];
+  for (const t of targets) {
+    const el = document.querySelector(t.sel);
+    if (el) el.innerHTML = MNMColHelp.icon(t.opts);
+  }
+})();
+
 // Init
 // ---------------------------------------------------------------------------
 // Discovery exclusions (Rule 6 — operator-controlled scope)
