@@ -369,29 +369,6 @@ async def start_sweep(body: SweepRequest):
     return {"status": "started"}
 
 
-class OnboardRequest(BaseModel):
-    ip: str
-
-
-@app.post("/api/discover/onboard", dependencies=[Depends(require_auth)])
-async def onboard_single(body: OnboardRequest):
-    """Re-submit onboarding for a single IP. Uses the saved sweep schedule's
-    location and credentials. For retrying failed onboarding attempts."""
-    config = await load_config_async()
-    schedules = config.get("sweep_schedules", [])
-    if not schedules:
-        raise HTTPException(status_code=400, detail="No sweep schedule configured — need location and credentials")
-    s = schedules[0]
-    asyncio.create_task(
-        discovery._onboard_host(
-            body.ip,
-            s["location_id"],
-            s["secrets_group_id"],
-        )
-    )
-    return {"status": "submitted", "ip": body.ip}
-
-
 @app.post("/api/discover/stop", dependencies=[Depends(require_auth)])
 async def stop_sweep():
     """Stop the currently running sweep."""

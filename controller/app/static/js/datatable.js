@@ -166,6 +166,15 @@ class DataTable {
     // Build table header. ``align: 'center'`` on a column option
     // sets align-center on both <th> and each <td> (icon and numeric
     // columns; see docs/UI_CONVENTIONS.md).
+    //
+    // SECURITY: ``c.label`` is inserted as raw HTML to support inline
+    // injection of MNMColHelp.icon() output (HTML string with svg +
+    // tooltip wiring). Callers MUST pass developer-controlled strings
+    // only — never user input, never values fetched from external
+    // systems without sanitization. If a future caller needs
+    // user-derived labels, switch this site to .textContent and
+    // provide a separate th.labelHtml escape hatch for the
+    // ColHelp.icon use case.
     const theadCells = visCols.map(c => {
       const alignCls = c.align === 'center' ? ' align-center' : '';
       const exportAttr = c.exportLabel != null

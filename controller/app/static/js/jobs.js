@@ -161,6 +161,23 @@ async function loadJobs() {
 // Expose for onclick
 window.triggerJob = triggerJob;
 
+// Column-help tooltip on the Status column (static <th>; see
+// docs/UI_CONVENTIONS.md). Injected once at page load.
+(function injectColHelp() {
+  if (typeof MNMColHelp === 'undefined') return;
+  const el = document.querySelector('[data-col-help="job-status"]');
+  if (!el) return;
+  el.innerHTML = MNMColHelp.icon({
+    title: 'Background-job state',
+    values: [
+      ['idle',     'Last run finished cleanly; waiting for the next scheduled tick.'],
+      ['running',  'Currently executing — Run Now is blocked while this is set.'],
+      ['error',    'Last run finished with an error; see Result column for detail.'],
+      ['disabled', 'Schedule is disabled; the job will not run until re-enabled.'],
+    ],
+  });
+})();
+
 checkAuth();
 loadJobs();
 setInterval(loadJobs, 10000);
