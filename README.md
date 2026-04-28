@@ -153,6 +153,7 @@ For the full architectural breakdown including container map, port assignments, 
 | [docs/CONNECTORS.md](docs/CONNECTORS.md) | Connector framework reference + Proxmox VE setup (API token, PVEAuditor role) |
 | [docs/API.md](docs/API.md) | Controller REST API reference with curl examples |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common issues drawn from real deployment experience |
+| [docs/PLUGIN.md](docs/PLUGIN.md) | The mnm-plugin Nautobot Django app — Endpoint, ARP, MAC, LLDP, Route, BGP, and Fingerprint models surfaced in Nautobot (v1.0 Block E) |
 
 ## Supported Vendors
 
