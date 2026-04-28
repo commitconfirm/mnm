@@ -401,14 +401,20 @@ async def test_step_H_cache_failure_still_returns_success(orch_mocks):
 
 
 # ---------------------------------------------------------------------------
-# Reference-lookup failures (2)
+# Reference-lookup failures (Block D3 — MissingReferenceError surface).
+# Pre-D3 these returned individual NautobotWriteError messages; D3 wraps
+# them in MissingReferenceError so all missing refs surface in one
+# operator-actionable batch with a one-line REST fix per missing entry.
 # ---------------------------------------------------------------------------
 
 async def test_missing_role_clear_error_at_step_A(orch_mocks):
     orch_mocks.get_role_by_name.return_value = None
     result = await _call()
     assert result.success is False
-    assert "Role 'Switch' not found" in result.error
+    assert "MissingReferenceError" in result.error
+    assert "Role: Switch" in result.error
+    # Operator-actionable fix command must appear
+    assert "POST /api/extras/roles/" in result.error
     assert orch_mocks.create_device.await_count == 0
 
 
@@ -416,8 +422,54 @@ async def test_missing_devicetype_clear_error_at_step_A(orch_mocks):
     orch_mocks.get_devicetype_by_model.return_value = None
     result = await _call()
     assert result.success is False
-    assert "DeviceType" in result.error
+    assert "MissingReferenceError" in result.error
+    assert "DeviceType: EX2300-24P" in result.error
+    assert "POST /api/dcim/device-types/" in result.error
+    # Bootstrap pointer should appear so operator can make fix permanent
+    assert "bootstrap/bootstrap.sh" in result.error
     assert orch_mocks.create_device.await_count == 0
+
+
+async def test_missing_platform_surfaces_with_fix_command(orch_mocks):
+    """Block D3 — Platform missing now blocks Step A. Pre-D3 the orchestrator
+    silently passed platform_id=None and let Nautobot create a device with
+    no Platform binding (the c8000v cisco_iosxe gap surfaced in Block C.5)."""
+    orch_mocks.get_platform_by_name.return_value = None
+    result = await _call()
+    assert result.success is False
+    assert "MissingReferenceError" in result.error
+    assert "Platform: juniper_junos" in result.error
+    assert "POST /api/dcim/platforms/" in result.error
+    assert "PLATFORMS in bootstrap/bootstrap.sh" in result.error
+    assert orch_mocks.create_device.await_count == 0
+
+
+async def test_multiple_missing_references_all_listed_in_one_error(orch_mocks):
+    """All missing entries surface in one batch — operator fixes once, not
+    iteratively. Validates the per-pass collection vs. first-fail-return."""
+    orch_mocks.get_devicetype_by_model.return_value = None
+    orch_mocks.get_platform_by_name.return_value = None
+    result = await _call()
+    assert result.success is False
+    assert "MissingReferenceError" in result.error
+    # Both missing entries listed
+    assert "DeviceType: EX2300-24P" in result.error
+    assert "Platform: juniper_junos" in result.error
+    # Ordering: DeviceType comes before Platform in the validator
+    dt_pos = result.error.index("DeviceType: EX2300-24P")
+    plat_pos = result.error.index("Platform: juniper_junos")
+    assert dt_pos < plat_pos
+    assert orch_mocks.create_device.await_count == 0
+
+
+async def test_all_references_present_does_not_regress_happy_path(orch_mocks):
+    """Validation must not break the happy path — guards against accidental
+    stricter checks in _validate_required_references."""
+    # All mocks return their default success values
+    result = await _call()
+    assert result.success is True
+    assert result.error is None
+    orch_mocks.create_device.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
