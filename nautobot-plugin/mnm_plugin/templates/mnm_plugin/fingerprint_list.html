@@ -1,0 +1,25 @@
+{% extends "generic/object_list.html" %}
+{% load helpers %}
+
+{% block title %}Fingerprints{% endblock %}
+
+{% block content %}
+  {% if is_v1_1_pending %}
+    <div class="alert alert-info" role="alert" style="margin-bottom:16px">
+      <strong>Fingerprint collection is a v1.1 workstream.</strong>
+      Schema is in place; no data is collected yet. v1.1 wires
+      up signal collectors for SSH host keys, TLS certs, mDNS,
+      NetBIOS, SSDP, and SNMPv3 EngineIDs. See the v1.1 backlog
+      in CLAUDE.md.
+    </div>
+  {% endif %}
+  <p class="text-muted">
+    Identity fingerprints per endpoint MAC. Each
+    <code>(target_mac, signal_type, signal_value)</code> tuple
+    is a unique fingerprint; <code>seen_count</code> tracks how
+    many times the same signal has been observed. Cross-host
+    correlation ("same device, moved") falls out naturally from
+    the schema once collectors are wired.
+  </p>
+  {{ block.super }}
+{% endblock %}

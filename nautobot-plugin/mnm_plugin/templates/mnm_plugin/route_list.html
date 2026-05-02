@@ -1,0 +1,17 @@
+{% extends "generic/object_list.html" %}
+{% load helpers %}
+
+{% block title %}Routes{% endblock %}
+
+{% block content %}
+  <p class="text-muted">
+    Per-node routing table snapshots. v1.0 collects via NAPALM
+    Tier 2 (the SNMP-routes collector is v1.1 — see the v1.1
+    backlog). FortiGate (NAPALM-fortios broken on 5.x) and vEOS
+    (NAPALM via Nautobot proxy fragile) have
+    <code>device_polls.routes.enabled = False</code> per the
+    Block C close-out; their rows stay empty until v1.1
+    SNMP-routes lands.
+  </p>
+  {{ block.super }}
+{% endblock %}

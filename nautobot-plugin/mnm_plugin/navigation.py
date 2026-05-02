@@ -38,6 +38,21 @@ menu_items = (
                         name="LLDP Neighbors",
                         permissions=["mnm_plugin.view_lldpneighbor"],
                     ),
+                    NavMenuItem(
+                        link="plugins:mnm_plugin:route_list",
+                        name="Routes",
+                        permissions=["mnm_plugin.view_route"],
+                    ),
+                    NavMenuItem(
+                        link="plugins:mnm_plugin:bgpneighbor_list",
+                        name="BGP Neighbors",
+                        permissions=["mnm_plugin.view_bgpneighbor"],
+                    ),
+                    NavMenuItem(
+                        link="plugins:mnm_plugin:fingerprint_list",
+                        name="Fingerprints",
+                        permissions=["mnm_plugin.view_fingerprint"],
+                    ),
                 ),
             ),
         ),

@@ -52,4 +52,37 @@ urlpatterns = [
         views.LldpNeighborView.as_view(),
         name="lldpneighbor",
     ),
+    # Route (E3)
+    path(
+        "routes/",
+        views.RouteListView.as_view(),
+        name="route_list",
+    ),
+    path(
+        "routes/<uuid:pk>/",
+        views.RouteView.as_view(),
+        name="route",
+    ),
+    # BgpNeighbor (E3)
+    path(
+        "bgp-neighbors/",
+        views.BgpNeighborListView.as_view(),
+        name="bgpneighbor_list",
+    ),
+    path(
+        "bgp-neighbors/<uuid:pk>/",
+        views.BgpNeighborView.as_view(),
+        name="bgpneighbor",
+    ),
+    # Fingerprint (E3 — schema-only in v1.0)
+    path(
+        "fingerprints/",
+        views.FingerprintListView.as_view(),
+        name="fingerprint_list",
+    ),
+    path(
+        "fingerprints/<uuid:pk>/",
+        views.FingerprintView.as_view(),
+        name="fingerprint",
+    ),
 ]

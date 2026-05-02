@@ -33,3 +33,21 @@ class LldpNeighborSerializer(NautobotModelSerializer):
     class Meta:
         model = models.LldpNeighbor
         fields = "__all__"
+
+
+class RouteSerializer(NautobotModelSerializer):
+    class Meta:
+        model = models.Route
+        fields = "__all__"
+
+
+class BgpNeighborSerializer(NautobotModelSerializer):
+    class Meta:
+        model = models.BgpNeighbor
+        fields = "__all__"
+
+
+class FingerprintSerializer(NautobotModelSerializer):
+    class Meta:
+        model = models.Fingerprint
+        fields = "__all__"

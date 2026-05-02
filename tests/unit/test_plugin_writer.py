@@ -517,3 +517,329 @@ async def test_upsert_lldp_bulk_dedups_unmanaged_neighbor_collision():
         rows, plugin_writer.LLDP_CONSTRAINT_KEYS,
     )
     assert len(deduped) == 1
+
+
+# ===========================================================================
+# E3 — Route, BGP, Fingerprint plugin_writer tests
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# Constraint-key pact assertions
+# ---------------------------------------------------------------------------
+
+
+def test_route_constraint_keys_match_e0_design():
+    """The Route constraint tuple matches the unique_together
+    in plugin's Route model and the controller's Route table."""
+    assert plugin_writer.ROUTE_CONSTRAINT_KEYS == (
+        "node_name", "prefix", "next_hop", "vrf",
+    )
+
+
+def test_bgp_constraint_keys_match_e0_design():
+    """The BGP constraint tuple matches the unique_together in
+    the plugin's BgpNeighbor model. ``vrf`` and
+    ``address_family`` are part of the key so the same neighbor
+    can appear in multiple VRFs / address families."""
+    assert plugin_writer.BGP_CONSTRAINT_KEYS == (
+        "node_name", "neighbor_ip", "vrf", "address_family",
+    )
+
+
+def test_fingerprint_constraint_keys_match_e0_design():
+    """The Fingerprint constraint tuple matches the design doc
+    §2c. Schema co-versioning pact even though no production
+    caller exists in v1.0 (v1.1 fingerprinting workstream
+    wires upstream collectors)."""
+    assert plugin_writer.FINGERPRINT_CONSTRAINT_KEYS == (
+        "target_mac", "signal_type", "signal_value",
+    )
+
+
+# ---------------------------------------------------------------------------
+# _normalize_route_dict
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_route_dict_translates_polling_shape():
+    """polling.collect_routes produces dicts with node_name +
+    prefix etc.; we add server-side collected_at."""
+    row = plugin_writer._normalize_route_dict({
+        "node_name": "ex2300-24p",
+        "prefix": "192.0.2.0/24",
+        "next_hop": "192.0.2.1",
+        "protocol": "bgp",
+        "vrf": "default",
+        "metric": 100,
+        "preference": 170,
+        "outgoing_interface": "ge-0/0/0.0",
+        "active": True,
+    })
+    assert row["node_name"] == "ex2300-24p"
+    assert row["prefix"] == "192.0.2.0/24"
+    assert row["protocol"] == "bgp"
+    assert row["metric"] == 100
+    assert row["outgoing_interface"] == "ge-0/0/0.0"
+    assert row["active"] is True
+    assert row["collected_at"] is not None
+
+
+def test_normalize_route_dict_drops_rows_missing_node_or_prefix():
+    """Defensive: rows without node_name or prefix are filtered."""
+    assert plugin_writer._normalize_route_dict({"prefix": "1.0.0.0/8"}) is None
+    assert plugin_writer._normalize_route_dict({"node_name": "x"}) is None
+    assert plugin_writer._normalize_route_dict({}) is None
+
+
+def test_normalize_route_dict_defaults_protocol_and_vrf():
+    """Missing protocol → 'unknown'; missing vrf → 'default'."""
+    row = plugin_writer._normalize_route_dict({
+        "node_name": "x", "prefix": "1.0.0.0/8",
+    })
+    assert row["protocol"] == "unknown"
+    assert row["vrf"] == "default"
+    assert row["next_hop"] == ""
+
+
+def test_normalize_route_dict_outgoing_interface_preserved_vendor_native():
+    """outgoing_interface is preserved as-stored — the
+    cross-vendor naming helper transforms at render time, not
+    at write time. Junos ge-0/0/0.0 lands as ge-0/0/0.0; PAN-OS
+    forms land as PAN-OS shape."""
+    junos = plugin_writer._normalize_route_dict({
+        "node_name": "x", "prefix": "1.0.0.0/8",
+        "outgoing_interface": "ge-0/0/0.0",
+    })
+    assert junos["outgoing_interface"] == "ge-0/0/0.0"
+    panos = plugin_writer._normalize_route_dict({
+        "node_name": "x", "prefix": "1.0.0.0/8",
+        "outgoing_interface": "ethernet1/1",
+    })
+    assert panos["outgoing_interface"] == "ethernet1/1"
+
+
+# ---------------------------------------------------------------------------
+# _normalize_bgp_dict
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_bgp_dict_state_default_unknown():
+    """Missing state defaults to 'Unknown' — the BGP state-chip
+    renders these as grey, not red, because they're indeterminate
+    rather than failing."""
+    row = plugin_writer._normalize_bgp_dict({
+        "node_name": "ex2300-24p",
+        "neighbor_ip": "192.0.2.1",
+        "remote_asn": 65000,
+    })
+    assert row["state"] == "Unknown"
+
+
+def test_normalize_bgp_dict_asn_int_coercion():
+    """remote_asn / local_asn arrive as strings sometimes;
+    coerce to int. Bad values fall back: remote_asn → 0,
+    local_asn → None."""
+    row = plugin_writer._normalize_bgp_dict({
+        "node_name": "x", "neighbor_ip": "192.0.2.1",
+        "remote_asn": "65000", "local_asn": "65001",
+    })
+    assert row["remote_asn"] == 65000
+    assert row["local_asn"] == 65001
+
+    bad = plugin_writer._normalize_bgp_dict({
+        "node_name": "x", "neighbor_ip": "192.0.2.1",
+        "remote_asn": "abc", "local_asn": "xyz",
+    })
+    assert bad["remote_asn"] == 0
+    assert bad["local_asn"] is None
+
+
+def test_normalize_bgp_dict_address_family_default():
+    """Missing address_family → 'ipv4 unicast'; vrf → 'default'.
+    Both are part of the unique key, so defaults are critical."""
+    row = plugin_writer._normalize_bgp_dict({
+        "node_name": "x", "neighbor_ip": "192.0.2.1",
+        "remote_asn": 65000,
+    })
+    assert row["address_family"] == "ipv4 unicast"
+    assert row["vrf"] == "default"
+
+
+# ---------------------------------------------------------------------------
+# _normalize_fingerprint_dict
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_fingerprint_dict_preserves_metadata_dict():
+    """signal_metadata is an arbitrary dict from the (future)
+    collector; round-trip without modification."""
+    row = plugin_writer._normalize_fingerprint_dict({
+        "target_mac": "AA:BB:CC:DD:EE:01",
+        "signal_type": "ssh_hostkey",
+        "signal_value": "AAAAB3NzaC1yc2EAAAA...",
+        "signal_metadata": {"keytype": "rsa", "bits": 2048},
+    })
+    assert row["signal_metadata"] == {"keytype": "rsa", "bits": 2048}
+    assert row["target_mac"] == "AA:BB:CC:DD:EE:01"
+
+
+def test_normalize_fingerprint_dict_defaults_seen_count_to_one():
+    """New fingerprint rows start with seen_count = 1; the
+    increment-on-conflict happens at SQL time in the upsert."""
+    row = plugin_writer._normalize_fingerprint_dict({
+        "target_mac": "AA:BB",
+        "signal_type": "mdns",
+        "signal_value": "_workstation._tcp",
+    })
+    assert row["seen_count"] == 1
+
+
+def test_normalize_fingerprint_dict_iso_timestamp_coerced():
+    """first_seen / last_seen ISO strings get coerced to
+    datetime via _coerce_dt — same E2 fix #3 pattern as the
+    Endpoint normalize."""
+    iso = "2026-04-29T00:00:00+00:00"
+    row = plugin_writer._normalize_fingerprint_dict({
+        "target_mac": "AA",
+        "signal_type": "tls_cert",
+        "signal_value": "sha256:abc",
+        "first_seen": iso,
+        "last_seen": iso,
+    })
+    assert isinstance(row["first_seen"], datetime)
+    assert isinstance(row["last_seen"], datetime)
+
+
+# ---------------------------------------------------------------------------
+# upsert_route_bulk soft-failure semantics
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_upsert_route_bulk_empty_returns_zero():
+    assert await plugin_writer.upsert_route_bulk([]) == 0
+
+
+@pytest.mark.asyncio
+async def test_upsert_route_bulk_table_missing_returns_zero():
+    """Reflection-fail (plugin not migrated) → 0, no exception."""
+    with patch.object(
+        plugin_writer, "_ensure_table",
+        new=AsyncMock(return_value=None),
+    ):
+        result = await plugin_writer.upsert_route_bulk([
+            {"node_name": "x", "prefix": "1.0.0.0/8"},
+        ])
+        assert result == 0
+
+
+@pytest.mark.asyncio
+async def test_upsert_route_bulk_dedups_constraint_collisions():
+    """Two routes with the same (node, prefix, next_hop, vrf)
+    collapse to one — defensive against NAPALM-route-table
+    duplicates that occasionally emit on multi-RIB setups."""
+    rows = [
+        plugin_writer._normalize_route_dict({
+            "node_name": "x", "prefix": "1.0.0.0/8",
+            "next_hop": "192.0.2.1", "protocol": "bgp",
+        }),
+        plugin_writer._normalize_route_dict({
+            "node_name": "x", "prefix": "1.0.0.0/8",
+            "next_hop": "192.0.2.1", "protocol": "ospf",
+        }),
+    ]
+    deduped = plugin_writer._dedup_by_constraint(
+        rows, plugin_writer.ROUTE_CONSTRAINT_KEYS,
+    )
+    assert len(deduped) == 1
+
+
+# ---------------------------------------------------------------------------
+# upsert_bgp_neighbor_bulk soft-failure semantics
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_upsert_bgp_neighbor_bulk_empty_returns_zero():
+    assert await plugin_writer.upsert_bgp_neighbor_bulk([]) == 0
+
+
+@pytest.mark.asyncio
+async def test_upsert_bgp_neighbor_bulk_table_missing_returns_zero():
+    with patch.object(
+        plugin_writer, "_ensure_table",
+        new=AsyncMock(return_value=None),
+    ):
+        result = await plugin_writer.upsert_bgp_neighbor_bulk([
+            {"node_name": "x", "neighbor_ip": "192.0.2.1", "remote_asn": 65000},
+        ])
+        assert result == 0
+
+
+@pytest.mark.asyncio
+async def test_upsert_bgp_neighbor_bulk_dedups_per_address_family():
+    """Same neighbor in same VRF but different address-families
+    is allowed; same (node, ip, vrf, af) collapses."""
+    rows = [
+        plugin_writer._normalize_bgp_dict({
+            "node_name": "x", "neighbor_ip": "192.0.2.1",
+            "remote_asn": 65000,
+            "vrf": "default", "address_family": "ipv4 unicast",
+        }),
+        plugin_writer._normalize_bgp_dict({
+            "node_name": "x", "neighbor_ip": "192.0.2.1",
+            "remote_asn": 65000,
+            "vrf": "default", "address_family": "ipv4 unicast",
+            "state": "Established",
+        }),
+    ]
+    deduped = plugin_writer._dedup_by_constraint(
+        rows, plugin_writer.BGP_CONSTRAINT_KEYS,
+    )
+    assert len(deduped) == 1
+    assert deduped[0]["state"] == "Established"  # last wins
+
+
+# ---------------------------------------------------------------------------
+# upsert_fingerprint_bulk soft-failure semantics
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_upsert_fingerprint_bulk_empty_returns_zero():
+    assert await plugin_writer.upsert_fingerprint_bulk([]) == 0
+
+
+@pytest.mark.asyncio
+async def test_upsert_fingerprint_bulk_table_missing_returns_zero():
+    with patch.object(
+        plugin_writer, "_ensure_table",
+        new=AsyncMock(return_value=None),
+    ):
+        result = await plugin_writer.upsert_fingerprint_bulk([
+            {"target_mac": "AA", "signal_type": "mdns", "signal_value": "x"},
+        ])
+        assert result == 0
+
+
+@pytest.mark.asyncio
+async def test_upsert_fingerprint_bulk_dedups_constraint_collisions():
+    """Two signals with same (mac, type, value) collapse — the
+    SQL-time increment will fire just once for the deduped row."""
+    rows = [
+        plugin_writer._normalize_fingerprint_dict({
+            "target_mac": "AA", "signal_type": "mdns",
+            "signal_value": "_workstation._tcp",
+        }),
+        plugin_writer._normalize_fingerprint_dict({
+            "target_mac": "AA", "signal_type": "mdns",
+            "signal_value": "_workstation._tcp",
+            "signal_metadata": {"hostname": "alpha.local"},
+        }),
+    ]
+    deduped = plugin_writer._dedup_by_constraint(
+        rows, plugin_writer.FINGERPRINT_CONSTRAINT_KEYS,
+    )
+    assert len(deduped) == 1
+    assert deduped[0]["signal_metadata"] == {"hostname": "alpha.local"}

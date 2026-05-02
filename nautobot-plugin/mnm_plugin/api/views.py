@@ -5,9 +5,12 @@ from nautobot.apps.api import NautobotModelViewSet
 from mnm_plugin import filters, models
 from mnm_plugin.api.serializers import (
     ArpEntrySerializer,
+    BgpNeighborSerializer,
     EndpointSerializer,
+    FingerprintSerializer,
     LldpNeighborSerializer,
     MacEntrySerializer,
+    RouteSerializer,
 )
 
 
@@ -33,3 +36,21 @@ class LldpNeighborViewSet(NautobotModelViewSet):
     queryset = models.LldpNeighbor.objects.all()
     serializer_class = LldpNeighborSerializer
     filterset_class = filters.LldpNeighborFilterSet
+
+
+class RouteViewSet(NautobotModelViewSet):
+    queryset = models.Route.objects.all()
+    serializer_class = RouteSerializer
+    filterset_class = filters.RouteFilterSet
+
+
+class BgpNeighborViewSet(NautobotModelViewSet):
+    queryset = models.BgpNeighbor.objects.all()
+    serializer_class = BgpNeighborSerializer
+    filterset_class = filters.BgpNeighborFilterSet
+
+
+class FingerprintViewSet(NautobotModelViewSet):
+    queryset = models.Fingerprint.objects.all()
+    serializer_class = FingerprintSerializer
+    filterset_class = filters.FingerprintFilterSet

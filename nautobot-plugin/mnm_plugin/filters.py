@@ -154,3 +154,104 @@ class LldpNeighborFilterSet(NautobotFilterSet):
             | Q(remote_port__icontains=value)
             | Q(remote_chassis_id__icontains=value)
         )
+
+
+class RouteFilterSet(NautobotFilterSet):
+    """Route list filter set (E3 scaffold)."""
+
+    q = django_filters.CharFilter(method="search", label="Search")
+    node_name = django_filters.CharFilter(lookup_expr="icontains")
+    prefix = django_filters.CharFilter(lookup_expr="icontains")
+    next_hop = django_filters.CharFilter(lookup_expr="icontains")
+    protocol = django_filters.CharFilter(lookup_expr="iexact")
+    vrf = django_filters.CharFilter(lookup_expr="iexact")
+    active = django_filters.BooleanFilter()
+    collected_at = django_filters.IsoDateTimeFilter()
+
+    class Meta:
+        model = models.Route
+        fields = [
+            "node_name",
+            "prefix",
+            "next_hop",
+            "protocol",
+            "vrf",
+            "active",
+            "collected_at",
+        ]
+
+    def search(self, queryset, name, value):
+        if not value:
+            return queryset
+        return queryset.filter(
+            Q(node_name__icontains=value)
+            | Q(prefix__icontains=value)
+            | Q(next_hop__icontains=value)
+            | Q(outgoing_interface__icontains=value)
+        )
+
+
+class BgpNeighborFilterSet(NautobotFilterSet):
+    """BgpNeighbor list filter set (E3 scaffold)."""
+
+    q = django_filters.CharFilter(method="search", label="Search")
+    node_name = django_filters.CharFilter(lookup_expr="icontains")
+    neighbor_ip = django_filters.CharFilter(lookup_expr="icontains")
+    remote_asn = django_filters.NumberFilter()
+    state = django_filters.CharFilter(lookup_expr="iexact")
+    vrf = django_filters.CharFilter(lookup_expr="iexact")
+    address_family = django_filters.CharFilter(lookup_expr="iexact")
+    collected_at = django_filters.IsoDateTimeFilter()
+
+    class Meta:
+        model = models.BgpNeighbor
+        fields = [
+            "node_name",
+            "neighbor_ip",
+            "remote_asn",
+            "state",
+            "vrf",
+            "address_family",
+            "collected_at",
+        ]
+
+    def search(self, queryset, name, value):
+        if not value:
+            return queryset
+        return queryset.filter(
+            Q(node_name__icontains=value)
+            | Q(neighbor_ip__icontains=value)
+            | Q(state__icontains=value)
+        )
+
+
+class FingerprintFilterSet(NautobotFilterSet):
+    """Fingerprint list filter set (E3 scaffold).
+
+    v1.0 ships schema-only; the filterset works once the v1.1
+    signal collectors populate rows.
+    """
+
+    q = django_filters.CharFilter(method="search", label="Search")
+    target_mac = django_filters.CharFilter(lookup_expr="icontains")
+    signal_type = django_filters.CharFilter(lookup_expr="iexact")
+    signal_value = django_filters.CharFilter(lookup_expr="icontains")
+    last_seen = django_filters.IsoDateTimeFilter()
+
+    class Meta:
+        model = models.Fingerprint
+        fields = [
+            "target_mac",
+            "signal_type",
+            "signal_value",
+            "last_seen",
+        ]
+
+    def search(self, queryset, name, value):
+        if not value:
+            return queryset
+        return queryset.filter(
+            Q(target_mac__icontains=value)
+            | Q(signal_type__icontains=value)
+            | Q(signal_value__icontains=value)
+        )
