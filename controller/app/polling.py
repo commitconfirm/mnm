@@ -869,6 +869,23 @@ async def collect_routes(device_name: str, device_id: str,
 
         # Upsert in bulk
         count = await endpoint_store.upsert_routes_bulk(routes)
+
+        # Two-tier write per E0 §5d: mirror to mnm-plugin Nautobot DB.
+        # Routes flow through NAPALM Tier 2 in v1.0; the plugin schema
+        # doesn't care which collection path produced the row.
+        try:
+            from app import plugin_writer
+            await plugin_writer.upsert_route_bulk(routes)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "plugin_writer_dispatch_failed",
+                "Plugin Routes mirror failed (non-fatal — controller "
+                "DB is authoritative)",
+                context={"device": device_name,
+                         "error": str(exc),
+                         "error_class": type(exc).__name__,
+                         "count": len(routes)})
+
         # Also populate FIB from SNMP data (SNMP RIB ≈ FIB on most platforms)
         if routes and tier_used == "snmp":
             try:
@@ -1127,6 +1144,23 @@ async def collect_bgp(device_name: str, device_id: str) -> dict:
                     })
 
         count = await endpoint_store.upsert_bgp_neighbors_bulk(neighbors)
+
+        # Two-tier write per E0 §5d: mirror to mnm-plugin Nautobot DB.
+        # FortiGate and vEOS rows stay empty because their
+        # device_polls.bgp.enabled = False per Block C close-out;
+        # this branch only fires when collection succeeds.
+        try:
+            from app import plugin_writer
+            await plugin_writer.upsert_bgp_neighbor_bulk(neighbors)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "plugin_writer_dispatch_failed",
+                "Plugin BGP mirror failed (non-fatal — controller "
+                "DB is authoritative)",
+                context={"device": device_name,
+                         "error": str(exc),
+                         "error_class": type(exc).__name__,
+                         "count": len(neighbors)})
 
         duration = time.monotonic() - t0
         await _mark_success(device_name, "bgp", duration)

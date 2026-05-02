@@ -83,6 +83,56 @@ top-level **MNM** navigation tab.
   well-formed networks; useful for daisy-chained phones).
 - `/api/plugins/mnm/lldp-neighbors/` — REST API.
 
+### Routes (E3)
+
+- `/plugins/mnm/routes/` — per-node routing table snapshots
+  (`(node, prefix, next_hop, vrf)` tuples). Source: NAPALM
+  `get_route_to` Tier 2 in v1.0; the SNMP-routes collector is a
+  v1.1 workstream. Default columns hide `metric` /
+  `preference` / `outgoing_interface` (toggle via column
+  chooser). `protocol` renders as a color-coded chip
+  (BGP=blue, OSPF/IS-IS=info, static=warning, connected/local=
+  green). FortiGate (NAPALM-fortios broken) and vEOS (NAPALM
+  via Nautobot proxy fragile) have
+  `device_polls.routes.enabled = False` per the Block C
+  close-out; their rows stay empty until v1.1 SNMP-routes.
+- `/plugins/mnm/routes/<uuid>/` — detail with "Same prefix on
+  other nodes" sidebar (surfaces ECMP fan-out and
+  cross-node visibility).
+- `/api/plugins/mnm/routes/` — REST API.
+
+### BGP neighbors (E3)
+
+- `/plugins/mnm/bgp-neighbors/` — per-node BGP neighbor
+  snapshots (`(node, neighbor_ip, vrf, address_family)`
+  tuples). Source: NAPALM `get_bgp_neighbors_detail` Tier 2 in
+  v1.0; v1.1 SNMP-BGP. `state` renders as a chip — green for
+  Established/Up, red for Idle/Active/Down/Connect/OpenSent/
+  OpenConfirm, grey for Unknown. `uptime_seconds` renders
+  humanized as `Nd Nh` / `Nh Nm` / `Nm Ns`. Per the Block C
+  close-out, FortiGate and vEOS have
+  `device_polls.bgp.enabled = False` — their rows stay empty
+  until v1.1 SNMP-BGP.
+- `/plugins/mnm/bgp-neighbors/<uuid>/` — detail with "Other
+  neighbors on this node" sidebar.
+- `/api/plugins/mnm/bgp-neighbors/` — REST API.
+
+### Fingerprints (E3, schema-only in v1.0)
+
+- `/plugins/mnm/fingerprints/` — identity fingerprints per
+  endpoint MAC. **Schema is in place; no signal collection is
+  wired in v1.0.** The list view renders an empty-state
+  callout pointing at the v1.1 fingerprinting workstream
+  until rows land. Each `(target_mac, signal_type,
+  signal_value)` tuple is unique; `seen_count` increments on
+  conflict (the "I've seen this signal again" semantic).
+  Cross-host correlation ("same device, moved") falls out
+  naturally from the schema once collectors land — see the
+  detail view's "Same signal value on other MACs" panel.
+- `/plugins/mnm/fingerprints/<uuid>/` — detail with
+  cross-MAC and cross-signal correlation sidebars.
+- `/api/plugins/mnm/fingerprints/` — REST API.
+
 ### Sentinel rendering
 
 Any `interface` / `local_interface` value matching `ifindex:N`
@@ -115,18 +165,22 @@ After the stack comes up:
 
 1. **Bootstrap output:** look for the line
    `mnm_plugin: <N> migration(s) applied` near the end of
-   `bootstrap.sh`'s output. After E2, expect `2 migration(s)
+   `bootstrap.sh`'s output. After E3, expect `3 migration(s)
    applied`. A WARNING line indicates the plugin isn't installed
    or migrations didn't run.
-2. **HTTP smoke test:** all four model list views serve HTTP
+2. **HTTP smoke test:** all seven model list views serve HTTP
    200 (or 302 redirect to login) for the unauthenticated path:
    - `/plugins/mnm/endpoints/`
    - `/plugins/mnm/arp-entries/`
    - `/plugins/mnm/mac-entries/`
    - `/plugins/mnm/lldp-neighbors/`
+   - `/plugins/mnm/routes/`
+   - `/plugins/mnm/bgp-neighbors/`
+   - `/plugins/mnm/fingerprints/`
 3. **Migration introspection:**
    `docker exec mnm-nautobot nautobot-server showmigrations mnm_plugin`
-   should list `[X] 0001_initial` and `[X] 0002_arp_mac_lldp`.
+   should list `[X] 0001_initial`, `[X] 0002_arp_mac_lldp`,
+   and `[X] 0003_route_bgp_fingerprint`.
 
 ## Permissions
 

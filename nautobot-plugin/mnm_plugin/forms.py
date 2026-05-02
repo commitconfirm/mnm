@@ -62,3 +62,76 @@ class LldpNeighborFilterForm(NautobotFilterForm):
     remote_system_name = forms.CharField(required=False)
     remote_port = forms.CharField(required=False)
     remote_chassis_id = forms.CharField(required=False)
+
+
+class RouteFilterForm(NautobotFilterForm):
+    model = models.Route
+
+    q = forms.CharField(required=False, label="Search")
+    node_name = forms.CharField(required=False)
+    prefix = forms.CharField(required=False)
+    next_hop = forms.CharField(required=False)
+    protocol = forms.ChoiceField(
+        required=False,
+        choices=[
+            ("", "---------"),
+            ("bgp", "BGP"),
+            ("ospf", "OSPF"),
+            ("ospf3", "OSPFv3"),
+            ("isis", "IS-IS"),
+            ("static", "Static"),
+            ("connected", "Connected"),
+            ("direct", "Direct"),
+            ("local", "Local"),
+            ("rip", "RIP"),
+            ("eigrp", "EIGRP"),
+        ],
+    )
+    vrf = forms.CharField(required=False)
+    active = forms.NullBooleanField(required=False)
+
+
+class BgpNeighborFilterForm(NautobotFilterForm):
+    model = models.BgpNeighbor
+
+    q = forms.CharField(required=False, label="Search")
+    node_name = forms.CharField(required=False)
+    neighbor_ip = forms.CharField(required=False)
+    remote_asn = forms.IntegerField(required=False)
+    state = forms.ChoiceField(
+        required=False,
+        choices=[
+            ("", "---------"),
+            ("Established", "Established"),
+            ("Up", "Up"),
+            ("Idle", "Idle"),
+            ("Active", "Active"),
+            ("Connect", "Connect"),
+            ("OpenSent", "OpenSent"),
+            ("OpenConfirm", "OpenConfirm"),
+            ("Down", "Down"),
+            ("Unknown", "Unknown"),
+        ],
+    )
+    vrf = forms.CharField(required=False)
+    address_family = forms.CharField(required=False)
+
+
+class FingerprintFilterForm(NautobotFilterForm):
+    model = models.Fingerprint
+
+    q = forms.CharField(required=False, label="Search")
+    target_mac = forms.CharField(required=False)
+    signal_type = forms.ChoiceField(
+        required=False,
+        choices=[
+            ("", "---------"),
+            ("ssh_hostkey", "SSH Host Key"),
+            ("tls_cert", "TLS Cert"),
+            ("snmpv3_engineid", "SNMPv3 EngineID"),
+            ("mdns", "mDNS"),
+            ("netbios", "NetBIOS"),
+            ("ssdp", "SSDP"),
+        ],
+    )
+    signal_value = forms.CharField(required=False)

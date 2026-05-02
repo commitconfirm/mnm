@@ -17,6 +17,9 @@ router.register("endpoints", views.EndpointViewSet)
 router.register("arp-entries", views.ArpEntryViewSet)
 router.register("mac-entries", views.MacEntryViewSet)
 router.register("lldp-neighbors", views.LldpNeighborViewSet)
+router.register("routes", views.RouteViewSet)
+router.register("bgp-neighbors", views.BgpNeighborViewSet)
+router.register("fingerprints", views.FingerprintViewSet)
 
 app_name = "mnm_plugin-api"
 

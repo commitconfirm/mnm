@@ -1,12 +1,17 @@
 """django-tables2 table definitions for plugin list views.
 
 E1 ships ``EndpointTable``. E2 adds ``ArpEntryTable``,
-``MacEntryTable``, ``LldpNeighborTable``.
+``MacEntryTable``, ``LldpNeighborTable``. E3 adds ``RouteTable``,
+``BgpNeighborTable``, ``FingerprintTable``.
 
 Cross-link rendering uses the cross-vendor naming helper
 (``utils/interface.py``) for any column that holds an interface
 name. Sentinel rows (``ifindex:N``) render with a styled badge
 and a tooltip — they never link to an Interface page.
+
+E3 adds chip-rendering helpers for protocol (Route), state
+(BgpNeighbor), and signal_type (Fingerprint), plus a humanized
+duration helper for BGP uptime_seconds.
 """
 
 from django.utils.html import format_html
@@ -301,3 +306,307 @@ class LldpNeighborTable(BaseTable):
 
     def render_remote_management_ip(self, value, record):
         return _render_ip_link(value)
+
+
+# ---------------------------------------------------------------------------
+# Shared E3 cell renderers
+# ---------------------------------------------------------------------------
+
+# Route protocol → bootstrap label class. Keep the mapping
+# explicit rather than algorithmic; new protocols slot in as
+# operators encounter them. Default fallthrough is "default" (grey).
+_PROTOCOL_LABEL_CLASS = {
+    "bgp": "label-primary",
+    "ospf": "label-info",
+    "ospf3": "label-info",
+    "isis": "label-info",
+    "static": "label-warning",
+    "connected": "label-success",
+    "direct": "label-success",
+    "local": "label-success",
+    "rip": "label-info",
+    "eigrp": "label-info",
+}
+
+
+def _render_protocol_chip(value):
+    if not value:
+        return "—"
+    cls = _PROTOCOL_LABEL_CLASS.get(value.lower(), "label-default")
+    return format_html('<span class="label {}">{}</span>', cls, value)
+
+
+# BGP state → label class. Healthy states are green; failure /
+# transitional states are red; everything else is grey.
+_BGP_HEALTHY_STATES = {"established", "up"}
+_BGP_FAILURE_STATES = {"idle", "active", "down", "connect", "opensent", "openconfirm"}
+
+
+def _render_bgp_state_chip(value):
+    if not value:
+        return "—"
+    lower = value.lower()
+    if lower in _BGP_HEALTHY_STATES:
+        cls = "label-success"
+    elif lower in _BGP_FAILURE_STATES:
+        cls = "label-danger"
+    else:
+        cls = "label-default"
+    return format_html('<span class="label {}">{}</span>', cls, value)
+
+
+def _render_bool_chip(value):
+    if value is True:
+        return format_html('<span class="label label-success">Yes</span>')
+    if value is False:
+        return format_html('<span class="label label-default">No</span>')
+    return "—"
+
+
+def _render_uptime(seconds):
+    """Humanize uptime_seconds into ``Nd Nh`` / ``Nh Nm`` / ``Nm Ns``."""
+    if seconds is None or seconds == "":
+        return "—"
+    try:
+        s = int(seconds)
+    except (TypeError, ValueError):
+        return str(seconds)
+    if s < 0:
+        return "—"
+    days, rem = divmod(s, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    if days >= 1:
+        return f"{days}d {hours}h"
+    if hours >= 1:
+        return f"{hours}h {minutes}m"
+    if minutes >= 1:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+# Fingerprint signal_type → label class. Each signal source gets
+# its own color so operators can spot patterns at a glance.
+_SIGNAL_TYPE_LABEL_CLASS = {
+    "ssh_hostkey": "label-primary",
+    "tls_cert": "label-info",
+    "snmpv3_engineid": "label-warning",
+    "mdns": "label-success",
+    "netbios": "label-default",
+    "ssdp": "label-default",
+}
+
+
+def _render_signal_type_chip(value):
+    if not value:
+        return "—"
+    cls = _SIGNAL_TYPE_LABEL_CLASS.get(value.lower(), "label-default")
+    return format_html('<span class="label {}">{}</span>', cls, value)
+
+
+def _render_truncated(value, limit=80):
+    """Render with full-value tooltip when over ``limit`` chars."""
+    if not value:
+        return "—"
+    if len(value) <= limit:
+        return value
+    return format_html(
+        '<span title="{}">{}…</span>',
+        value,
+        value[:limit],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Route (E3)
+# ---------------------------------------------------------------------------
+
+class RouteTable(BaseTable):
+    """Routing table snapshot list view.
+
+    ``metric`` / ``preference`` / ``outgoing_interface`` are
+    defined but hidden by default; operators toggle via the
+    column-chooser. Default columns optimize for the common
+    "what's in this VRF's routing table?" question.
+    """
+
+    pk = ToggleColumn()
+
+    node_name = tables.Column(verbose_name="Node")
+    prefix = tables.Column(verbose_name="Prefix")
+    next_hop = tables.Column(verbose_name="Next Hop")
+    protocol = tables.Column(verbose_name="Protocol")
+    vrf = tables.Column(verbose_name="VRF")
+    metric = tables.Column(verbose_name="Metric")
+    preference = tables.Column(verbose_name="Preference")
+    outgoing_interface = tables.Column(verbose_name="Out Interface")
+    active = tables.Column(verbose_name="Active")
+    collected_at = tables.DateTimeColumn(verbose_name="Collected")
+
+    class Meta(BaseTable.Meta):
+        model = models.Route
+        fields = (
+            "pk",
+            "node_name",
+            "prefix",
+            "next_hop",
+            "protocol",
+            "vrf",
+            "metric",
+            "preference",
+            "outgoing_interface",
+            "active",
+            "collected_at",
+        )
+        default_columns = (
+            "pk",
+            "node_name",
+            "prefix",
+            "next_hop",
+            "protocol",
+            "vrf",
+            "active",
+            "collected_at",
+        )
+
+    def render_node_name(self, value, record):
+        return _render_device_link(value)
+
+    def render_next_hop(self, value, record):
+        return _render_ip_link(value)
+
+    def render_protocol(self, value, record):
+        return _render_protocol_chip(value)
+
+    def render_outgoing_interface(self, value, record):
+        # Cross-vendor naming helper for display rendering only.
+        # No sentinel ifindex:N here — Routes don't go through
+        # bridge-port resolution. dcim.Interface lookup is E5's
+        # stress-test; for E3 just render via the helper.
+        if not value:
+            return "—"
+        canonical, original = iface_utils.normalize(value)
+        # Try to link to dcim.Interface; fall back to plain
+        # canonical text if no match.
+        iface = iface_utils.get_interface(record.node_name, value)
+        if iface:
+            return format_html(
+                '<a href="{}">{}</a>', iface.get_absolute_url(), original,
+            )
+        # Show original (preserves vendor-native form for
+        # operator inspection); canonical lookup happened
+        # internally and is identical when no transform applies.
+        return original
+
+    def render_active(self, value, record):
+        return _render_bool_chip(value)
+
+
+# ---------------------------------------------------------------------------
+# BgpNeighbor (E3)
+# ---------------------------------------------------------------------------
+
+class BgpNeighborTable(BaseTable):
+    """BGP neighbor list view with state chip + humanized
+    uptime."""
+
+    pk = ToggleColumn()
+
+    node_name = tables.Column(verbose_name="Node")
+    neighbor_ip = tables.Column(verbose_name="Neighbor IP")
+    remote_asn = tables.Column(verbose_name="Remote ASN")
+    local_asn = tables.Column(verbose_name="Local ASN")
+    state = tables.Column(verbose_name="State")
+    vrf = tables.Column(verbose_name="VRF")
+    address_family = tables.Column(verbose_name="AFI")
+    prefixes_received = tables.Column(verbose_name="Prefixes In")
+    prefixes_sent = tables.Column(verbose_name="Prefixes Out")
+    uptime_seconds = tables.Column(verbose_name="Uptime")
+    collected_at = tables.DateTimeColumn(verbose_name="Collected")
+
+    class Meta(BaseTable.Meta):
+        model = models.BgpNeighbor
+        fields = (
+            "pk",
+            "node_name",
+            "neighbor_ip",
+            "remote_asn",
+            "local_asn",
+            "state",
+            "vrf",
+            "address_family",
+            "prefixes_received",
+            "prefixes_sent",
+            "uptime_seconds",
+            "collected_at",
+        )
+        default_columns = (
+            "pk",
+            "node_name",
+            "neighbor_ip",
+            "remote_asn",
+            "state",
+            "vrf",
+            "address_family",
+            "prefixes_received",
+            "uptime_seconds",
+            "collected_at",
+        )
+
+    def render_node_name(self, value, record):
+        return _render_device_link(value)
+
+    def render_neighbor_ip(self, value, record):
+        return _render_ip_link(value)
+
+    def render_state(self, value, record):
+        return _render_bgp_state_chip(value)
+
+    def render_uptime_seconds(self, value, record):
+        return _render_uptime(value)
+
+
+# ---------------------------------------------------------------------------
+# Fingerprint (E3 — schema-only in v1.0)
+# ---------------------------------------------------------------------------
+
+class FingerprintTable(BaseTable):
+    """Fingerprint signal list view.
+
+    v1.0 ships schema-only — no signal collectors are wired yet.
+    The list view renders a v1.1-pending callout when empty
+    (handled in the template / view, not the table). This table
+    works correctly when populated; the v1.1 fingerprinting
+    workstream just adds the upstream collectors.
+    """
+
+    pk = ToggleColumn()
+
+    target_mac = tables.Column(verbose_name="Target MAC")
+    signal_type = tables.Column(verbose_name="Signal Type")
+    signal_value = tables.Column(verbose_name="Signal Value")
+    seen_count = tables.Column(verbose_name="Seen #")
+    first_seen = tables.DateTimeColumn(verbose_name="First Seen")
+    last_seen = tables.DateTimeColumn(verbose_name="Last Seen")
+
+    class Meta(BaseTable.Meta):
+        model = models.Fingerprint
+        fields = (
+            "pk",
+            "target_mac",
+            "signal_type",
+            "signal_value",
+            "seen_count",
+            "first_seen",
+            "last_seen",
+        )
+        default_columns = fields
+
+    def render_target_mac(self, value, record):
+        return _render_mac_link(value)
+
+    def render_signal_type(self, value, record):
+        return _render_signal_type_chip(value)
+
+    def render_signal_value(self, value, record):
+        return _render_truncated(value, limit=80)

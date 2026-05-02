@@ -573,6 +573,280 @@ async def upsert_lldp_bulk(node_name: str, grouped: dict) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Routes (E3)
+# ---------------------------------------------------------------------------
+
+
+ROUTE_CONSTRAINT_KEYS = ("node_name", "prefix", "next_hop", "vrf")
+
+# Update set on conflict: vrf is part of the unique key (not
+# updated). protocol/metric/preference/outgoing_interface/active
+# all may shift on next NAPALM walk so they update.
+_ROUTE_UPDATE_COLUMNS = (
+    "protocol",
+    "metric",
+    "preference",
+    "outgoing_interface",
+    "active",
+    "collected_at",
+)
+
+
+def _normalize_route_dict(r: dict) -> dict | None:
+    """Map a polling.collect_routes output dict to a plugin row.
+
+    polling.collect_routes (and ``endpoint_store.upsert_routes_bulk``)
+    produce dicts with ``node_name`` already populated — the caller
+    doesn't need to pass node_name separately for routes (unlike
+    arp/mac/lldp which are per-device collectors). Returns ``None``
+    if the row lacks a node_name or prefix.
+    """
+    node_name = r.get("node_name")
+    prefix = r.get("prefix")
+    if not node_name or not prefix:
+        return None
+    return {
+        "node_name": node_name,
+        "prefix": prefix,
+        "next_hop": r.get("next_hop") or "",
+        "protocol": r.get("protocol") or "unknown",
+        "vrf": r.get("vrf") or "default",
+        "metric": r.get("metric"),
+        "preference": r.get("preference"),
+        "outgoing_interface": r.get("outgoing_interface"),
+        "active": bool(r.get("active", True)),
+        "collected_at": _coerce_dt(r.get("collected_at")) or _utcnow(),
+    }
+
+
+async def upsert_route_bulk(entries: list[dict]) -> int:
+    """Mirror Routes upserts into the plugin DB.
+
+    Input shape matches ``polling.collect_routes`` /
+    ``endpoint_store.upsert_routes_bulk``: each dict carries its
+    own ``node_name``. ``collected_at`` is server-set unless the
+    caller supplied one. Fail-soft per E1+E2 patterns.
+    """
+    return await _upsert_bulk(
+        table_name="mnm_plugin_route",
+        constraint_keys=ROUTE_CONSTRAINT_KEYS,
+        update_columns=_ROUTE_UPDATE_COLUMNS,
+        rows=[r for r in (_normalize_route_dict(e) for e in entries) if r],
+        log_event_prefix="plugin_route_upsert",
+    )
+
+
+# ---------------------------------------------------------------------------
+# BgpNeighbor (E3)
+# ---------------------------------------------------------------------------
+
+
+BGP_CONSTRAINT_KEYS = (
+    "node_name",
+    "neighbor_ip",
+    "vrf",
+    "address_family",
+)
+
+# Update set on conflict: vrf and address_family are part of the
+# unique key. remote_asn typically doesn't change on a healthy
+# neighbor but does shift in the rare ASN-renumbering case, so
+# include it. uptime_seconds/state/prefixes are always live.
+_BGP_UPDATE_COLUMNS = (
+    "remote_asn",
+    "local_asn",
+    "state",
+    "prefixes_received",
+    "prefixes_sent",
+    "uptime_seconds",
+    "collected_at",
+)
+
+
+def _normalize_bgp_dict(n: dict) -> dict | None:
+    """Map a polling.collect_bgp output dict to a plugin row.
+
+    Returns ``None`` if the row lacks a node_name or neighbor_ip.
+    Per Block C close-out, BGP collection still flows through
+    NAPALM in v1.0; the dict shape mirrors NAPALM's
+    ``get_bgp_neighbors`` output post-controller-side flattening
+    (see ``endpoint_store.upsert_bgp_neighbors_bulk`` for the
+    canonical shape).
+    """
+    node_name = n.get("node_name")
+    neighbor_ip = n.get("neighbor_ip")
+    if not node_name or not neighbor_ip:
+        return None
+    try:
+        remote_asn = int(n.get("remote_asn") or 0)
+    except (TypeError, ValueError):
+        remote_asn = 0
+    local_asn = n.get("local_asn")
+    if local_asn is not None:
+        try:
+            local_asn = int(local_asn)
+        except (TypeError, ValueError):
+            local_asn = None
+    return {
+        "node_name": node_name,
+        "neighbor_ip": neighbor_ip,
+        "remote_asn": remote_asn,
+        "local_asn": local_asn,
+        "state": n.get("state") or "Unknown",
+        "prefixes_received": n.get("prefixes_received"),
+        "prefixes_sent": n.get("prefixes_sent"),
+        "uptime_seconds": n.get("uptime_seconds"),
+        "vrf": n.get("vrf") or "default",
+        "address_family": n.get("address_family") or "ipv4 unicast",
+        "collected_at": _coerce_dt(n.get("collected_at")) or _utcnow(),
+    }
+
+
+async def upsert_bgp_neighbor_bulk(entries: list[dict]) -> int:
+    """Mirror BGP-neighbor upserts into the plugin DB.
+
+    Input shape matches ``polling.collect_bgp`` /
+    ``endpoint_store.upsert_bgp_neighbors_bulk``: each dict
+    carries its own ``node_name``. Fail-soft per E1+E2 patterns.
+    """
+    return await _upsert_bulk(
+        table_name="mnm_plugin_bgpneighbor",
+        constraint_keys=BGP_CONSTRAINT_KEYS,
+        update_columns=_BGP_UPDATE_COLUMNS,
+        rows=[r for r in (_normalize_bgp_dict(e) for e in entries) if r],
+        log_event_prefix="plugin_bgp_upsert",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fingerprint (E3 — schema-only in v1.0; no polling caller wired)
+# ---------------------------------------------------------------------------
+
+
+FINGERPRINT_CONSTRAINT_KEYS = ("target_mac", "signal_type", "signal_value")
+
+# Update set on conflict: ``signal_metadata`` may grow over time
+# as the v1.1 collectors learn more about the same signal;
+# ``last_seen`` always refreshes; ``seen_count`` increments via
+# the ``stmt.excluded.seen_count + 1`` pattern at SQL time
+# (handled in ``upsert_fingerprint_bulk`` directly, not via the
+# generic _upsert_bulk plumbing — increment-on-conflict needs
+# special-case handling).
+_FINGERPRINT_UPDATE_COLUMNS_PLAIN = (
+    "signal_metadata",
+    "last_seen",
+)
+
+
+def _normalize_fingerprint_dict(f: dict) -> dict | None:
+    """Map a future fingerprint signal dict to a plugin row.
+
+    No polling-side caller exists in v1.0 — this is the v1.1
+    contract per design doc §2c. ``first_seen`` and ``last_seen``
+    are server-set if the caller doesn't supply them. ``seen_count``
+    defaults to 1 for new rows; increment-on-conflict happens at
+    SQL time (see :func:`upsert_fingerprint_bulk`).
+    """
+    target_mac = (f.get("target_mac") or "").upper()
+    signal_type = f.get("signal_type")
+    signal_value = f.get("signal_value")
+    if not target_mac or not signal_type or signal_value is None:
+        return None
+    now = _utcnow()
+    return {
+        "target_mac": target_mac,
+        "signal_type": signal_type,
+        "signal_value": signal_value,
+        "signal_metadata": f.get("signal_metadata") or {},
+        "first_seen": _coerce_dt(f.get("first_seen")) or now,
+        "last_seen": _coerce_dt(f.get("last_seen")) or now,
+        "seen_count": int(f.get("seen_count") or 1),
+    }
+
+
+async def upsert_fingerprint_bulk(entries: list[dict]) -> int:
+    """Mirror fingerprint signal collection into the plugin DB.
+
+    NOT CALLED in v1.0 — scaffolded for the v1.1 fingerprinting
+    workstream. Schema co-versioning is the pact (asserted by
+    :data:`FINGERPRINT_CONSTRAINT_KEYS`'s test) — data flow lands
+    when v1.1 wires upstream collectors.
+
+    On conflict, ``seen_count`` increments by 1 (the
+    "I've seen this signal again" semantic). ``last_seen`` and
+    ``signal_metadata`` refresh; ``first_seen`` and the constraint
+    key fields stay.
+    """
+    if not entries:
+        return 0
+    table = await _ensure_table("mnm_plugin_fingerprint")
+    if table is None:
+        return 0
+
+    rows = [r for r in (_normalize_fingerprint_dict(e) for e in entries) if r]
+    deduped = _dedup_by_constraint(rows, FINGERPRINT_CONSTRAINT_KEYS)
+    dedup_dropped = len(rows) - len(deduped)
+    if not deduped:
+        return 0
+    deduped = _inject_django_defaults(deduped, table)
+
+    try:
+        if _session_maker is None:
+            return 0
+        async with _session_maker() as session:
+            stmt = insert(table).values(deduped)
+            update_set = {
+                col: getattr(stmt.excluded, col)
+                for col in _FINGERPRINT_UPDATE_COLUMNS_PLAIN
+                if col in table.c
+            }
+            # Increment seen_count on conflict — Postgres can't
+            # do this via stmt.excluded directly because we want
+            # ``existing.seen_count + 1``, not the new row's
+            # default of 1. SQLAlchemy expression: bind the
+            # existing column to itself + 1.
+            if "seen_count" in table.c:
+                update_set["seen_count"] = table.c.seen_count + 1
+            stmt = stmt.on_conflict_do_update(
+                index_elements=list(FINGERPRINT_CONSTRAINT_KEYS),
+                set_=update_set,
+            )
+            await session.execute(stmt)
+            await session.commit()
+
+        log.info(
+            "plugin_fingerprint_upsert",
+            "Upserted fingerprints into plugin DB",
+            context={
+                "count": len(deduped),
+                "dedup_dropped": dedup_dropped,
+            },
+        )
+        return len(deduped)
+
+    except IntegrityError as e:
+        log.warning(
+            "plugin_fingerprint_upsert_integrity_error",
+            "Integrity error during plugin fingerprint upsert "
+            "(non-fatal — controller DB is authoritative)",
+            context={"error": str(e), "count": len(deduped)},
+        )
+        return 0
+    except Exception as e:  # noqa: BLE001
+        log.warning(
+            "plugin_fingerprint_upsert_failed",
+            "Plugin fingerprint upsert failed (non-fatal — "
+            "controller DB is authoritative)",
+            context={
+                "error": str(e),
+                "error_class": type(e).__name__,
+                "count": len(deduped),
+            },
+        )
+        return 0
+
+
+# ---------------------------------------------------------------------------
 # Internal: shared upsert plumbing
 # ---------------------------------------------------------------------------
 
@@ -671,13 +945,22 @@ __all__ = [
     "ARP_CONSTRAINT_KEYS",
     "MAC_CONSTRAINT_KEYS",
     "LLDP_CONSTRAINT_KEYS",
+    "ROUTE_CONSTRAINT_KEYS",
+    "BGP_CONSTRAINT_KEYS",
+    "FINGERPRINT_CONSTRAINT_KEYS",
     "_dedup_by_constraint",
     "_normalize_endpoint_dict",
     "_normalize_arp_dict",
     "_normalize_mac_dict",
     "_normalize_lldp_neighbor",
+    "_normalize_route_dict",
+    "_normalize_bgp_dict",
+    "_normalize_fingerprint_dict",
     "upsert_endpoint_bulk",
     "upsert_arp_bulk",
     "upsert_mac_bulk",
     "upsert_lldp_bulk",
+    "upsert_route_bulk",
+    "upsert_bgp_neighbor_bulk",
+    "upsert_fingerprint_bulk",
 ]

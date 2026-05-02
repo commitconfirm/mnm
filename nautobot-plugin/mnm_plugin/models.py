@@ -2,12 +2,15 @@
 
 E1 ships ``Endpoint``. E2 adds ``ArpEntry``, ``MacEntry``,
 ``LldpNeighbor`` (the link-layer triad). E3 adds ``Route``,
-``BgpNeighbor``, ``Fingerprint``.
+``BgpNeighbor``, ``Fingerprint`` (the L3 + identity triad).
 
 Schema mirrors the controller-side tables in
 ``controller/app/db.py``: ``Endpoint`` from lines 85-156,
 ``NodeArpEntry`` from 434-457, ``NodeMacEntry`` from 460-483,
-``NodeLldpEntry`` from 486-526.
+``NodeLldpEntry`` from 486-526, ``Route`` from 350-388,
+``BGPNeighbor`` from 391-431. ``Fingerprint`` is a new schema
+with no controller-side mirror (v1.0 ships schema only; v1.1
+adds the signal-collection workstream).
 
 Per the "Schema convention" decision in CLAUDE.md, all text
 columns use ``TextField`` — no ``CharField`` length bounds.
@@ -15,10 +18,12 @@ columns use ``TextField`` — no ``CharField`` length bounds.
 Endpoint uses ``BaseModel + ChangeLoggedModel`` because operators
 edit endpoint metadata (classification overrides, hostname,
 comments) and the change log is operator-relevant. ArpEntry,
-MacEntry, LldpNeighbor are high-volume polling mirrors — they
-inherit only ``BaseModel`` (UUID PK + timestamps) without the
-change-log overhead, since rows are upserted every poll cycle
-and a change log of every poll cycle is noise.
+MacEntry, LldpNeighbor, Route, BgpNeighbor, Fingerprint are all
+high-volume polling mirrors (or, for Fingerprint, a future
+high-volume mirror) — they inherit only ``BaseModel`` (UUID PK
++ timestamps) without the change-log overhead, since rows are
+upserted every poll cycle and a change log of every poll cycle
+is noise.
 """
 
 from django.db import models
@@ -233,3 +238,152 @@ class LldpNeighbor(BaseModel):
     def get_absolute_url(self):  # pragma: no cover
         from django.urls import reverse
         return reverse("plugins:mnm_plugin:lldpneighbor", args=[self.pk])
+
+
+class Route(BaseModel):
+    """Per-node routing table snapshot. Mirrors ``routes``.
+
+    Composite unique key on ``(node_name, prefix, next_hop, vrf)``.
+    Routes still flow through NAPALM in v1.0 (Block C swap covered
+    only ARP/MAC/LLDP); the SNMP-routes collector is a v1.1
+    workstream. The plugin schema doesn't care which collection
+    path produced the row.
+    """
+
+    node_name = models.TextField()
+    prefix = models.TextField()
+    next_hop = models.TextField(default="")
+    protocol = models.TextField(default="unknown")
+    vrf = models.TextField(default="default")
+    metric = models.IntegerField(null=True, blank=True)
+    preference = models.IntegerField(null=True, blank=True)
+    outgoing_interface = models.TextField(null=True, blank=True)
+    active = models.BooleanField(default=True)
+    collected_at = models.DateTimeField()
+
+    class Meta:
+        ordering = ("-collected_at", "node_name", "prefix")
+        constraints = [
+            models.UniqueConstraint(
+                fields=["node_name", "prefix", "next_hop", "vrf"],
+                name="mnm_route_unique_node_prefix_nh_vrf",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["node_name"]),
+            models.Index(fields=["prefix"]),
+            models.Index(fields=["protocol"]),
+            models.Index(fields=["collected_at"]),
+        ]
+        verbose_name = "Route"
+        verbose_name_plural = "Routes"
+
+    def __str__(self) -> str:
+        return f"{self.node_name} {self.prefix} via {self.next_hop or '?'}"
+
+    def get_absolute_url(self):  # pragma: no cover
+        from django.urls import reverse
+        return reverse("plugins:mnm_plugin:route", args=[self.pk])
+
+
+class BgpNeighbor(BaseModel):
+    """Per-node BGP neighbor snapshot. Mirrors ``bgp_neighbors``.
+
+    Composite unique key on
+    ``(node_name, neighbor_ip, vrf, address_family)``.
+    Per Block C close-out, BGP collection still flows through
+    NAPALM in v1.0; FortiGate (NAPALM-fortios broken) and vEOS
+    (NAPALM-eos via Nautobot proxy fragile) have
+    ``device_polls.bgp.enabled = False`` — those vendors'
+    BgpNeighbor rows in the plugin DB stay empty by design until
+    v1.1 SNMP-BGP.
+    """
+
+    node_name = models.TextField()
+    neighbor_ip = models.TextField()
+    remote_asn = models.IntegerField()
+    local_asn = models.IntegerField(null=True, blank=True)
+    state = models.TextField(default="Unknown")
+    prefixes_received = models.IntegerField(null=True, blank=True)
+    prefixes_sent = models.IntegerField(null=True, blank=True)
+    uptime_seconds = models.IntegerField(null=True, blank=True)
+    vrf = models.TextField(default="default")
+    address_family = models.TextField(default="ipv4 unicast")
+    collected_at = models.DateTimeField()
+
+    class Meta:
+        ordering = ("-collected_at", "node_name", "neighbor_ip")
+        constraints = [
+            models.UniqueConstraint(
+                fields=[
+                    "node_name",
+                    "neighbor_ip",
+                    "vrf",
+                    "address_family",
+                ],
+                name="mnm_bgp_unique_node_ip_vrf_af",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["node_name"]),
+            models.Index(fields=["neighbor_ip"]),
+            models.Index(fields=["state"]),
+            models.Index(fields=["collected_at"]),
+        ]
+        verbose_name = "BGP neighbor"
+        verbose_name_plural = "BGP neighbors"
+
+    def __str__(self) -> str:
+        return (
+            f"{self.node_name} ↔ {self.neighbor_ip} "
+            f"(AS{self.remote_asn})"
+        )
+
+    def get_absolute_url(self):  # pragma: no cover
+        from django.urls import reverse
+        return reverse("plugins:mnm_plugin:bgpneighbor", args=[self.pk])
+
+
+class Fingerprint(BaseModel):
+    """Identity fingerprint signal. Schema-only in v1.0 — no
+    collection wired yet; the v1.1 fingerprinting workstream
+    populates this table from SSH host keys, TLS certs, mDNS,
+    NetBIOS, SSDP, and SNMPv3 EngineIDs.
+
+    Composite unique key on
+    ``(target_mac, signal_type, signal_value)``. ``seen_count``
+    is the per-row hit counter; the future writer increments
+    it via ``ON CONFLICT DO UPDATE``.
+    """
+
+    target_mac = models.TextField()
+    signal_type = models.TextField()  # ssh_hostkey | tls_cert | snmpv3_engineid | mdns | netbios | ssdp
+    signal_value = models.TextField()
+    signal_metadata = models.JSONField(default=dict, blank=True)
+    first_seen = models.DateTimeField(default=timezone.now)
+    last_seen = models.DateTimeField(default=timezone.now)
+    seen_count = models.IntegerField(default=1)
+
+    class Meta:
+        ordering = ("-last_seen", "target_mac")
+        constraints = [
+            models.UniqueConstraint(
+                fields=["target_mac", "signal_type", "signal_value"],
+                name="mnm_fingerprint_unique_mac_type_value",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["target_mac"]),
+            models.Index(fields=["signal_type"]),
+            models.Index(fields=["signal_value"]),
+            models.Index(fields=["last_seen"]),
+        ]
+        verbose_name = "Fingerprint"
+        verbose_name_plural = "Fingerprints"
+
+    def __str__(self) -> str:
+        return f"{self.target_mac} {self.signal_type}={self.signal_value[:24]}"
+
+    def get_absolute_url(self):  # pragma: no cover
+        from django.urls import reverse
+        return reverse("plugins:mnm_plugin:fingerprint", args=[self.pk])

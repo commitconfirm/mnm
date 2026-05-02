@@ -1,0 +1,20 @@
+{% extends "generic/object_list.html" %}
+{% load helpers %}
+
+{% block title %}BGP Neighbors{% endblock %}
+
+{% block content %}
+  <p class="text-muted">
+    Per-node BGP neighbor snapshots. v1.0 collects via NAPALM
+    Tier 2 (the SNMP-BGP collector is v1.1 — see CLAUDE.md
+    v1.1 backlog "Core protocol intelligence" theme).
+    State chip: <span class="label label-success">Established</span>
+    or <span class="label label-success">Up</span> = healthy;
+    <span class="label label-danger">Idle</span> /
+    <span class="label label-danger">Active</span> /
+    <span class="label label-danger">Down</span> = unhealthy;
+    other states render in grey. FortiGate and vEOS rows stay
+    empty by design (see Block C close-out).
+  </p>
+  {{ block.super }}
+{% endblock %}
