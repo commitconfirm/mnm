@@ -241,6 +241,62 @@ Plugin write failures are logged and swallowed — the polling
 cycle continues regardless. This is the **two-tier write
 discipline** of E0 §5d.
 
+## Interface detail extension
+
+Every Nautobot `dcim.Interface` detail page (e.g.,
+`/dcim/interfaces/<uuid>/`) renders four inline MNM panels in
+the right column:
+
+- **Endpoints currently on this port** — active rows from the
+  plugin's `Endpoint` table, sorted by `last_seen` descending.
+- **Endpoints historically on this port** — 90-day window;
+  includes active rows by design so the operator sees the
+  full timeline. If the 90-day window is empty but older rows
+  exist, a footer link reads "Show endpoints beyond 90 days →".
+- **LLDP neighbors on this port** — rows from `LldpNeighbor`
+  keyed on `(node_name, local_interface)`, sorted by
+  `collected_at` descending.
+- **MAC entries on this port** — rows from `MacEntry` keyed on
+  `(node_name, interface)`, sorted by `collected_at`
+  descending.
+
+Each panel paginates to the 25 most-recent rows. A "Show all"
+footer link drops the operator into the relevant model's
+existing list view (E1+E2+E3) filtered by `(device,
+interface)`.
+
+The cross-vendor naming helper
+(`mnm_plugin.utils.interface.expand_for_lookup`) drives every
+panel's query. A Nautobot `dcim.Interface.name` like
+`ge-0/0/0` expands to candidates `["ge-0/0/0", "ge-0/0/0.0"]`
+so plugin rows stored under either form (depending on which
+collection path produced them) are caught. Examples:
+
+| Nautobot interface name | Storage candidates |
+|---|---|
+| `ge-0/0/0` | `ge-0/0/0`, `ge-0/0/0.0` |
+| `ge-0/0/0.0` | `ge-0/0/0.0`, `ge-0/0/0` |
+| `Gi1` | `Gi1`, `GigabitEthernet1` |
+| `GigabitEthernet1` | `GigabitEthernet1`, `Gi1` |
+| `GigabitEthernet1.100` | `GigabitEthernet1.100`, `GigabitEthernet1`, `Gi1.100`, `Gi1` |
+| `Ethernet1` | `Ethernet1` |
+| `wan` | `wan` |
+| `irb.140` | `irb.140` (logical interface — no expansion) |
+| `ifindex:7` | `ifindex:7` (sentinel passthrough) |
+
+The panels are **fail-soft**. Each panel's ORM query runs
+inside a `try/except BLE001` wrapper; if one panel raises, an
+error notice replaces that panel's body and the host
+Interface detail page continues rendering normally. This
+mirrors the controller↔plugin write path's degraded-mode
+posture documented elsewhere in this guide.
+
+The rendering uses Nautobot's `TemplateExtension.right_page()`
+hook in `mnm_plugin/template_content.py`. No tab — operators
+see the panels inline alongside Nautobot's native interface
+metadata (cables, IP addresses, etc.) per the locked design
+decision in E0 §7 Q5.
+
 ## Detail-page panels
 
 Each model's detail view (`/plugins/mnm/<model>/<pk>/`) renders
