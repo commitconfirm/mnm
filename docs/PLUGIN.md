@@ -241,6 +241,114 @@ Plugin write failures are logged and swallowed — the polling
 cycle continues regardless. This is the **two-tier write
 discipline** of E0 §5d.
 
+## Detail-page panels
+
+Each model's detail view (`/plugins/mnm/<model>/<pk>/`) renders
+the row's own fields plus three classes of context panel
+introduced in v1.0 Block E4. The panels are read-only and never
+trigger upstream queries — every panel except Recent Events
+(Endpoint only) is a single indexed query against the plugin's
+own Postgres tables.
+
+**Cross-row history.** A "Prior observations" panel on every
+detail view lists prior rows for the same logical record,
+filtered on the model's `unique_together` key with the current
+row's PK excluded. Use cases per model:
+
+- **Endpoint** — every other `(switch, port, vlan)` ever seen
+  for this MAC, including inactive history.
+- **ArpEntry** — prior observations of the same `(node, ip,
+  mac, vrf)` quadruple. Mostly empty in steady state because
+  upserts replace the row in place; populates when interface
+  changes (MAC moves between physical interfaces on the same
+  node).
+- **MacEntry** — re-observations of the same MAC on the same
+  `(node, interface, vlan)`.
+- **LldpNeighbor** — prior observations of the same neighbor on
+  the same `(node, local_interface, remote_system_name,
+  remote_port)`. Surfaces neighbor turnover.
+- **Route** — next-hop changes / route convergence churn on the
+  same `(node, prefix, next_hop, vrf)`.
+- **BgpNeighbor** — state-flap history (Established → Idle →
+  Established) on the same `(node, neighbor_ip, vrf,
+  address_family)`.
+- **Fingerprint** — repeat observations of the same `(target_mac,
+  signal_type, signal_value)`. Mostly empty by design — v1.1
+  collectors increment `seen_count` in place rather than insert.
+
+**Cross-model identity panels.** MAC-keyed lookups across the
+plugin's tables. Each panel renders a small table with the most
+relevant 4-5 columns, paginated to 25 rows, with a "Show all"
+link to the related model's list view filtered by the same MAC:
+
+- **Endpoint detail** — sibling panels for "MAC table
+  observations", "ARP observations", and "Fingerprint signals"
+  for the same MAC.
+- **ArpEntry detail** — "Endpoint records for this MAC" and
+  "MAC table observations" for the same MAC.
+- **MacEntry detail** — "Endpoint records for this MAC" and
+  "ARP observations" for the same MAC.
+- **LldpNeighbor detail** — `remote_system_name` resolves to a
+  Nautobot `dcim.Device` link when one matches; the
+  `remote_port` resolves to a `dcim.Interface` link via the
+  cross-vendor naming helper. Renders inline in the primary
+  fields block, not as a separate panel.
+- **Fingerprint detail** — "Endpoint records for this MAC".
+
+`mac_address` on Endpoint, `mac` on ArpEntry / MacEntry,
+`target_mac` on Fingerprint, and `remote_system_name` on
+LldpNeighbor are all indexed (E1 / E2 / E3 migrations); these
+queries hit indexes.
+
+**Recent Events read-through.** The Endpoint detail view
+additionally surfaces a "Recent events" panel powered by a
+cross-system query to the controller's
+`/api/endpoints/{mac}/history` endpoint. This is the **only**
+cross-process query in the v1.0 plugin — every other panel
+reads the plugin's own database.
+
+The read-through is deliberately fail-soft. The panel renders
+one of three states based on the controller's response:
+
+- **Controller unavailable** — the controller didn't respond
+  within the 2-second timeout, returned a non-2xx status, or the
+  response was malformed. The panel renders
+  `Controller unavailable; recent events temporarily inaccessible.`
+  and the rest of the page renders normally. WARN-deduplicated
+  in the Nautobot log so a controller outage doesn't flood the
+  log with one line per detail-page hit.
+- **No recent events** — the controller responded successfully
+  but had no events for this MAC. The panel renders
+  `No recent events for this MAC.`
+- **Populated** — the panel renders a table of timestamp /
+  event type chip / source / description. Description is derived
+  from the controller's event payload (e.g., `appeared` →
+  "First seen on switch X port Y (IP Z)"; `moved_port` →
+  "Moved from port X to port Y on switch Z").
+
+The client caches each MAC's response for 30 seconds, so two
+operators viewing the same Endpoint within that window share one
+HTTP call to the controller. Auth uses the same
+`NAUTOBOT_SECRET_KEY`-signed token scheme the controller's
+operational UI uses; no new shared secret is configured.
+
+If you see "Controller unavailable" persistently, check that
+`mnm-controller` is running and reachable on the
+`mnm-network` Docker bridge:
+
+```
+docker ps --filter name=mnm-controller
+docker exec mnm-nautobot \
+    curl -s -o /dev/null -w "%{http_code}\n" \
+    http://mnm-controller:9090/api/health
+```
+
+A `200` response confirms the read-through path is healthy at
+the network layer; a `401` means the plugin's token wasn't
+recognized (typically `NAUTOBOT_SECRET_KEY` mismatch between
+nautobot and controller containers — verify both pulled from
+the same `.env`).
+
 ## Troubleshooting
 
 ### Plugin doesn't load
