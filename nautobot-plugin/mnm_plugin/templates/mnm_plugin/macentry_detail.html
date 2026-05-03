@@ -26,6 +26,29 @@
       <tr><td>Collected</td><td>{{ object.collected_at }}</td></tr>
     </table>
   </div>
+
+  {# E4: cross-row history — prior observations of the same (node, mac, interface, vlan) #}
+  <div class="panel panel-default">
+    <div class="panel-heading">
+      <strong>Prior observations</strong>
+      <span class="badge">{{ history|length }}</span>
+    </div>
+    <table class="table table-hover panel-body">
+      <thead>
+        <tr><th>Type</th><th>Collected</th></tr>
+      </thead>
+      <tbody>
+        {% for row in history %}
+          <tr>
+            <td>{{ row.entry_type }}</td>
+            <td>{{ row.collected_at }}</td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="2" class="text-muted text-center">No prior observations</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
 {% endblock %}
 
 {% block content_right_page %}
@@ -51,5 +74,67 @@
         {% endfor %}
       </tbody>
     </table>
+  </div>
+
+  {# E4: cross-model — Endpoint records for this MAC #}
+  <div class="panel panel-default">
+    <div class="panel-heading">
+      <strong>Endpoint records for this MAC</strong>
+      <span class="badge">{{ endpoint_records|length }}</span>
+    </div>
+    <table class="table table-hover panel-body">
+      <thead>
+        <tr><th>Switch</th><th>Port</th><th>VLAN</th><th>Active</th><th>Last seen</th></tr>
+      </thead>
+      <tbody>
+        {% for row in endpoint_records %}
+          <tr>
+            <td>{{ row.current_switch }}</td>
+            <td>{{ row.current_port }}</td>
+            <td>{{ row.current_vlan }}</td>
+            <td>{{ row.active|yesno:"yes,no" }}</td>
+            <td>{{ row.last_seen }}</td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="5" class="text-muted text-center">No Endpoint records for this MAC</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% if endpoint_records %}
+      <div class="panel-footer">
+        <a href="{% url 'plugins:mnm_plugin:endpoint_list' %}?mac_address={{ object.mac }}">Show all Endpoint records →</a>
+      </div>
+    {% endif %}
+  </div>
+
+  {# E4: cross-model — ARP observations for this MAC #}
+  <div class="panel panel-default">
+    <div class="panel-heading">
+      <strong>ARP observations</strong>
+      <span class="badge">{{ arp_observations|length }}</span>
+    </div>
+    <table class="table table-hover panel-body">
+      <thead>
+        <tr><th>Node</th><th>IP</th><th>Interface</th><th>VRF</th><th>Collected</th></tr>
+      </thead>
+      <tbody>
+        {% for row in arp_observations %}
+          <tr>
+            <td>{{ row.node_name }}</td>
+            <td>{{ row.ip }}</td>
+            <td>{{ row.interface|default:"—" }}</td>
+            <td>{{ row.vrf }}</td>
+            <td>{{ row.collected_at }}</td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="5" class="text-muted text-center">No ARP observations</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% if arp_observations %}
+      <div class="panel-footer">
+        <a href="{% url 'plugins:mnm_plugin:arpentry_list' %}?mac={{ object.mac }}">Show all ARP observations →</a>
+      </div>
+    {% endif %}
   </div>
 {% endblock %}

@@ -74,6 +74,43 @@
       </tr>
     </table>
   </div>
+
+  {# E4: cross-row history — every other location ever seen for this MAC #}
+  <div class="panel panel-default">
+    <div class="panel-heading">
+      <strong>Other locations seen</strong>
+      <span class="badge">{{ history|length }}</span>
+    </div>
+    <table class="table table-hover panel-body">
+      <thead>
+        <tr><th>Switch</th><th>Port</th><th>VLAN</th><th>Last seen</th><th>Active</th></tr>
+      </thead>
+      <tbody>
+        {% for row in history %}
+          <tr>
+            <td>{{ row.current_switch }}</td>
+            <td>{{ row.current_port }}</td>
+            <td>{{ row.current_vlan }}</td>
+            <td>{{ row.last_seen }}</td>
+            <td>
+              {% if row.active %}
+                <span class="label label-success">Active</span>
+              {% else %}
+                <span class="label label-default">Inactive</span>
+              {% endif %}
+            </td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="5" class="text-muted text-center">No prior locations recorded</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% if history %}
+      <div class="panel-footer">
+        <a href="{% url 'plugins:mnm_plugin:endpoint_list' %}?mac_address={{ object.mac_address }}">Show all locations for this MAC →</a>
+      </div>
+    {% endif %}
+  </div>
 {% endblock %}
 
 {% block content_right_page %}
@@ -128,5 +165,124 @@
         <p class="text-muted">No IPs recorded for this MAC.</p>
       {% endif %}
     </div>
+  </div>
+
+  {# E4: cross-model — MAC table observations #}
+  <div class="panel panel-default">
+    <div class="panel-heading">
+      <strong>MAC table observations</strong>
+      <span class="badge">{{ mac_table_observations|length }}</span>
+    </div>
+    <table class="table table-hover panel-body">
+      <thead>
+        <tr><th>Node</th><th>Interface</th><th>VLAN</th><th>Type</th><th>Collected</th></tr>
+      </thead>
+      <tbody>
+        {% for row in mac_table_observations %}
+          <tr>
+            <td>{{ row.node_name }}</td>
+            <td>{{ row.interface|default:"—" }}</td>
+            <td>{{ row.vlan }}</td>
+            <td>{{ row.entry_type }}</td>
+            <td>{{ row.collected_at }}</td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="5" class="text-muted text-center">No MAC table observations for this MAC</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% if mac_table_observations %}
+      <div class="panel-footer">
+        <a href="{% url 'plugins:mnm_plugin:macentry_list' %}?mac={{ object.mac_address }}">Show all MAC table observations →</a>
+      </div>
+    {% endif %}
+  </div>
+
+  {# E4: cross-model — ARP observations #}
+  <div class="panel panel-default">
+    <div class="panel-heading">
+      <strong>ARP observations</strong>
+      <span class="badge">{{ arp_observations|length }}</span>
+    </div>
+    <table class="table table-hover panel-body">
+      <thead>
+        <tr><th>Node</th><th>IP</th><th>Interface</th><th>VRF</th><th>Collected</th></tr>
+      </thead>
+      <tbody>
+        {% for row in arp_observations %}
+          <tr>
+            <td>{{ row.node_name }}</td>
+            <td>{{ row.ip }}</td>
+            <td>{{ row.interface|default:"—" }}</td>
+            <td>{{ row.vrf }}</td>
+            <td>{{ row.collected_at }}</td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="5" class="text-muted text-center">No ARP observations for this MAC</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% if arp_observations %}
+      <div class="panel-footer">
+        <a href="{% url 'plugins:mnm_plugin:arpentry_list' %}?mac={{ object.mac_address }}">Show all ARP observations →</a>
+      </div>
+    {% endif %}
+  </div>
+
+  {# E4: cross-model — Fingerprints (empty in v1.0; populates with v1.1 collectors) #}
+  <div class="panel panel-default">
+    <div class="panel-heading">
+      <strong>Fingerprint signals</strong>
+      <span class="badge">{{ fingerprints|length }}</span>
+    </div>
+    <table class="table table-hover panel-body">
+      <thead>
+        <tr><th>Signal type</th><th>Signal value</th><th>Seen #</th><th>Last seen</th></tr>
+      </thead>
+      <tbody>
+        {% for row in fingerprints %}
+          <tr>
+            <td>{{ row.signal_type }}</td>
+            <td><code>{{ row.signal_value|truncatechars:48 }}</code></td>
+            <td>{{ row.seen_count }}</td>
+            <td>{{ row.last_seen }}</td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="4" class="text-muted text-center">No fingerprint signals for this MAC</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  {# E4: controller read-through — Recent Events (graceful-degradation) #}
+  <div class="panel panel-default">
+    <div class="panel-heading">
+      <strong>Recent events</strong>
+      {% if events %}<span class="badge">{{ events|length }}</span>{% endif %}
+    </div>
+    {% if events_unavailable %}
+      <div class="panel-body text-muted">
+        Controller unavailable; recent events temporarily inaccessible.
+        Try refreshing the page in a moment.
+      </div>
+    {% elif events_empty %}
+      <div class="panel-body text-muted">No recent events for this MAC.</div>
+    {% else %}
+      <table class="table table-hover panel-body">
+        <thead>
+          <tr><th>Timestamp</th><th>Event type</th><th>Source</th><th>Description</th></tr>
+        </thead>
+        <tbody>
+          {% for evt in events %}
+            <tr>
+              <td>{{ evt.timestamp }}</td>
+              <td><span class="label label-info">{{ evt.event_type }}</span></td>
+              <td>{{ evt.source|default:"—" }}</td>
+              <td>{{ evt.description }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
   </div>
 {% endblock %}
