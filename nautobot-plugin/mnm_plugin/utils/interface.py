@@ -170,6 +170,134 @@ def normalize(name: Optional[str]) -> tuple[str, str]:
     return (canonical, original)
 
 
+def expand_for_lookup(interface_name: Optional[str]) -> list[str]:
+    """Return all plausible storage forms for a ``dcim.Interface.name``.
+
+    E5 (interface-detail extension) needs the multi-candidate form so
+    a panel query keyed on a Nautobot interface name catches plugin
+    rows stored under any vendor-naming variant the v1.0 collection
+    paths might have produced. Examples:
+
+        ``ge-0/0/0``           → ``["ge-0/0/0", "ge-0/0/0.0"]``
+        ``ge-0/0/0.0``         → ``["ge-0/0/0.0", "ge-0/0/0"]``
+        ``irb.140``            → ``["irb.140"]``
+        ``vlan.100``           → ``["vlan.100"]``
+        ``Gi1``                → ``["Gi1", "GigabitEthernet1"]``
+        ``GigabitEthernet1``   → ``["GigabitEthernet1", "Gi1"]``
+        ``GigabitEthernet1.100`` → ``["GigabitEthernet1.100", "Gi1.100"]``
+        ``Ethernet1``          → ``["Ethernet1"]``  (Arista — no expansion)
+        ``Ethernet1.100``      → ``["Ethernet1.100", "Ethernet1"]``  (subif → strip)
+        ``wan``                → ``["wan"]``  (Fortinet alias — no expansion)
+        ``ifindex:7``          → ``["ifindex:7"]``  (sentinel passthrough)
+        ``""`` / ``None``      → ``[]``
+
+    Sentinels are passed through unchanged (a sentinel never matches
+    a real ``dcim.Interface.name``, but the function shouldn't crash
+    on one — a row with ``interface = "ifindex:7"`` simply won't
+    appear in any port's panel).
+
+    First entry in the returned list is always the input verbatim.
+    Order beyond that is best-effort — callers use the list as the
+    set of candidate matches in an ``__in=`` filter, where order
+    doesn't affect correctness.
+    """
+    if not interface_name:
+        return []
+    if is_sentinel(interface_name):
+        return [interface_name]
+
+    candidates: list[str] = [interface_name]
+
+    # Junos slot/port ↔ logical-unit form: expand both ways.
+    # ``ge-0/0/0`` → also try ``ge-0/0/0.0`` (the conventional unit).
+    # ``ge-0/0/0.0`` → also try ``ge-0/0/0`` (parent physical).
+    # Logical interfaces (irb / vlan) are intentionally NOT expanded
+    # — their ``.N`` is meaningful and stripping it would match the
+    # wrong row.
+    if not re.match(r"^(irb|vlan)\.\d+$", interface_name, re.IGNORECASE):
+        stripped = re.sub(r"\.\d+$", "", interface_name)
+        if stripped != interface_name and stripped not in candidates:
+            candidates.append(stripped)
+        # If the input has no logical-unit suffix and looks like a
+        # Junos physical port (contains a hyphen + slash structure),
+        # add the conventional ``.0`` unit form. Don't blanket-add
+        # ``.0`` because doing so would wrongly add ``Gi1.0`` for
+        # ``Gi1`` etc.
+        if (
+            stripped == interface_name
+            and re.match(r"^[a-z]+-\d+/\d+/\d+$", interface_name)
+        ):
+            candidates.append(f"{interface_name}.0")
+
+    # Cisco short ↔ long form: expand both ways. Use the existing
+    # short→long table; reverse-lookup for long→short.
+    expanded = _expand_cisco_short(interface_name)
+    if expanded and expanded not in candidates:
+        candidates.append(expanded)
+
+    contracted = _contract_cisco_long(interface_name)
+    if contracted and contracted not in candidates:
+        candidates.append(contracted)
+
+    # Cisco subinterface form: ``GigabitEthernet1.100`` → also try
+    # ``Gi1.100``, the parent ``GigabitEthernet1``, and the
+    # contracted parent ``Gi1``.
+    sub_match = re.match(r"^([A-Za-z\-]+\d[\d/]*)\.(\d+)$", interface_name)
+    if sub_match:
+        parent, unit = sub_match.group(1), sub_match.group(2)
+        contracted_parent = _contract_cisco_long(parent)
+        if contracted_parent:
+            candidate = f"{contracted_parent}.{unit}"
+            if candidate not in candidates:
+                candidates.append(candidate)
+            if contracted_parent not in candidates:
+                candidates.append(contracted_parent)
+        if parent not in candidates:
+            candidates.append(parent)
+
+    return candidates
+
+
+def _contract_cisco_long(name: str) -> Optional[str]:
+    """Reverse of ``_expand_cisco_short`` — long form → short form.
+
+    ``GigabitEthernet1`` → ``Gi1``
+    ``TenGigabitEthernet0/1`` → ``Te0/1``
+    ``Vlan100`` → ``Vl100``
+    ``Loopback0`` → ``Lo0``
+    Junos / Arista / Fortinet forms → ``None``.
+    """
+    if not name or not name[0].isupper():
+        return None
+    # Short→long table: long forms are at index [1]. Match longest
+    # long-form prefix first (the table is already ordered for that
+    # in ``_expand_cisco_short``).
+    seen_shorts: set[str] = set()
+    for short, long_ in _CISCO_SHORT_TO_LONG:
+        # Skip rows where short==long (the no-op idempotent rows).
+        if short == long_:
+            continue
+        # Skip if we already considered this short — table has
+        # multiple long-form entries for the same short alias.
+        if short in seen_shorts:
+            continue
+        seen_shorts.add(short)
+        # Match if the name starts with the long form AND the next
+        # character is a digit. The digit-discriminator is required
+        # because every long form also starts with its short form
+        # (e.g., ``GigabitEthernet`` starts with ``Gi``), so a naive
+        # ``not name.startswith(short)`` check fails. Requiring a
+        # digit after the long-form prefix means we matched the full
+        # long form, not just a substring.
+        if (
+            name.startswith(long_)
+            and len(name) > len(long_)
+            and name[len(long_)].isdigit()
+        ):
+            return short + name[len(long_):]
+    return None
+
+
 def get_interface(device_name: Optional[str], interface_name: Optional[str]):
     """Lookup ``dcim.Interface`` by vendor-native name.
 

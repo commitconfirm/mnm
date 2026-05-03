@@ -16,6 +16,7 @@ from __future__ import annotations
 import pytest
 
 from mnm_plugin.utils.interface import (
+    expand_for_lookup,
     is_sentinel,
     normalize,
 )
@@ -231,3 +232,89 @@ def _strip_check(name: str) -> str:
 def test_normalize_empty():
     assert normalize("") == ("", "")
     assert normalize(None) == ("", "")
+
+
+# ---------------------------------------------------------------------------
+# expand_for_lookup — E5 multi-candidate form for panel queries
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "input_name,expected",
+    [
+        # Junos slot/port ↔ logical-unit form (both directions).
+        ("ge-0/0/0", ["ge-0/0/0", "ge-0/0/0.0"]),
+        ("ge-0/0/12", ["ge-0/0/12", "ge-0/0/12.0"]),
+        ("ge-0/0/0.0", ["ge-0/0/0.0", "ge-0/0/0"]),
+        ("ge-0/0/12.100", ["ge-0/0/12.100", "ge-0/0/12"]),
+        ("xe-0/2/0", ["xe-0/2/0", "xe-0/2/0.0"]),
+        ("xe-0/2/0.100", ["xe-0/2/0.100", "xe-0/2/0"]),
+        # Junos logical interfaces — never expand; the .N is the unit.
+        ("irb.140", ["irb.140"]),
+        ("irb.0", ["irb.0"]),
+        ("vlan.100", ["vlan.100"]),
+        ("vlan.0", ["vlan.0"]),
+        # Junos aggregated ethernet
+        ("ae0", ["ae0"]),
+        ("ae0.0", ["ae0.0", "ae0"]),
+        # Cisco short ↔ long form (both directions).
+        ("Gi1", ["Gi1", "GigabitEthernet1"]),
+        ("Gi0/0", ["Gi0/0", "GigabitEthernet0/0"]),
+        ("GigabitEthernet1", ["GigabitEthernet1", "Gi1"]),
+        ("GigabitEthernet0/0", ["GigabitEthernet0/0", "Gi0/0"]),
+        ("Te0/1", ["Te0/1", "TenGigabitEthernet0/1"]),
+        ("TenGigabitEthernet0/1", ["TenGigabitEthernet0/1", "Te0/1"]),
+        ("Vl100", ["Vl100", "Vlan100"]),
+        ("Vlan100", ["Vlan100", "Vl100"]),
+        ("Lo0", ["Lo0", "Loopback0"]),
+        ("Loopback0", ["Loopback0", "Lo0"]),
+        ("Po10", ["Po10", "Port-channel10"]),
+        ("Port-channel10", ["Port-channel10", "Po10"]),
+        ("Nu0", ["Nu0", "Null0"]),
+        ("Null0", ["Null0", "Nu0"]),
+        # Arista numeric — no expansion needed.
+        ("Ethernet1", ["Ethernet1"]),
+        ("Ethernet1/1", ["Ethernet1/1"]),
+        ("Management1", ["Management1"]),
+        # Arista subinterface — strip to parent.
+        ("Ethernet1.100", ["Ethernet1.100", "Ethernet1"]),
+        # Cisco subinterface long → contracted form + parent.
+        ("GigabitEthernet1.100", [
+            "GigabitEthernet1.100", "GigabitEthernet1", "Gi1.100", "Gi1",
+        ]),
+        # Fortinet aliases — never expand.
+        ("wan", ["wan"]),
+        ("lan1", ["lan1"]),
+        ("fortilink", ["fortilink"]),
+        ("port1", ["port1"]),
+        ("internal", ["internal"]),
+        # Sentinel — passthrough; never expands.
+        ("ifindex:7", ["ifindex:7"]),
+        ("ifindex:42", ["ifindex:42"]),
+        ("ifindex:999999", ["ifindex:999999"]),
+    ],
+)
+def test_expand_for_lookup_matrix(input_name, expected):
+    """Order of the first entry MUST be the input verbatim. Order
+    beyond that is best-effort — the panel query uses ``__in=``
+    which doesn't care about order. Test against sets for the
+    tail."""
+    result = expand_for_lookup(input_name)
+    assert result[0] == input_name, f"first entry must be input verbatim: {result}"
+    assert set(result) == set(expected), (
+        f"expand_for_lookup({input_name!r}) returned {result!r}, "
+        f"expected {expected!r}"
+    )
+
+
+def test_expand_for_lookup_empty_returns_empty_list():
+    assert expand_for_lookup("") == []
+    assert expand_for_lookup(None) == []
+
+
+def test_expand_for_lookup_first_entry_always_input():
+    """The verbatim input is always the first candidate so the
+    most-likely match is tried first when the panel query backend
+    cares about order."""
+    for name in ["ge-0/0/0", "Gi1", "Ethernet1", "wan"]:
+        assert expand_for_lookup(name)[0] == name
