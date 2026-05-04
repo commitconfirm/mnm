@@ -210,3 +210,131 @@ async def test_probe_sysname_miss_raises():
          patch("app.onboarding.probes.junos.walk_table", side_effect=_empty_walk):
         with pytest.raises(RuntimeError, match="sysName"):
             await probe_device_facts("192.0.2.15", "public")
+
+
+# ---------------------------------------------------------------------------
+# F2 — chassis_model normalization (vocabulary-driven; see
+# controller/app/onboarding/probes/_fortinet_vocab.py)
+# ---------------------------------------------------------------------------
+
+
+from app.onboarding.probes._fortinet_vocab import normalize_chassis_model  # noqa: E402
+
+
+@pytest.mark.parametrize("raw, expected", [
+    # v1.0 lab matrix — actual entPhysicalModelName form returned by
+    # FG-40F. This is the case that would have failed onboarding
+    # without F2.
+    ("FGT_40F_3G4G", "FortiGate 40F-3G4G"),
+    # Forward-compat with submodel suffix (synthetic; not in v1.0 lab).
+    ("FGT_100F_POE", "FortiGate 100F-POE"),
+    ("FGT_80F_BDSL", "FortiGate 80F-BDSL"),
+    # Forward-compat without submodel suffix (synthetic; not in v1.0 lab).
+    ("FGT_60F", "FortiGate 60F"),
+    ("FGT_200F", "FortiGate 200F"),
+    ("FGT_600F", "FortiGate 600F"),
+])
+def test_normalize_chassis_model_underscore_slug(raw, expected):
+    assert normalize_chassis_model(raw) == expected
+
+
+def test_normalize_chassis_model_already_canonical_passthrough():
+    # Forward-compat: a future FortiOS firmware that returns the
+    # library-canonical marketing form via entPhysicalModelName must
+    # not be rewritten.
+    assert normalize_chassis_model("FortiGate 40F-3G4G") == "FortiGate 40F-3G4G"
+    assert normalize_chassis_model("FortiGate 60F") == "FortiGate 60F"
+    assert normalize_chassis_model("FortiGate 80F-DSL") == "FortiGate 80F-DSL"
+
+
+def test_normalize_chassis_model_unrecognized_passthrough():
+    # Per Rule 5 + D3 discipline: when the vocabulary doesn't match,
+    # return the input unchanged so the orchestrator's
+    # MissingReferenceError surfaces the gap with operator-actionable
+    # text. Never auto-create the DeviceType.
+    raw = "Some Future FortiGate Format"
+    assert normalize_chassis_model(raw) == raw
+    # Also: hyphen-instead-of-underscore form (not produced by the
+    # known FortiOS shapes) passes through unchanged.
+    assert normalize_chassis_model("FortiGate-40F") == "FortiGate-40F"
+
+
+def test_normalize_chassis_model_strips_whitespace_before_match():
+    # SNMP scalars sometimes return padded strings; whitespace-strip
+    # before vocabulary match.
+    assert normalize_chassis_model("  FGT_40F_3G4G  ") == "FortiGate 40F-3G4G"
+
+
+def test_normalize_chassis_model_none_passthrough():
+    # The orchestrator handles chassis_model=None gracefully (the
+    # MissingReferenceError surface). Don't crash on a missing
+    # primary-and-fallback case.
+    assert normalize_chassis_model(None) is None
+
+
+def test_normalize_chassis_model_empty_string_passthrough():
+    assert normalize_chassis_model("") == ""
+
+
+def test_normalize_chassis_model_bytes_input_decoded():
+    # The probe pipes _decode'd strings into normalize, but accept
+    # bytes too — defensively, in case any caller bypasses _decode.
+    assert normalize_chassis_model(b"FGT_40F_3G4G") == "FortiGate 40F-3G4G"
+
+
+# ---------------------------------------------------------------------------
+# F2 — end-to-end through probe_device_facts
+# ---------------------------------------------------------------------------
+
+
+async def test_probe_device_facts_normalizes_entity_mib_underscore_slug():
+    """The actual FG-40F lab string "FGT_40F_3G4G" via the full probe
+    pipeline returns canonical "FortiGate 40F-3G4G" on
+    facts.chassis_model — the F2-target case."""
+    responses = {
+        "SNMPv2-MIB::sysName": b"fgt40f",
+        "SNMPv2-MIB::sysDescr": SYSDESCR_CUSTOMIZED,
+        "FORTINET-CORE-MIB::fnSysSerial": b"FGT40FTK1234567",
+    }
+
+    async def _walk_spy(ip, community, oid_str, **kw):
+        from app.snmp_collector import OIDS
+        if oid_str == OIDS["ENTITY-MIB::entPhysicalClass"]:
+            return [{"1": 3}]
+        if oid_str == OIDS["ENTITY-MIB::entPhysicalSerialNum"]:
+            return [{"1": b"FGT40FTK1234567"}]
+        if oid_str == OIDS["ENTITY-MIB::entPhysicalModelName"]:
+            return [{"1": b"FGT_40F_3G4G"}]
+        return []
+
+    with patch("app.onboarding.probes.junos.get_scalar",
+               side_effect=_make_get_scalar(responses)), \
+         patch("app.onboarding.probes.junos.walk_table", side_effect=_walk_spy):
+        facts = await probe_device_facts("192.0.2.15", "public")
+    assert facts.chassis_model == "FortiGate 40F-3G4G"
+
+
+async def test_probe_device_facts_unrecognized_chassis_passes_through():
+    """Unrecognized model in entPhysicalModelName returns unchanged so
+    the orchestrator's MissingReferenceError can surface it."""
+    responses = {
+        "SNMPv2-MIB::sysName": b"future-fgt",
+        "SNMPv2-MIB::sysDescr": SYSDESCR_CUSTOMIZED,
+        "FORTINET-CORE-MIB::fnSysSerial": b"FGT-FUTURE-1",
+    }
+
+    async def _walk_spy(ip, community, oid_str, **kw):
+        from app.snmp_collector import OIDS
+        if oid_str == OIDS["ENTITY-MIB::entPhysicalClass"]:
+            return [{"1": 3}]
+        if oid_str == OIDS["ENTITY-MIB::entPhysicalSerialNum"]:
+            return [{"1": b"FGT-FUTURE-1"}]
+        if oid_str == OIDS["ENTITY-MIB::entPhysicalModelName"]:
+            return [{"1": b"FortiGate-Future-Model-X"}]
+        return []
+
+    with patch("app.onboarding.probes.junos.get_scalar",
+               side_effect=_make_get_scalar(responses)), \
+         patch("app.onboarding.probes.junos.walk_table", side_effect=_walk_spy):
+        facts = await probe_device_facts("192.0.2.15", "public")
+    assert facts.chassis_model == "FortiGate-Future-Model-X"
