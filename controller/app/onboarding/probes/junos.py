@@ -34,6 +34,7 @@ from app.snmp_collector import (
     oid,
     walk_table,
 )
+from app.onboarding.probes._junos_vocab import normalize_chassis_model
 
 log = logging.getLogger(__name__)
 
@@ -212,6 +213,27 @@ async def probe_device_facts(ip: str, snmp_community: str) -> DeviceFacts:
             serial = ent_serial
         if chassis_model is None:
             chassis_model = ent_model
+
+    # F1: normalize chassis_model to the netbox-community DeviceType
+    # library short form. jnxBoxDescr returns descriptive strings like
+    # "Juniper EX2300-24P Switch" while the library indexes by
+    # canonical "EX2300-24P". When the vocabulary doesn't match, the
+    # original string passes through unchanged and the orchestrator's
+    # MissingReferenceError surfaces the gap with operator-actionable
+    # text per Rule 5 + D3 discipline.
+    normalized = normalize_chassis_model(chassis_model)
+    if chassis_model and normalized != chassis_model:
+        log.debug(
+            "junos_probe_chassis_normalized raw=%r canonical=%r",
+            chassis_model, normalized,
+        )
+    elif chassis_model:
+        log.debug(
+            "junos_probe_chassis_passthrough value=%r "
+            "(no vocabulary match — extend _junos_vocab.py if onboarding fails)",
+            chassis_model,
+        )
+    chassis_model = normalized
 
     return DeviceFacts(
         hostname=hostname,
