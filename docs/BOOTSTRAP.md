@@ -174,6 +174,68 @@ draw, console ports), use the Nautobot UI to create them and let the
 operator workflow document the addition manually. The bootstrap script
 focuses on the minimum viable record so onboarding doesn't 400.
 
+## Manufacturer name dedup pass (section 6a)
+
+The netbox-community DeviceType library occasionally uses slightly
+different manufacturer name spellings than the canonical entries
+bootstrap section 4 creates. The known case:
+
+| Library imports | Bootstrap section 4 creates |
+| --- | --- |
+| `Palo Alto` | `Palo Alto Networks` |
+
+When both records coexist, Nautobot's platform–manufacturer
+validation rejects device creation at Step A:
+
+```
+"platform is limited to Palo Alto Networks device types,
+ but this device's type belongs to Palo Alto"
+```
+
+Bootstrap section 6a closes this gap with a reassign-then-delete
+pass after the bulk import. For each entry in the
+`MANUFACTURER_DEDUP_PAIRS` array it:
+
+1. Looks up both manufacturer IDs.
+2. Pages through every DeviceType associated with the *duplicate*
+   and `PATCH`es each one to point at the *canonical* manufacturer.
+3. Verifies zero DeviceTypes remain under the duplicate before
+   deleting — if any remain (e.g. a PATCH failed mid-batch), the
+   delete is skipped and a warning is logged.
+4. Deletes the now-orphaned duplicate manufacturer.
+
+The pass is **idempotent**: when the duplicate is already absent
+(e.g. on a re-run) it logs a skip and returns cleanly.
+
+### Extending the dedup pass for a new vendor
+
+If a future library update introduces another manufacturer-name
+inconsistency, add one entry to the `MANUFACTURER_DEDUP_PAIRS`
+array in `bootstrap/bootstrap.sh` section 6a:
+
+```bash
+MANUFACTURER_DEDUP_PAIRS=(
+    "Palo Alto|Palo Alto Networks"
+    "Duplicate Name|Canonical Name"   # ← add here
+)
+```
+
+Then re-run bootstrap with `MNM_BOOTSTRAP_SKIP_CHECK=1` to apply
+the new entry on an already-bootstrapped install.
+
+### Testing the dedup logic
+
+`bootstrap/tests/test_bootstrap_dedup.sh` is a live integration
+test that requires a running Nautobot container. It creates
+synthetic manufacturer records and a DeviceType, exercises the same
+dedup logic, asserts the expected outcomes (reassign + delete,
+idempotency, canonical-missing skip), and cleans up. Run from the
+project root:
+
+```bash
+bash bootstrap/tests/test_bootstrap_dedup.sh
+```
+
 ## Adding a Manufacturer or Role
 
 Both are simple `for ... do api_create ...` loops earlier in the
