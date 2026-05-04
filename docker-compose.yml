@@ -711,6 +711,15 @@ services:
     container_name: mnm-controller
     restart: unless-stopped
     logging: *default-logging
+    # SYS_PTRACE — grants ptrace(2) syscall access inside this
+    # container so py-spy can attach to the controller process and
+    # capture stack traces during the v1.0.1-tracked controller-
+    # wedge investigation. Does NOT grant network or filesystem
+    # privileges. py-spy must be present in the container (pip
+    # install) and an operator must actively `docker exec` to
+    # use it; the cap is a permission gate, not a runtime cost.
+    cap_add:
+      - SYS_PTRACE
     depends_on:
       nautobot:
         condition: service_healthy

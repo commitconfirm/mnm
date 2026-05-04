@@ -295,6 +295,8 @@ services:
     container_name: mnm-controller
     restart: unless-stopped
     logging: *default-logging
+    cap_add:
+      - SYS_PTRACE   # py-spy attach for v1.0.1 controller-wedge investigation
     depends_on:
       nautobot:
         condition: service_healthy
