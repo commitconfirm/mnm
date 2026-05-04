@@ -16,11 +16,12 @@ surfaces a string the vocabulary doesn't recognize.
 
 Direct example from the v1.0 lab:
 
-| Device | `JUNIPER-MIB::jnxBoxDescr` returns | Library indexes by |
+| Device | Probe-returned chassis_model | Library indexes by |
 | --- | --- | --- |
-| Juniper EX2300-24P | `"Juniper EX2300-24P Switch"` | `EX2300-24P` |
-| Juniper EX4300-48T | `"Juniper EX4300-48T Ethernet Switch"` | `EX4300-48T` |
-| Juniper SRX320 | `"Juniper SRX320 Internet Router"` | `SRX320` |
+| Juniper EX2300-24P | `"Juniper EX2300-24P Switch"` (jnxBoxDescr) | `EX2300-24P` |
+| Juniper EX4300-48T | `"Juniper EX4300-48T Ethernet Switch"` (jnxBoxDescr) | `EX4300-48T` |
+| Juniper SRX320 | `"Juniper SRX320 Internet Router"` (jnxBoxDescr) | `SRX320` |
+| FortiGate FG-40F | `"FGT_40F_3G4G"` (entPhysicalModelName) | `FortiGate 40F-3G4G` |
 
 Without normalization, `_resolve_devicetype_id` looks up the long
 form, finds nothing, and the orchestrator surfaces a
@@ -35,7 +36,7 @@ Each vendor with a normalization need gets a dedicated module under
 `controller/app/onboarding/probes/`:
 
 - `_junos_vocab.py` — Junos chassis_model vocabulary (Block F1)
-- `_fortinet_vocab.py` — FortiGate chassis_model vocabulary (Block F2; planned)
+- `_fortinet_vocab.py` — FortiGate chassis_model vocabulary (Block F2)
 
 Each module exports:
 
@@ -144,6 +145,62 @@ library. In that case, extend the bootstrap library per
 `docs/BOOTSTRAP.md` instead of (or in addition to) the
 normalization vocabulary. See D3 / Block F's lessons in
 `mnm-dev-claude` for prior cases.
+
+## Per-vendor vocabulary notes
+
+### Junos (`_junos_vocab.py`, Block F1)
+
+Junos surfaces chassis_model in two distinct shapes the vocabulary
+handles together:
+
+- **`JUNIPER-MIB::jnxBoxDescr` "marketing" form.** Mixed-case
+  uppercase canonical model embedded in a descriptive sentence.
+  Examples: `"Juniper EX2300-24P Switch"`, `"Juniper SRX320
+  Internet Router"`, `"Juniper EX4300-48T Ethernet Switch"`.
+  Vocabulary: regex-substitution with a backreference template.
+- **sysDescr-style fallback.** `"Juniper Networks, Inc. <model>
+  ..."` with a lowercase model name and a kernel version trailer.
+  Used by older Junos firmware where `jnxBoxDescr` is empty.
+  Vocabulary: callable replacement that uppercases the captured
+  model name (e.g., `ex2300-c-12p` → `EX2300-C-12P`).
+
+v1.0 lab matrix coverage: EX2300, EX3300, EX4300, EX4600,
+SRX-series. MX-series patterns included for forward compatibility.
+
+### FortiGate (`_fortinet_vocab.py`, Block F2)
+
+FortiGate exposes chassis_model via `ENTITY-MIB::
+entPhysicalModelName` only — FORTINET-CORE-MIB has no enterprise
+product-name scalar. The wire-format string is FortiOS's
+underscore-slug convention:
+
+| Probe returns | Library indexes by |
+| --- | --- |
+| `FGT_40F_3G4G` | `FortiGate 40F-3G4G` |
+| `FGT_60F` | `FortiGate 60F` |
+
+The vocabulary uses a callable replacement (lambda) because the
+transform is a structural edit (`FGT_` prefix → `FortiGate `
+prefix, underscore-between-submodel-parts → hyphen), not a simple
+template substitution. Three patterns ship:
+
+- `FGT_<model>_<submodel>` → `FortiGate <model>-<submodel>` (the
+  FG-40F lab string and 100F-class siblings).
+- `FGT_<model>` → `FortiGate <model>` (smaller form-factor units
+  without a submodel suffix, e.g., 60F).
+- `FortiGate <model>(-<submodel>)?` → unchanged (forward-compat
+  passthrough for any future FortiOS firmware that returns the
+  marketing form directly).
+
+Submodel slug captures `[A-Z0-9]+` (uppercase letters and digits).
+If a real lab device surfaces a lowercase-letter or hyphen-bearing
+submodel form, extend the character class + add a test case in
+the same change.
+
+VDOM and chassis-member awareness are out of scope for F2 — the
+chassis_model normalization is independent of how interfaces or
+configuration data attribute back to logical sub-units. v1.1
+covers VDOM-awareness per CLAUDE.md roadmap.
 
 ## What happens when normalization fails
 

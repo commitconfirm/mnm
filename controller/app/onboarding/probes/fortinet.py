@@ -54,6 +54,7 @@ from app.onboarding.probes.junos import (
     _hostname_from_sysname,
     _walk_entity_chassis,
 )
+from app.onboarding.probes._fortinet_vocab import normalize_chassis_model
 
 log = logging.getLogger(__name__)
 
@@ -117,6 +118,27 @@ async def probe_device_facts(ip: str, snmp_community: str) -> DeviceFacts:
         # walk — FORTINET-CORE-MIB has no enterprise product-name scalar.
         _, ent_model = await _walk_entity_chassis(ip, snmp_community)
         chassis_model = _decode(ent_model) if not isinstance(ent_model, str) else ent_model
+
+    # F2: normalize chassis_model to the netbox-community DeviceType
+    # library hyphenated form. entPhysicalModelName returns FortiOS's
+    # underscore-slug form like "FGT_40F_3G4G" while the library
+    # indexes by canonical "FortiGate 40F-3G4G". When the vocabulary
+    # doesn't match, the original string passes through unchanged and
+    # the orchestrator's MissingReferenceError surfaces the gap with
+    # operator-actionable text per Rule 5 + D3 discipline.
+    normalized = normalize_chassis_model(chassis_model)
+    if chassis_model and normalized != chassis_model:
+        log.debug(
+            "fortinet_probe_chassis_normalized raw=%r canonical=%r",
+            chassis_model, normalized,
+        )
+    elif chassis_model:
+        log.debug(
+            "fortinet_probe_chassis_passthrough value=%r "
+            "(no vocabulary match — extend _fortinet_vocab.py if onboarding fails)",
+            chassis_model,
+        )
+    chassis_model = normalized
 
     return DeviceFacts(
         hostname=hostname,
