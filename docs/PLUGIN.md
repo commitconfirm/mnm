@@ -405,6 +405,112 @@ recognized (typically `NAUTOBOT_SECRET_KEY` mismatch between
 nautobot and controller containers — verify both pulled from
 the same `.env`).
 
+## Filtering plugin list views
+
+Each list view ships a filter bar above the table with three
+layers of expressivity. The 80% case is per-column filters; the
+20% case is saved-filter chips; the 5% case is expression mode.
+
+### Per-column filters (Layer 1)
+
+A row of inputs labelled by field name (`mac_address`,
+`current_switch`, `node_name`, etc.). Type a substring, hit
+**Apply**. Multiple filters AND together. Empty inputs are
+ignored.
+
+Per-column inputs use `__icontains` (case-insensitive substring)
+for text fields and exact match for numeric / boolean fields —
+the same lookups the Nautobot filter sidebar uses. For exact
+text matches or regex matches, drop into expression mode.
+
+The **Clear** button next to **Apply** drops every column input
+without affecting preset chips or expression-mode state.
+
+### Saved-filter presets (Layer 2)
+
+Five named presets ship pre-built. Click a chip to apply (it
+highlights blue); click again to clear. Multiple chips apply
+with AND semantics. Chips compose with column filters.
+
+| Preset | Where | What it returns |
+| --- | --- | --- |
+| **Duplicate IPs** | Endpoints | All endpoints sharing a `current_ip` with another endpoint |
+| **Multi-homed** | Endpoints | MACs observed on more than one switch |
+| **Stale (>7d)** | Endpoints + ARP / MAC / LLDP / Routes / BGP | Rows older than 7 days (`last_seen` for endpoints; `collected_at` elsewhere) |
+| **Unmapped hosts** | Endpoints | Sweep-only discoveries with `(none)` sentinel switch / port |
+| **No DNS** | Endpoints | Endpoints whose `hostname` is empty or null |
+
+Per-user saved filters and operator-defined presets are v1.1
+work — v1.0 ships these five code-defined globals.
+
+### Expression mode (Layer 3)
+
+Click **▶ Expression mode (DSL)…** to reveal a free-form input.
+Useful when the column inputs aren't expressive enough — exact
+matches, regex, ranges, set membership, sentinel detection, or
+boolean composition with `AND` / `OR` and parentheses.
+
+**Operators:**
+
+| Operator | Meaning |
+| --- | --- |
+| `=` | Exact match (case-insensitive on text fields) |
+| `!=` | Not equal |
+| `~` | Case-insensitive regex match |
+| `contains` | Case-insensitive substring |
+| `>=` `<=` `<` `>` | Numeric / datetime comparison |
+| `in [a, b, c]` | Value in list |
+| `not in [a, b, c]` | Value not in list |
+| `is sentinel` | Matches `ifindex:N` rows |
+| `is not sentinel` | Excludes `ifindex:N` rows |
+
+**Examples:**
+
+```
+vlan = 10 AND last_seen > "7 days ago"
+interface ~ "ge-0/0/.*" AND vrf = default
+mac contains "aa:bb" OR ip contains "192.0.2"
+state in [Established, Up]
+collected_at < "30 days ago"
+interface is sentinel
+```
+
+Durations work both quoted (`"7 days ago"`) and unquoted
+(`5 days ago`). Units: `seconds`, `minutes`, `hours`, `days`,
+`weeks`. Direction: `ago` (past) or `from now` (future).
+
+**Security gate.** The parser is a strict allowlist —
+identifiers used as field names must appear in the model's
+filterset, operators are the fixed list above, values are
+quoted strings / integers / durations / bare identifiers
+(treated as literal strings) / lists. The parser translates
+the entire expression to a single `Q` object and runs it via
+`QuerySet.filter(Q(...))` — no `RawSQL`, no `extra(where=…)`,
+no string interpolation, no `eval()` / `exec()`. SQL injection
+attempts inside string values are parameterized harmlessly;
+attempts to access `__class__` or other dunder attributes are
+rejected at parse time. Invalid expressions surface a red
+banner above the table — no 500 errors, no silent failures.
+
+### Sharable filter URLs
+
+Filter state lives in the URL query string. Apply a filter,
+copy the URL, send it to a colleague — they see the same
+filtered view. Bookmarking the URL persists the filter for
+that operator.
+
+### Export of filtered results
+
+Every filter bar has **Export CSV** and **Export JSON** buttons.
+Both honor the current filter state (column inputs, preset
+chips, and expression mode all apply to the exported data).
+Exports stream — memory stays bounded regardless of result
+size.
+
+Hard cap: **50,000 rows per export.** Larger filtered result
+sets return a `413` response with a "refine your filter"
+message. v1.0 does not paginate exports.
+
 ## Troubleshooting
 
 ### Plugin doesn't load
