@@ -1,88 +1,52 @@
 """URL routes under the ``/plugins/mnm/`` namespace."""
 
+from functools import partial
+
 from django.urls import path
 
-from mnm_plugin import views
+from mnm_plugin import exports, views
 
 
 app_name = "mnm_plugin"
 
-urlpatterns = [
-    # Endpoint (E1)
-    path(
-        "endpoints/",
-        views.EndpointListView.as_view(),
-        name="endpoint_list",
-    ),
-    path(
-        "endpoints/<uuid:pk>/",
-        views.EndpointView.as_view(),
-        name="endpoint",
-    ),
-    # ArpEntry (E2)
-    path(
-        "arp-entries/",
-        views.ArpEntryListView.as_view(),
-        name="arpentry_list",
-    ),
-    path(
-        "arp-entries/<uuid:pk>/",
-        views.ArpEntryView.as_view(),
-        name="arpentry",
-    ),
-    # MacEntry (E2)
-    path(
-        "mac-entries/",
-        views.MacEntryListView.as_view(),
-        name="macentry_list",
-    ),
-    path(
-        "mac-entries/<uuid:pk>/",
-        views.MacEntryView.as_view(),
-        name="macentry",
-    ),
-    # LldpNeighbor (E2)
-    path(
-        "lldp-neighbors/",
-        views.LldpNeighborListView.as_view(),
-        name="lldpneighbor_list",
-    ),
-    path(
-        "lldp-neighbors/<uuid:pk>/",
-        views.LldpNeighborView.as_view(),
-        name="lldpneighbor",
-    ),
-    # Route (E3)
-    path(
-        "routes/",
-        views.RouteListView.as_view(),
-        name="route_list",
-    ),
-    path(
-        "routes/<uuid:pk>/",
-        views.RouteView.as_view(),
-        name="route",
-    ),
-    # BgpNeighbor (E3)
-    path(
-        "bgp-neighbors/",
-        views.BgpNeighborListView.as_view(),
-        name="bgpneighbor_list",
-    ),
-    path(
-        "bgp-neighbors/<uuid:pk>/",
-        views.BgpNeighborView.as_view(),
-        name="bgpneighbor",
-    ),
-    # Fingerprint (E3 — schema-only in v1.0)
-    path(
-        "fingerprints/",
-        views.FingerprintListView.as_view(),
-        name="fingerprint_list",
-    ),
-    path(
-        "fingerprints/<uuid:pk>/",
-        views.FingerprintView.as_view(),
-        name="fingerprint",
-    ),
+
+# (url-slug, list-view-name, list-view-class, detail-view-name,
+# detail-view-class) per model. Drives both the list/detail
+# routes and the E6 export routes (CSV + JSON per model) below.
+_MODELS = [
+    ("endpoints", "endpoint", views.EndpointListView, views.EndpointView),
+    ("arp-entries", "arpentry", views.ArpEntryListView, views.ArpEntryView),
+    ("mac-entries", "macentry", views.MacEntryListView, views.MacEntryView),
+    ("lldp-neighbors", "lldpneighbor", views.LldpNeighborListView, views.LldpNeighborView),
+    ("routes", "route", views.RouteListView, views.RouteView),
+    ("bgp-neighbors", "bgpneighbor", views.BgpNeighborListView, views.BgpNeighborView),
+    ("fingerprints", "fingerprint", views.FingerprintListView, views.FingerprintView),
 ]
+
+
+urlpatterns = []
+
+for slug, name, list_cls, detail_cls in _MODELS:
+    urlpatterns += [
+        path(
+            f"{slug}/",
+            list_cls.as_view(),
+            name=f"{name}_list",
+        ),
+        path(
+            f"{slug}/<uuid:pk>/",
+            detail_cls.as_view(),
+            name=name,
+        ),
+        # E6: CSV + JSON export of filtered queryset.
+        path(
+            f"{slug}/export.csv",
+            partial(exports.export_csv, model_key=slug),
+            name=f"{name}_export_csv",
+        ),
+        path(
+            f"{slug}/export.json",
+            partial(exports.export_json, model_key=slug),
+            name=f"{name}_export_json",
+        ),
+    ]

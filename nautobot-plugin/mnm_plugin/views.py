@@ -38,6 +38,7 @@ Pattern enforced by E1's live-validation lessons (commit
 from nautobot.apps.views import ObjectListView, ObjectView
 
 from mnm_plugin import filters, forms, models, tables
+from mnm_plugin.filter_dsl import DslError, parse_dsl
 from mnm_plugin.utils import controller_client
 from mnm_plugin.utils.interface import get_interface
 
@@ -50,11 +51,94 @@ from mnm_plugin.utils.interface import get_interface
 PANEL_LIMIT = 25
 
 
+# Operator-facing labels for each named preset chip. A preset
+# only renders if its filter exists on the filterset (introspected
+# at request time via ``declared_filters``).
+_PRESET_LABELS = {
+    "preset_duplicate_ips": "Duplicate IPs",
+    "preset_multi_homed": "Multi-homed",
+    "preset_stale": "Stale (>7d)",
+    "preset_unmapped": "Unmapped hosts",
+    "preset_no_dns": "No DNS",
+}
+
+
+class _FilterFrameworkMixin:
+    """E6: surface filter-framework UI state to the list-view template.
+
+    Four responsibilities:
+      1. Parse the ``?q=<DSL>`` expression a second time (the
+         filterset already parsed it for query application; this
+         second parse is for error surfacing — see E6 close-out's
+         "Per-vs-twice DSL parsing decision" in design §10.7).
+      2. Build the preset chip definitions for this view by
+         introspecting the filterset's declared ``preset_*``
+         filters; mark which are active.
+      3. Echo the field-level GET params back so per-column inputs
+         re-populate after submit.
+      4. Expose the model-key slug so the export buttons can build
+         correct download URLs.
+    """
+
+    # Subclasses override.
+    export_model_key: str = ""
+
+    def extra_context(self):
+        request = getattr(self, "request", None)
+        dsl_error = None
+        expression = ""
+        preset_active: list[str] = []
+        column_values: dict = {}
+        if request is not None:
+            expression = request.GET.get("q", "").strip()
+            if expression:
+                allowlist = self.filterset.Meta.fields
+                result = parse_dsl(expression, allowlist)
+                if isinstance(result, DslError):
+                    dsl_error = result.message
+            for key, value in request.GET.items():
+                if key.startswith("preset_") and value:
+                    preset_active.append(key)
+                elif key in self.filterset.Meta.fields:
+                    column_values[key] = value
+
+        # Build ordered preset definitions from the filterset's
+        # declared_filters — only ``preset_*`` keys with a label.
+        preset_defs = []
+        declared = getattr(self.filterset, "declared_filters", {}) or {}
+        for key in declared.keys():
+            if key.startswith("preset_") and key in _PRESET_LABELS:
+                preset_defs.append({
+                    "name": key,
+                    "label": _PRESET_LABELS[key],
+                    "active": key in preset_active,
+                })
+
+        # Per-column filterable fields, each with its current
+        # GET value pre-resolved so the template doesn't need
+        # dict-lookup filters.
+        column_inputs = [
+            {"name": f, "value": column_values.get(f, "")}
+            for f in self.filterset.Meta.fields
+        ]
+
+        return {
+            "dsl_error": dsl_error,
+            "dsl_expression": expression,
+            "expression_mode": bool(expression),
+            "preset_active": preset_active,
+            "preset_active_set": set(preset_active),
+            "preset_definitions": preset_defs,
+            "column_inputs": column_inputs,
+            "export_model_key": self.export_model_key,
+        }
+
+
 # ---------------------------------------------------------------------------
 # Endpoint (E1, enriched in E4)
 # ---------------------------------------------------------------------------
 
-class EndpointListView(ObjectListView):
+class EndpointListView(_FilterFrameworkMixin, ObjectListView):
     """List view: ``/plugins/mnm/endpoints/``."""
 
     queryset = models.Endpoint.objects.all()
@@ -63,6 +147,7 @@ class EndpointListView(ObjectListView):
     table = tables.EndpointTable
     template_name = "mnm_plugin/endpoint_list.html"
     action_buttons = ()
+    export_model_key = "endpoints"
 
 
 class EndpointView(ObjectView):
@@ -141,7 +226,7 @@ class EndpointView(ObjectView):
 # ArpEntry (E2, enriched in E4)
 # ---------------------------------------------------------------------------
 
-class ArpEntryListView(ObjectListView):
+class ArpEntryListView(_FilterFrameworkMixin, ObjectListView):
     """List view: ``/plugins/mnm/arp-entries/``."""
 
     queryset = models.ArpEntry.objects.all()
@@ -150,6 +235,7 @@ class ArpEntryListView(ObjectListView):
     table = tables.ArpEntryTable
     template_name = "mnm_plugin/arpentry_list.html"
     action_buttons = ()
+    export_model_key = "arp-entries"
 
 
 class ArpEntryView(ObjectView):
@@ -208,7 +294,7 @@ class ArpEntryView(ObjectView):
 # MacEntry (E2, enriched in E4)
 # ---------------------------------------------------------------------------
 
-class MacEntryListView(ObjectListView):
+class MacEntryListView(_FilterFrameworkMixin, ObjectListView):
     """List view: ``/plugins/mnm/mac-entries/``."""
 
     queryset = models.MacEntry.objects.all()
@@ -217,6 +303,7 @@ class MacEntryListView(ObjectListView):
     table = tables.MacEntryTable
     template_name = "mnm_plugin/macentry_list.html"
     action_buttons = ()
+    export_model_key = "mac-entries"
 
 
 class MacEntryView(ObjectView):
@@ -274,7 +361,7 @@ class MacEntryView(ObjectView):
 # LldpNeighbor (E2, enriched in E4)
 # ---------------------------------------------------------------------------
 
-class LldpNeighborListView(ObjectListView):
+class LldpNeighborListView(_FilterFrameworkMixin, ObjectListView):
     """List view: ``/plugins/mnm/lldp-neighbors/``."""
 
     queryset = models.LldpNeighbor.objects.all()
@@ -283,6 +370,7 @@ class LldpNeighborListView(ObjectListView):
     table = tables.LldpNeighborTable
     template_name = "mnm_plugin/lldpneighbor_list.html"
     action_buttons = ()
+    export_model_key = "lldp-neighbors"
 
 
 class LldpNeighborView(ObjectView):
@@ -349,7 +437,7 @@ class LldpNeighborView(ObjectView):
 # Route (E3, enriched in E4)
 # ---------------------------------------------------------------------------
 
-class RouteListView(ObjectListView):
+class RouteListView(_FilterFrameworkMixin, ObjectListView):
     """List view: ``/plugins/mnm/routes/``."""
 
     queryset = models.Route.objects.all()
@@ -358,6 +446,7 @@ class RouteListView(ObjectListView):
     table = tables.RouteTable
     template_name = "mnm_plugin/route_list.html"
     action_buttons = ()
+    export_model_key = "routes"
 
 
 class RouteView(ObjectView):
@@ -400,7 +489,7 @@ class RouteView(ObjectView):
 # BgpNeighbor (E3, enriched in E4)
 # ---------------------------------------------------------------------------
 
-class BgpNeighborListView(ObjectListView):
+class BgpNeighborListView(_FilterFrameworkMixin, ObjectListView):
     """List view: ``/plugins/mnm/bgp-neighbors/``."""
 
     queryset = models.BgpNeighbor.objects.all()
@@ -409,6 +498,7 @@ class BgpNeighborListView(ObjectListView):
     table = tables.BgpNeighborTable
     template_name = "mnm_plugin/bgpneighbor_list.html"
     action_buttons = ()
+    export_model_key = "bgp-neighbors"
 
 
 class BgpNeighborView(ObjectView):
@@ -451,7 +541,7 @@ class BgpNeighborView(ObjectView):
 # Fingerprint (E3 — schema-only in v1.0, enriched in E4)
 # ---------------------------------------------------------------------------
 
-class FingerprintListView(ObjectListView):
+class FingerprintListView(_FilterFrameworkMixin, ObjectListView):
     """List view: ``/plugins/mnm/fingerprints/``.
 
     Empty state in v1.0 — the v1.1 fingerprinting workstream
@@ -466,17 +556,13 @@ class FingerprintListView(ObjectListView):
     table = tables.FingerprintTable
     template_name = "mnm_plugin/fingerprint_list.html"
     action_buttons = ()
+    export_model_key = "fingerprints"
 
     def extra_context(self):
-        # Nautobot's ObjectListView passes ``extra_context()`` to
-        # the template as additional template variables. We use
-        # this to render the v1.1 callout when the table is empty
-        # — i.e. when the unfiltered model has zero rows. The
-        # callout disappears as soon as any signal lands, so v1.1
-        # collectors don't need template changes.
-        return {
-            "is_v1_1_pending": not models.Fingerprint.objects.exists(),
-        }
+        # Compose: filter framework + v1.1 empty-state callout.
+        ctx = super().extra_context()
+        ctx["is_v1_1_pending"] = not models.Fingerprint.objects.exists()
+        return ctx
 
 
 class FingerprintView(ObjectView):

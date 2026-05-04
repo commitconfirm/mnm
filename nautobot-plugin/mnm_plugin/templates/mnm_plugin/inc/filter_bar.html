@@ -1,0 +1,90 @@
+{# E6 filter bar — included by every list-view template. #}
+{# Expects: dsl_error, dsl_expression, expression_mode, #}
+{# preset_definitions, column_fields, column_values, export_model_key. #}
+{% load static %}
+
+{% if dsl_error %}
+  <div class="alert alert-danger" role="alert" style="margin-bottom:12px">
+    <strong>Invalid expression:</strong> {{ dsl_error }}
+  </div>
+{% endif %}
+
+<div class="mnm-filter-bar panel panel-default" data-export-key="{{ export_model_key }}" style="margin-bottom:16px">
+  <div class="panel-body" style="padding:12px">
+
+    {# --- Layer 2: saved-filter chips --- #}
+    {% if preset_definitions %}
+      <div class="mnm-filter-presets" style="margin-bottom:8px">
+        <strong style="margin-right:6px">Presets:</strong>
+        {% for p in preset_definitions %}
+          <button type="button"
+                  class="btn btn-xs {% if p.active %}btn-primary{% else %}btn-default{% endif %} mnm-filter-chip"
+                  data-preset="{{ p.name }}"
+                  data-active="{{ p.active|yesno:'true,false' }}"
+                  style="margin-right:4px">
+            {{ p.label }}
+          </button>
+        {% endfor %}
+      </div>
+    {% endif %}
+
+    {# --- Layer 1: per-column filter inputs (rendered in a row, not under headers) --- #}
+    <form class="mnm-filter-columns form-inline" method="get" action="" style="margin-bottom:8px">
+      {# Preserve preset state when submitting column filters #}
+      {% for key, val in request.GET.items %}
+        {% if key|slice:":7" == "preset_" %}
+          <input type="hidden" name="{{ key }}" value="{{ val }}">
+        {% endif %}
+      {% endfor %}
+      <strong style="margin-right:6px">Filter:</strong>
+      {% for c in column_inputs %}
+        <input type="text"
+               name="{{ c.name }}"
+               value="{{ c.value }}"
+               placeholder="{{ c.name }}"
+               class="form-control input-sm mnm-filter-column"
+               style="width:auto;margin-right:4px;margin-bottom:4px"
+               aria-label="Filter by {{ c.name }}">
+      {% endfor %}
+      <button type="submit" class="btn btn-xs btn-default" style="margin-right:4px">Apply</button>
+      <button type="button" class="btn btn-xs btn-default mnm-filter-clear">Clear</button>
+    </form>
+
+    {# --- Layer 3: expression-mode toggle + input --- #}
+    <div class="mnm-filter-expression-row">
+      <button type="button" class="btn btn-xs btn-link mnm-filter-expression-toggle" style="padding-left:0">
+        {% if expression_mode %}▼ Hide expression mode{% else %}▶ Expression mode (DSL)…{% endif %}
+      </button>
+      <div class="mnm-filter-expression-input form-inline"
+           style="margin-top:4px;{% if not expression_mode %}display:none{% endif %}">
+        <input type="text"
+               class="form-control input-sm mnm-filter-expression-q"
+               value="{{ dsl_expression }}"
+               placeholder='vlan = 10 AND last_seen > "7 days ago"'
+               style="width:60%;margin-right:4px"
+               aria-label="Expression-mode filter">
+        <button type="button" class="btn btn-xs btn-default mnm-filter-expression-apply">Apply</button>
+        <button type="button" class="btn btn-xs btn-default mnm-filter-expression-clear">Clear</button>
+        <small class="text-muted" style="display:block;margin-top:4px">
+          Operators: <code>=</code> <code>!=</code> <code>~</code> (regex)
+          <code>contains</code> <code>&lt;</code> <code>&gt;</code> <code>&lt;=</code> <code>&gt;=</code>
+          <code>in [a, b]</code> <code>not in [...]</code>
+          <code>is sentinel</code> <code>is not sentinel</code>.
+          Combine with <code>AND</code> / <code>OR</code> and parentheses.
+        </small>
+      </div>
+    </div>
+
+    {# --- Export buttons --- #}
+    <div class="mnm-filter-exports" style="margin-top:8px">
+      <a href="#" class="btn btn-xs btn-default mnm-export-csv">Export CSV</a>
+      <a href="#" class="btn btn-xs btn-default mnm-export-json">Export JSON</a>
+      <small class="text-muted" style="margin-left:8px">
+        Exports respect current filters · 50,000 row cap
+      </small>
+    </div>
+
+  </div>
+</div>
+
+<script src="{% static 'mnm_plugin/filter_bar.js' %}"></script>
