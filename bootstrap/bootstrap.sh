@@ -419,6 +419,126 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 6a. Manufacturer name dedup pass
+# ---------------------------------------------------------------------------
+# The netbox-community DeviceType library may import manufacturer records
+# under slightly different names than the canonical entries bootstrap section
+# 4 creates. The known case: "Palo Alto" (no "Networks") appears in older
+# library YAML files while "Palo Alto Networks" is the canonical form used by
+# bootstrap section 4 and the paloalto_panos Platform binding (section 4b).
+# When both records coexist, Nautobot's platform–manufacturer validation
+# rejects device creation at Step A with:
+#   "platform is limited to Palo Alto Networks device types,
+#    but this device's type belongs to Palo Alto"
+#
+# This pass reassigns all DeviceTypes from each DUPLICATE name to its
+# CANONICAL name, then deletes the now-orphaned duplicate manufacturer.
+# Idempotent: if the duplicate is already absent, logs a skip and returns.
+# Fail-safe: if any DeviceType remains attached to the duplicate after the
+# reassign pass (e.g., a PATCH failed mid-batch), the delete is skipped and
+# a warning is logged so the operator can investigate.
+#
+# Format: "duplicate_name|canonical_name"
+# Run order: after section 6 bulk import, before section 6b DeviceType creates.
+MANUFACTURER_DEDUP_PAIRS=(
+    "Palo Alto|Palo Alto Networks"
+)
+
+echo ""
+echo "--- Manufacturer Dedup Pass ---"
+
+dedup_manufacturer() {
+    local dup_name="$1"
+    local can_name="$2"
+
+    local dup_id
+    dup_id=$(api_get_id "dcim/manufacturers" "$dup_name")
+    local can_id
+    can_id=$(api_get_id "dcim/manufacturers" "$can_name")
+
+    if [ -z "$dup_id" ]; then
+        echo "  Dedup '$dup_name' → '$can_name': duplicate not present (skipped)"
+        return 0
+    fi
+    if [ -z "$can_id" ]; then
+        echo "  Dedup '$dup_name' → '$can_name': canonical '$can_name' not found — skipping (check section 4)"
+        return 0
+    fi
+    if [ "$dup_id" = "$can_id" ]; then
+        echo "  Dedup '$dup_name' → '$can_name': same record (skipped)"
+        return 0
+    fi
+
+    # URL-encode the duplicate name for use in filter params (e.g. "Palo Alto" → "Palo%20Alto").
+    local dup_name_enc
+    dup_name_enc=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${dup_name}'))")
+
+    # Fetch and reassign DeviceTypes under the duplicate (name-based filter; Nautobot 3.x
+    # does not support manufacturer_id for device-types). Always fetch from offset=0 —
+    # PATCHing items to the canonical manufacturer removes them from the filtered set, so
+    # offset-advancing pagination would skip items. Each iteration fetches whatever is
+    # still under the duplicate name until the set is empty.
+    local reassigned=0
+    local limit=50
+    while true; do
+        local page
+        page=$(docker exec "$CONTAINER" \
+            curl -sf "${API_BASE}/dcim/device-types/?manufacturer=${dup_name_enc}&limit=${limit}" \
+                -H "Authorization: Token ${TOKEN}" \
+                -H "Accept: application/json" 2>/dev/null) || page='{"count":0,"results":[]}'
+
+        local ids
+        ids=$(echo "$page" | python3 -c "
+import sys, json
+for r in json.load(sys.stdin).get('results', []):
+    print(r['id'])
+" 2>/dev/null) || ids=""
+        [ -z "$ids" ] && break
+
+        while IFS= read -r dt_id; do
+            [ -z "$dt_id" ] && continue
+            docker exec "$CONTAINER" \
+                curl -sf -X PATCH "${API_BASE}/dcim/device-types/${dt_id}/" \
+                    -H "Authorization: Token ${TOKEN}" \
+                    -H "Content-Type: application/json" \
+                    -H "Accept: application/json" \
+                    -d "{\"manufacturer\":\"${can_id}\"}" 2>/dev/null >/dev/null || true
+            reassigned=$((reassigned + 1))
+        done <<< "$ids"
+    done
+
+    # Safety check: verify no DeviceTypes remain under the duplicate name before deleting.
+    local remaining
+    remaining=$(docker exec "$CONTAINER" \
+        curl -sf "${API_BASE}/dcim/device-types/?manufacturer=${dup_name_enc}&limit=1" \
+            -H "Authorization: Token ${TOKEN}" \
+            -H "Accept: application/json" 2>/dev/null \
+        | python3 -c "import sys, json; print(json.load(sys.stdin).get('count', 0))" 2>/dev/null) || remaining=1
+
+    if [ "${remaining:-1}" -gt 0 ]; then
+        echo "  Dedup '$dup_name': ${remaining} DeviceType(s) still attached — NOT deleting (investigate manually)"
+        return 1
+    fi
+
+    # Delete the now-orphaned duplicate manufacturer.
+    docker exec "$CONTAINER" \
+        curl -sf -X DELETE "${API_BASE}/dcim/manufacturers/${dup_id}/" \
+            -H "Authorization: Token ${TOKEN}" \
+            -H "Accept: application/json" 2>/dev/null >/dev/null || true
+
+    if [ "$reassigned" -gt 0 ]; then
+        echo "  Dedup '$dup_name' → '$can_name': $reassigned DeviceType(s) reassigned, duplicate deleted"
+    else
+        echo "  Dedup '$dup_name' → '$can_name': no DeviceTypes to reassign, duplicate deleted"
+    fi
+}
+
+for _pair in "${MANUFACTURER_DEDUP_PAIRS[@]}"; do
+    IFS='|' read -r _DUP_NAME _CAN_NAME <<< "$_pair"
+    dedup_manufacturer "$_DUP_NAME" "$_CAN_NAME"
+done
+
+# ---------------------------------------------------------------------------
 # 6b. Lab-only virtual DeviceTypes not present in the community library
 # ---------------------------------------------------------------------------
 # The welcome-wizard / netbox-community devicetype-library does not ship
