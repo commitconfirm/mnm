@@ -207,3 +207,170 @@ async def test_probe_sysname_miss_raises():
                side_effect=_make_get_scalar(responses)):
         with pytest.raises(RuntimeError, match="sysName"):
             await probe_device_facts("192.0.2.1", "public")
+
+
+# ---------------------------------------------------------------------------
+# F1 — chassis_model normalization (vocabulary-driven; see
+# controller/app/onboarding/probes/_junos_vocab.py)
+# ---------------------------------------------------------------------------
+
+
+from app.onboarding.probes._junos_vocab import normalize_chassis_model  # noqa: E402
+
+
+@pytest.mark.parametrize("raw, expected", [
+    # v1.0 lab matrix — actual jnxBoxDescr "marketing" form returned
+    # by the device. These are the cases that would have failed onboarding
+    # without F1.
+    ("Juniper EX2300-24P Switch", "EX2300-24P"),
+    ("Juniper EX4300-48T Ethernet Switch", "EX4300-48T"),
+    ("Juniper SRX320 Internet Router", "SRX320"),
+    # EX3300 — constructed marketing form (E2 lab capture didn't
+    # preserve the device's actual string; this matches the "Ethernet
+    # Switch" suffix EX3300/EX4300 lab devices share).
+    ("Juniper EX3300-24P Ethernet Switch", "EX3300-24P"),
+    # Forward-compat — vocabulary-only coverage (no device in v1.0
+    # lab) for the EX4600 and an MX router.
+    ("Juniper EX4600-40F Ethernet Switch", "EX4600-40F"),
+    ("Juniper MX204 Router", "MX204"),
+    # SRX with Services Gateway suffix (modern firmware shape).
+    ("Juniper SRX340 Services Gateway", "SRX340"),
+])
+def test_normalize_chassis_model_marketing_forms(raw, expected):
+    assert normalize_chassis_model(raw) == expected
+
+
+@pytest.mark.parametrize("raw, expected", [
+    # sysDescr-style "Juniper Networks, Inc. <model> ..." long form,
+    # lowercase model name with kernel trailer. The remote_system_
+    # description for ex4300-48t captured during E2 validation
+    # (§10.2.1) is one of these.
+    (
+        "Juniper Networks, Inc. ex2300-c-12p Internet Router, "
+        "kernel JUNOS 22.4R3-S5.6 #0: ...",
+        "EX2300-C-12P",
+    ),
+    (
+        "Juniper Networks, Inc. ex4300-48t internet router, "
+        "kernel JUNOS 21.4R3-S7.6, ...",
+        "EX4300-48T",
+    ),
+    (
+        "Juniper Networks, Inc. srx320 services gateway, "
+        "kernel JUNOS 21.x",
+        "SRX320",
+    ),
+    (
+        "Juniper Networks, Inc. mx204 router, kernel JUNOS 22.x",
+        "MX204",
+    ),
+])
+def test_normalize_chassis_model_long_form_fallback(raw, expected):
+    assert normalize_chassis_model(raw) == expected
+
+
+def test_normalize_chassis_model_already_canonical_passthrough():
+    # The existing controller-side test fixtures (older in this file)
+    # use the already-canonical form b"EX2300-24P". F1's vocabulary
+    # must NOT rewrite a string that's already canonical.
+    assert normalize_chassis_model("EX2300-24P") == "EX2300-24P"
+    assert normalize_chassis_model("SRX320") == "SRX320"
+
+
+def test_normalize_chassis_model_unrecognized_passthrough():
+    # Per Rule 5 + D3 discipline: when the vocabulary doesn't match,
+    # return the input unchanged so the orchestrator's
+    # MissingReferenceError surfaces the gap with operator-actionable
+    # text. Never auto-create the DeviceType.
+    raw = "Some Future Junos Model We Haven't Seen"
+    assert normalize_chassis_model(raw) == raw
+
+
+def test_normalize_chassis_model_strips_whitespace_before_match():
+    # SNMP scalars sometimes return padded strings; whitespace-strip
+    # before vocabulary match.
+    assert normalize_chassis_model(
+        "  Juniper EX4300-48T Ethernet Switch  "
+    ) == "EX4300-48T"
+
+
+def test_normalize_chassis_model_none_passthrough():
+    # The orchestrator handles chassis_model=None gracefully (the
+    # MissingReferenceError surface). Don't crash on a missing
+    # primary-and-fallback case.
+    assert normalize_chassis_model(None) is None
+
+
+def test_normalize_chassis_model_empty_string_passthrough():
+    assert normalize_chassis_model("") == ""
+
+
+def test_normalize_chassis_model_bytes_input_decoded():
+    # The probe pipes _decode'd strings into normalize, but accept
+    # bytes too — defensively, in case any caller bypasses _decode.
+    assert normalize_chassis_model(
+        b"Juniper EX2300-24P Switch"
+    ) == "EX2300-24P"
+
+
+# ---------------------------------------------------------------------------
+# F1 — end-to-end through probe_device_facts
+# ---------------------------------------------------------------------------
+
+
+async def test_probe_device_facts_normalizes_jnxboxdescr_long_form():
+    """E2-lab string "Juniper EX2300-24P Switch" via the full probe
+    pipeline returns canonical short form on facts.chassis_model."""
+    responses = {
+        "SNMPv2-MIB::sysName": b"ex2300-24p",
+        "SNMPv2-MIB::sysDescr": SYSDESCR_EX2300,
+        "JUNIPER-MIB::jnxBoxSerialNo": b"JY3622160886",
+        "JUNIPER-MIB::jnxBoxDescr": b"Juniper EX2300-24P Switch",
+    }
+    with patch("app.onboarding.probes.junos.get_scalar",
+               side_effect=_make_get_scalar(responses)):
+        facts = await probe_device_facts("192.0.2.1", "public")
+    assert facts.chassis_model == "EX2300-24P"
+
+
+async def test_probe_device_facts_normalizes_entity_mib_fallback():
+    """When jnxBoxDescr is empty and ENTITY-MIB returns the long
+    form, normalization still applies."""
+    responses = {
+        "SNMPv2-MIB::sysName": b"ex4300-48t",
+        "SNMPv2-MIB::sysDescr": b"Junos",
+        "JUNIPER-MIB::jnxBoxSerialNo": None,
+        "JUNIPER-MIB::jnxBoxDescr": None,
+    }
+
+    async def _walk_spy(ip, community, oid_str, **kw):
+        from app.snmp_collector import OIDS
+        if oid_str == OIDS["ENTITY-MIB::entPhysicalClass"]:
+            return [{"1": 3}]
+        if oid_str == OIDS["ENTITY-MIB::entPhysicalSerialNum"]:
+            return [{"1": b"ENT-SERIAL-1"}]
+        if oid_str == OIDS["ENTITY-MIB::entPhysicalModelName"]:
+            return [{"1": b"Juniper EX4300-48T Ethernet Switch"}]
+        return []
+
+    with patch("app.onboarding.probes.junos.get_scalar",
+               side_effect=_make_get_scalar(responses)), \
+         patch("app.onboarding.probes.junos.walk_table",
+               side_effect=_walk_spy):
+        facts = await probe_device_facts("192.0.2.1", "public")
+    assert facts.chassis_model == "EX4300-48T"
+
+
+async def test_probe_device_facts_unrecognized_chassis_passes_through():
+    """Unrecognized model in jnxBoxDescr returns unchanged so the
+    orchestrator's MissingReferenceError can surface it."""
+    responses = {
+        "SNMPv2-MIB::sysName": b"future-device",
+        "SNMPv2-MIB::sysDescr": b"Junos",
+        "JUNIPER-MIB::jnxBoxSerialNo": b"JY1",
+        "JUNIPER-MIB::jnxBoxDescr": b"Juniper Some-Future-Model Switch",
+    }
+    with patch("app.onboarding.probes.junos.get_scalar",
+               side_effect=_make_get_scalar(responses)):
+        facts = await probe_device_facts("192.0.2.1", "public")
+    assert facts.chassis_model == "Juniper Some-Future-Model Switch"
