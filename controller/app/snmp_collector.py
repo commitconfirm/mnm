@@ -153,6 +153,45 @@ def oid(name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Shared SnmpEngine — single instance reused across all walks/scalars
+# ---------------------------------------------------------------------------
+# Per-call ``SnmpEngine()`` instantiation leaks one UDP socket per call:
+# pysnmp 7.x's ``AsyncioDispatcher`` registers callbacks with the running
+# event loop that hold references preventing garbage collection. Probe
+# (2026-05-05): 20 calls with shared engine + different per-call targets
+# adds +1 FD total; 10 calls with fresh engines per call adds +10 FDs.
+# Mirrors the nautobot_client httpx singleton and plugin_writer asyncpg
+# singleton patterns.
+_engine: "SnmpEngine | None" = None
+
+
+def _get_engine() -> SnmpEngine:
+    """Return the shared SnmpEngine, creating it lazily on first use."""
+    global _engine
+    if _engine is None:
+        _engine = SnmpEngine()
+    return _engine
+
+
+async def shutdown_engine() -> None:
+    """Close the shared engine. Call on app shutdown.
+
+    pysnmp 7.x's ``close_dispatcher()`` is sync; the async signature here
+    matches the project's other shutdown helpers
+    (``nautobot_client.close_client``).
+    """
+    global _engine
+    if _engine is not None:
+        try:
+            _engine.close_dispatcher()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("snmp_engine_close_failed",
+                        "shared SnmpEngine close raised",
+                        context={"error": str(exc)})
+        _engine = None
+
+
+# ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
 
@@ -337,7 +376,7 @@ async def walk_table(
     log.debug("snmp_walk_started", "SNMP table walk starting",
               context={"device_ip": device_ip, "oid": oid, "version": version})
 
-    engine = SnmpEngine()
+    engine = _get_engine()
     target = await UdpTransportTarget.create(
         (device_ip, port),
         timeout=timeout_sec,
@@ -456,7 +495,7 @@ async def get_scalar(
     log.debug("snmp_get_started", "SNMP scalar get starting",
               context={"device_ip": device_ip, "oid": oid, "version": version})
 
-    engine = SnmpEngine()
+    engine = _get_engine()
     target = await UdpTransportTarget.create(
         (device_ip, port),
         timeout=timeout_sec,
