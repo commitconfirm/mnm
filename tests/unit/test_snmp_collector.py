@@ -464,3 +464,172 @@ async def test_collect_ifindex_to_name_empty_on_error():
         result = await collect_ifindex_to_name("198.51.100.1", "test")
 
     assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# Shared-engine singleton contract — regression tests for the v1.0.0 FD leak
+# ---------------------------------------------------------------------------
+# Pre-fix: walk_table and get_scalar each called ``SnmpEngine()`` per
+# invocation, leaking one UDP socket per call. After ~15h on 5 polled
+# devices on mnm-test, this exhausted the 1024 soft FD limit. The fix
+# replaces per-call instantiation with a module-level shared engine.
+# These tests pin the contract.
+
+async def test_walk_table_reuses_shared_engine():
+    """walk_table must reuse the module-level shared engine across calls.
+
+    Counts SnmpEngine() instantiations during a sequence of walks.
+    Pre-fix: N walks → N SnmpEngine instantiations.
+    Post-fix: N walks → 0 or 1 SnmpEngine instantiations (lazy init).
+    """
+    from app import snmp_collector
+
+    # Reset the module-level engine to None so the first walk lazy-inits.
+    snmp_collector._engine = None
+
+    # Mock bulk_cmd so no network I/O is attempted.
+    mock_bulk_cmd = AsyncMock(return_value=(None, 0, 0, []))
+
+    # Spy on SnmpEngine to count instantiations.
+    instantiation_count = 0
+    real_engine_class = snmp_collector.SnmpEngine
+
+    def counting_engine_factory(*args, **kwargs):
+        nonlocal instantiation_count
+        instantiation_count += 1
+        return real_engine_class(*args, **kwargs)
+
+    with patch("app.snmp_collector.SnmpEngine",
+               side_effect=counting_engine_factory):
+        with patch("app.snmp_collector.bulk_cmd", mock_bulk_cmd):
+            for _ in range(20):
+                await walk_table(DEVICE_IP, COMMUNITY, BASE_OID,
+                                 timeout_sec=0.1)
+
+    assert instantiation_count <= 1, (
+        f"Expected at most 1 SnmpEngine instantiation across 20 walks "
+        f"(shared engine), got {instantiation_count}. The FD leak fix "
+        f"requires per-call SnmpEngine() to be replaced by _get_engine()."
+    )
+    # Cleanup: reset for any subsequent tests.
+    await snmp_collector.shutdown_engine()
+
+
+async def test_get_scalar_reuses_shared_engine():
+    """Symmetric assertion to walk_table: get_scalar must also share.
+
+    Pre-fix: get_scalar instantiated SnmpEngine on every call.
+    Post-fix: shared engine reused via _get_engine().
+    """
+    from app import snmp_collector
+
+    snmp_collector._engine = None
+
+    fake_varbind = (_oid("1.3.6.1.2.1.1.1.0"), rfc1902.OctetString("ok"))
+    mock_get_cmd = AsyncMock(return_value=(None, 0, 0, [fake_varbind]))
+
+    instantiation_count = 0
+    real_engine_class = snmp_collector.SnmpEngine
+
+    def counting_engine_factory(*args, **kwargs):
+        nonlocal instantiation_count
+        instantiation_count += 1
+        return real_engine_class(*args, **kwargs)
+
+    with patch("app.snmp_collector.SnmpEngine",
+               side_effect=counting_engine_factory):
+        with patch("app.snmp_collector.get_cmd", mock_get_cmd):
+            for _ in range(20):
+                await get_scalar(DEVICE_IP, COMMUNITY,
+                                 oid("SNMPv2-MIB::sysDescr"),
+                                 timeout_sec=0.1)
+
+    assert instantiation_count <= 1, (
+        f"Expected at most 1 SnmpEngine instantiation across 20 get_scalar "
+        f"calls, got {instantiation_count}."
+    )
+    await snmp_collector.shutdown_engine()
+
+
+async def test_get_engine_returns_same_instance():
+    """_get_engine() must return the same SnmpEngine across repeated calls."""
+    from app import snmp_collector
+
+    snmp_collector._engine = None
+    e1 = snmp_collector._get_engine()
+    e2 = snmp_collector._get_engine()
+    e3 = snmp_collector._get_engine()
+    assert e1 is e2 is e3, "shared engine getter returned different instances"
+    await snmp_collector.shutdown_engine()
+
+
+async def test_shutdown_engine_resets_singleton():
+    """After shutdown_engine(), _get_engine() must lazy-create a fresh one.
+
+    Ensures shutdown is idempotent and re-init works after close.
+    """
+    from app import snmp_collector
+
+    snmp_collector._engine = None
+    e1 = snmp_collector._get_engine()
+    await snmp_collector.shutdown_engine()
+    assert snmp_collector._engine is None
+    # Idempotent — second close is a no-op.
+    await snmp_collector.shutdown_engine()
+    e2 = snmp_collector._get_engine()
+    assert e1 is not e2, "shutdown_engine() should allow a fresh engine on next get"
+    await snmp_collector.shutdown_engine()
+
+
+@pytest.mark.skipif(
+    not os.path.isdir(f"/proc/{os.getpid()}/fd"),
+    reason="FD-bound test requires /proc/self/fd (Linux only)",
+)
+async def test_walk_table_does_not_leak_fds_real_socket_path():
+    """End-to-end FD-bound regression test against an unreachable IP.
+
+    Exercises the full resource lifecycle (SnmpEngine → AsyncioDispatcher
+    → UDP socket allocation → timeout). Uses RFC 5737 documentation
+    address 192.0.2.1 with short timeout to avoid real traffic.
+
+    Pre-fix: 10 fresh-engine walks → +~10 FDs (probed 2026-05-05).
+    Post-fix: 10 shared-engine walks → +1 FD total (single dispatcher
+    socket reused across all targets).
+
+    Tolerance is 5 to absorb unrelated FD churn (logging buffers,
+    asyncio internals); a regression that reintroduces per-call engine
+    instantiation would push this to +10 and fail.
+    """
+    from app import snmp_collector
+
+    snmp_collector._engine = None
+    fd_dir = f"/proc/{os.getpid()}/fd"
+
+    # Warmup: first walk lazy-inits the engine + dispatcher; subsequent
+    # walks share the socket. Measure baseline AFTER warmup so we test
+    # per-call growth, not engine init cost.
+    try:
+        await walk_table("192.0.2.254", COMMUNITY, BASE_OID,
+                         timeout_sec=0.1)
+    except SnmpError:
+        pass  # timeout expected for documentation-range IP
+    fd_baseline = len(os.listdir(fd_dir))
+
+    for i in range(10):
+        try:
+            await walk_table(f"192.0.2.{i+1}", COMMUNITY, BASE_OID,
+                             timeout_sec=0.1)
+        except SnmpError:
+            pass
+
+    fd_after = len(os.listdir(fd_dir))
+    growth = fd_after - fd_baseline
+
+    # Cleanup before assertion (so pollution doesn't leak to later tests).
+    await snmp_collector.shutdown_engine()
+
+    assert growth <= 5, (
+        f"FD leak detected: +{growth} FDs after 10 walks. "
+        f"Pre-fix expected ~+10; post-fix expected <=5. "
+        f"Baseline={fd_baseline}, after={fd_after}."
+    )

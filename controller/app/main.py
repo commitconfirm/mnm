@@ -18,7 +18,7 @@ from app.logging_config import StructuredLogger, setup_logging, get_recent_logs
 # Initialize structured logging before anything else
 setup_logging()
 
-from app import auto_discover, db, discovery, docker_manager, endpoint_store, nautobot_client, polling, probes
+from app import auto_discover, db, discovery, docker_manager, endpoint_store, nautobot_client, polling, probes, snmp_collector
 from app.connectors import proxmox as proxmox_connector
 from app.config import (
     DATA_DIR, load_config, load_config_async, save_config, save_config_async,
@@ -186,6 +186,7 @@ async def on_startup():
 @app.on_event("shutdown")
 async def on_shutdown():
     await nautobot_client.close_client()
+    await snmp_collector.shutdown_engine()
     log.info("shutdown", "MNM Controller shutting down")
 
 
