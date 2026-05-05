@@ -36,6 +36,35 @@ instead of N.
   * ``ifName`` blank per-row → fall back to ``ifDescr``. FortiGate
     returns empty ``ifDescr``; others sometimes do the opposite.
 
+**IPAM-noise filtering.** Some vendors expose internal control-plane
+addresses on ``lo0.X``-style virtual interfaces that are per-device-
+internal — not routable, not operationally meaningful, and identical
+across multiple devices of the same family. Tracking them in IPAM
+creates duplicate-key collisions when a second device of the same
+family onboards. Currently filtered:
+  * Junos ``128.0.0.0/8`` — Juniper-reserved internal control-plane
+    range (lo0.X management addresses, packet-forwarding-host stub,
+    chassis-backplane addresses). Surfaces with bizarre /2 prefix
+    masks via SNMP and collides across every Junos device. Per
+    Juniper documentation these aren't operator-visible and have no
+    routing value; filter them out at the SNMP collection boundary.
+
+**IP-create parent semantics.** Nautobot 3.x rejects
+``parent=<same-length-prefix>`` on IP creation (e.g. cannot use
+``128.0.0.0/2`` as parent for ``128.0.0.1/2``) but accepts a
+namespace-resolved parent of the same shape (i.e., POST with
+``namespace=<uuid>``, no ``parent``, and Nautobot picks the same
+prefix as parent without complaining). It also rejects POST with
+just ``namespace=`` if no containing prefix exists in the namespace.
+The flow that handles all three classes (normal /24, Junos /2,
+PAN-OS /0):
+  1. Ensure a covering prefix exists via ``ensure_prefix`` (creates
+     if missing).
+  2. POST with ``namespace=<uuid>`` (NOT ``parent=<id>``); Nautobot
+     auto-resolves the most-specific containing prefix.
+This sidesteps the same-length-rejection and the prefix_length=0
+(SNMP-degenerate) cases without per-vendor branching.
+
 **Template-interface reuse** (reality-check §4.4): device creation
 auto-populates interfaces from the DeviceType template. Phase 1's
 management interface is one example; physical DeviceTypes may have
@@ -136,6 +165,32 @@ async def _collect_interfaces(
     return out
 
 
+# Per-vendor internal-control-plane address ranges that show up via
+# SNMP but aren't operationally meaningful and collide across devices
+# of the same family. See module docstring "IPAM-noise filtering".
+_IPAM_NOISE_RANGES_V4: tuple[ipaddress.IPv4Network, ...] = (
+    # Junos lo0.X / pfh / cbp internal management. Per Juniper docs,
+    # 128.0.0.0/8 is reserved for internal use; SNMP exposes these
+    # with bizarre /2 prefix masks that fail Nautobot's parent-
+    # validation and the addresses themselves duplicate across every
+    # Junos chassis. Filter at collection.
+    ipaddress.IPv4Network("128.0.0.0/8"),
+)
+
+
+def _is_ipam_noise(ip_str: str) -> bool:
+    """True if ``ip_str`` falls in a known per-vendor internal range.
+
+    See ``_IPAM_NOISE_RANGES_V4``. Filtered at the boundary so the
+    rest of Phase 2 doesn't have to think about them.
+    """
+    try:
+        addr = ipaddress.IPv4Address(ip_str)
+    except (ValueError, TypeError):
+        return False
+    return any(addr in net for net in _IPAM_NOISE_RANGES_V4)
+
+
 async def _collect_ips(
     device_ip: str, snmp_community: str,
 ) -> tuple[list[tuple[str, "int | None", int]], bool]:
@@ -143,6 +198,9 @@ async def _collect_ips(
 
     Walk ``ipAddressTable`` first (modern MIB; supports v4+v6). If the
     walk yields no rows, fall back to ``ipAddrTable`` (RFC1213, v4-only).
+
+    IPAM-noise addresses (per ``_IPAM_NOISE_RANGES_V4``) are filtered
+    at this boundary — see module docstring.
     """
     modern_rows: list = []
     modern_ok = True
@@ -197,6 +255,8 @@ async def _collect_ips(
                     ipaddress.IPv4Address(ip_str)
                 except ValueError:
                     continue
+                if _is_ipam_noise(ip_str):
+                    continue
                 out.append((ip_str, prefix_map.get(suffix), ifidx))
         return (out, False)
 
@@ -232,6 +292,8 @@ async def _collect_ips(
                 ipaddress.IPv4Address(suffix)  # suffix IS the IP for ipAdEntTable
             except ValueError:
                 continue
+            if _is_ipam_noise(suffix):
+                continue
             prefix_len: "int | None" = None
             mask_str = netmask_map.get(suffix, "")
             if mask_str:
@@ -263,6 +325,143 @@ def _covering_cidr(ip: str, prefix_length: "int | None") -> tuple[str, str]:
         return (f"{ip}/{length}", str(net))
     except ValueError:
         return (f"{ip}/32", f"{ip}/32")
+
+
+async def _lookup_ip_address(address: str, namespace_id: str) -> "dict | None":
+    """Find an existing IPAddress in Nautobot by address + namespace.
+
+    Used by the per-IP fallback path to reuse an existing IPAddress
+    record that the bulk-create flagged as duplicate. Returns the IP
+    record dict (id, address, etc.) or None if not found.
+
+    IPAddress at depth=0 doesn't expose a ``namespace`` field directly —
+    namespace lives on the parent Prefix. Query with depth=1 so
+    ``parent.namespace`` is expanded, then filter by parent's
+    namespace id.
+    """
+    from app import nautobot_client as _nc
+    client = _nc._get_client()
+    resp = await client.get(
+        f"/api/ipam/ip-addresses/?address={address}&depth=1&limit=10",
+        headers=_nc._headers(),
+    )
+    resp.raise_for_status()
+    results = resp.json().get("results") or []
+    for rec in results:
+        parent = rec.get("parent") or {}
+        if not isinstance(parent, dict):
+            continue
+        parent_ns = parent.get("namespace") or {}
+        if isinstance(parent_ns, dict) and parent_ns.get("id") == namespace_id:
+            return rec
+    return None
+
+
+async def _create_ips_per_ip_fallback(
+    payloads: list[dict], namespace_id: str,
+) -> "list[dict] | None":
+    """Per-IP create with reuse-on-duplicate semantics.
+
+    Called when the bulk create_ip_addresses_bulk POST fails with a 400
+    (Nautobot's bulk endpoint rolls back the whole batch on any single
+    record's validation error). Iterates the payloads and creates each
+    IP individually; on the per-IP duplicate-detection error, looks up
+    the existing record and reuses its UUID.
+
+    Returns the resulting list of IP records in the same order as
+    ``payloads``, or ``None`` if a non-duplicate error occurred (caller
+    should treat as a hard failure). Each returned record carries an
+    extra ``_phase2_origin`` key set to ``"created"`` or ``"reused"``
+    so the caller can track per-IP outcomes.
+    """
+    from app import nautobot_client as _nc
+    out: list[dict] = []
+    for payload in payloads:
+        addr_with_mask = payload["address"]
+        try:
+            single = await _nc.create_ip_addresses_bulk([payload])
+            if single:
+                rec = dict(single[0])
+                rec["_phase2_origin"] = "created"
+                out.append(rec)
+            else:
+                # Empty result on success is unexpected but non-fatal; treat
+                # as if Nautobot validated then returned no body.
+                out.append({"_phase2_origin": "created", "id": None,
+                            "address": addr_with_mask})
+        except Exception as exc:  # noqa: BLE001
+            body = getattr(exc, "response_body", None)
+            is_duplicate = False
+            if isinstance(body, list) and body:
+                first = body[0]
+                if isinstance(first, dict):
+                    msgs = first.get("__all__") or []
+                    if any("already exists" in str(m).lower() for m in msgs):
+                        is_duplicate = True
+            if not is_duplicate:
+                log.warning("phase2_per_ip_create_failed",
+                            "per-IP create raised non-duplicate error",
+                            context={"address": addr_with_mask,
+                                     "error": str(exc)[:200]})
+                return None
+            existing = await _lookup_ip_address(addr_with_mask, namespace_id)
+            if existing is None:
+                log.warning("phase2_per_ip_lookup_missed",
+                            "duplicate-detected IP not found on lookup",
+                            context={"address": addr_with_mask})
+                return None
+            rec = dict(existing)
+            rec["_phase2_origin"] = "reused"
+            out.append(rec)
+            log.debug("phase2_per_ip_reused_existing",
+                      "reused existing IPAddress for cross-device-shared IP",
+                      context={"address": addr_with_mask,
+                               "ip_id": existing.get("id")})
+    return out
+
+
+async def _link_ips_per_link_fallback(payloads: list[dict]) -> bool:
+    """Per-link create with skip-on-duplicate semantics.
+
+    Called when ``link_ips_to_interfaces_bulk`` fails with a 400. Most
+    common cause: idempotent re-run — the link record
+    ``(interface, ip_address)`` already exists from a prior Phase 2
+    attempt. Per-link POST: create if absent, skip silently if
+    "already exists" / "must make a unique set" 400, return False on
+    any other error.
+
+    Returns True if every payload was either created or accepted as
+    already-linked; False on any non-duplicate error (caller should
+    treat as Phase 2 failure).
+    """
+    from app import nautobot_client as _nc
+    for payload in payloads:
+        try:
+            await _nc.link_ips_to_interfaces_bulk([payload])
+        except Exception as exc:  # noqa: BLE001
+            body = getattr(exc, "response_body", None)
+            already_linked = False
+            if isinstance(body, list) and body:
+                first = body[0]
+                if isinstance(first, dict):
+                    msgs = first.get("non_field_errors") or []
+                    msgs += first.get("__all__") or []
+                    blob = " ".join(str(m) for m in msgs).lower()
+                    if "must make a unique set" in blob \
+                            or "already exists" in blob:
+                        already_linked = True
+            if not already_linked:
+                log.warning("phase2_per_link_create_failed",
+                            "per-link create raised non-duplicate error",
+                            context={"ip_id": payload.get("ip_address"),
+                                     "interface": payload.get("interface"),
+                                     "error": str(exc)[:200]})
+                return False
+            log.debug("phase2_per_link_already_linked",
+                      "skipping link — record already exists",
+                      context={"ip_id": payload.get("ip_address"),
+                               "interface": payload.get("interface")})
+    return True
 
 
 async def run_phase2(
@@ -387,6 +586,27 @@ async def run_phase2(
     if isinstance(pip, dict):
         primary_ip_address = (pip.get("display") or pip.get("address") or "").split("/")[0]
 
+    # Resolve the Global namespace UUID once. Per the module docstring
+    # "IP-create parent semantics", we POST IPs with namespace=<uuid>
+    # rather than parent=<prefix-id> so Nautobot auto-resolves the
+    # parent — sidesteps the same-length-prefix rejection that surfaces
+    # on Junos /2 lo0 addresses and the prefix_length=0 (SNMP-degenerate)
+    # case on PAN-OS.
+    global_namespace_id: "str | None" = None
+    try:
+        for ns in await nautobot_client.get_namespaces():
+            if ns.get("name") == "Global" or ns.get("display") == "Global":
+                global_namespace_id = ns["id"]
+                break
+    except Exception as exc:  # noqa: BLE001
+        result.error = f"phase2_resolve_namespace failed: {exc}"
+        result.duration_ms = round((time.monotonic() - t0) * 1000, 1)
+        return result
+    if global_namespace_id is None:
+        result.error = "Global namespace not found in Nautobot"
+        result.duration_ms = round((time.monotonic() - t0) * 1000, 1)
+        return result
+
     ip_create_payloads: list[dict] = []
     link_plans: list[tuple[int, str, "int | None"]] = []  # (ifindex, address_with_mask, prefix_len)
     for ip_str, prefix_len, ifindex in ip_rows:
@@ -402,8 +622,12 @@ async def run_phase2(
                       "standalone IP pre-clean raised (non-fatal)",
                       context={"ip": ip_str, "error": str(exc)})
         address_with_mask, covering_cidr = _covering_cidr(ip_str, prefix_len)
+        # ensure_prefix guarantees a containing prefix exists in the
+        # namespace — required for namespace-resolved parent on the
+        # subsequent IP POST. We don't pass the resulting prefix as an
+        # explicit parent (see docstring "IP-create parent semantics").
         try:
-            prefix_rec = await nautobot_client.ensure_prefix(
+            await nautobot_client.ensure_prefix(
                 covering_cidr, namespace="Global",
             )
         except Exception as exc:  # noqa: BLE001
@@ -414,7 +638,7 @@ async def run_phase2(
             "address": address_with_mask,
             "status": status_id,
             "type": "host",
-            "parent": prefix_rec["id"],
+            "namespace": global_namespace_id,
         })
         link_plans.append((ifindex, address_with_mask, prefix_len))
 
@@ -424,15 +648,45 @@ async def run_phase2(
             created_ips = await nautobot_client.create_ip_addresses_bulk(
                 ip_create_payloads,
             )
+            result.ips_added = len(created_ips)
+            log.info("phase2_bulk_create_ips", "IPs bulk-created",
+                     context={"device_id": device_id,
+                              "count": len(created_ips)})
         except Exception as exc:  # noqa: BLE001
-            result.error = f"phase2_bulk_create_ips failed: {exc}"
-            result.duration_ms = round((time.monotonic() - t0) * 1000, 1)
-            log.warning("phase2_failed", "bulk create_ip_addresses failed",
-                        context={"device_id": device_id, "error": str(exc)})
-            return result
-        result.ips_added = len(created_ips)
-        log.info("phase2_bulk_create_ips", "IPs bulk-created",
-                 context={"device_id": device_id, "count": len(created_ips)})
+            # Nautobot bulk POST is transactional: any single record's
+            # validation failure rolls back the whole batch. Most common
+            # cause in v1.0 lab: cross-device IP collision (e.g.,
+            # 10.0.0.1 exists on cisco-mnm Loopback and pa-440 mgmt
+            # interface — same address, different interfaces). Fall
+            # back to per-IP create with reuse-on-duplicate semantics
+            # so one collision doesn't sink the whole device's Phase 2.
+            log.info("phase2_bulk_create_ips_fallback",
+                     "bulk create rejected, falling back per-IP",
+                     context={"device_id": device_id,
+                              "payload_count": len(ip_create_payloads),
+                              "error": str(exc)[:200]})
+            created_ips = await _create_ips_per_ip_fallback(
+                ip_create_payloads, global_namespace_id,
+            )
+            if created_ips is None:
+                # Per-IP fallback raised on a non-duplicate error; bail.
+                result.error = f"phase2_bulk_create_ips failed: {exc}"
+                result.duration_ms = round((time.monotonic() - t0) * 1000, 1)
+                log.warning("phase2_failed",
+                            "bulk + per-IP fallback both failed",
+                            context={"device_id": device_id,
+                                     "error": str(exc)})
+                return result
+            result.ips_added = sum(1 for r in created_ips
+                                   if r.get("_phase2_origin") == "created")
+            result.ips_reused += sum(1 for r in created_ips
+                                     if r.get("_phase2_origin") == "reused")
+            log.info("phase2_bulk_create_ips",
+                     "IPs reconciled (per-IP fallback)",
+                     context={"device_id": device_id,
+                              "added": result.ips_added,
+                              "reused_existing": sum(1 for r in created_ips
+                                  if r.get("_phase2_origin") == "reused")})
 
     # Link IPs to interfaces. Match up by ordering — the bulk POST
     # returns records in request order, and our ``link_plans`` list is in
@@ -457,12 +711,27 @@ async def run_phase2(
         try:
             await nautobot_client.link_ips_to_interfaces_bulk(link_payloads)
         except Exception as exc:  # noqa: BLE001
-            result.error = f"phase2_bulk_link failed: {exc}"
-            result.duration_ms = round((time.monotonic() - t0) * 1000, 1)
-            log.warning("phase2_failed", "bulk link_ip_to_interface failed",
-                        context={"device_id": device_id, "error": str(exc)})
-            # Phase 2 has no rollback — retry-in-place is the semantic.
-            return result
+            # Same transactional-rollback class as bulk_create_ips. The
+            # most common cause: idempotent re-run on a partially-onboarded
+            # device — link record (interface, ip_address) already exists.
+            # Fall back to per-link create with skip-on-duplicate.
+            log.info("phase2_bulk_link_fallback",
+                     "bulk link rejected, falling back per-link",
+                     context={"device_id": device_id,
+                              "payload_count": len(link_payloads),
+                              "error": str(exc)[:200]})
+            ok = await _link_ips_per_link_fallback(link_payloads)
+            if not ok:
+                result.error = f"phase2_bulk_link failed: {exc}"
+                result.duration_ms = round(
+                    (time.monotonic() - t0) * 1000, 1,
+                )
+                log.warning("phase2_failed",
+                            "bulk + per-link fallback both failed",
+                            context={"device_id": device_id,
+                                     "error": str(exc)})
+                # Phase 2 has no rollback — retry-in-place is the semantic.
+                return result
 
     result.success = True
     result.duration_ms = round((time.monotonic() - t0) * 1000, 1)

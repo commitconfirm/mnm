@@ -140,6 +140,12 @@ def _default_nautobot_mocks(
         "link_ips_to_interfaces_bulk": AsyncMock(return_value=[]),
         "delete_standalone_ip": AsyncMock(return_value=True),
         "ensure_prefix": AsyncMock(return_value={"id": "prefix-uuid"}),
+        # phase2-bulk-ip-400-race fix: run_phase2 resolves the Global
+        # namespace UUID once per cycle and POSTs IPs with namespace=
+        # (not parent=) so Nautobot auto-resolves the parent prefix.
+        "get_namespaces": AsyncMock(return_value=[
+            {"id": "global-namespace-uuid", "name": "Global"},
+        ]),
     }
     return mocks
 
@@ -696,3 +702,353 @@ async def test_reused_counts_returned_correctly():
     assert result.interfaces_added == 3
     assert result.ips_reused == 1
     assert result.ips_added == 0
+
+
+# ---------------------------------------------------------------------------
+# phase2-bulk-ip-400-race fix — IPAM-noise filtering + namespace-scoped POST
+# ---------------------------------------------------------------------------
+# Regression tests for the v1.0.0-blocker race surfaced during G2:
+# Phase 2 bulk_create_ips returned 400 from Nautobot when (a) two Junos
+# devices hit the same lo0 internal-management addresses (128.0.0.X/2
+# duplicates) or (b) a vendor returned prefix_length=0 (PAN-OS) which
+# made the orchestrator pass parent=<same-length-prefix-id>, which
+# Nautobot rejects.
+
+def test_is_ipam_noise_junos_internal_range():
+    """Junos lo0.X internal addresses (128.0.0.0/8 per Juniper docs)
+    must be filtered at collection — they collide across every Junos
+    chassis and have no operational value."""
+    from app.onboarding.network_sync import _is_ipam_noise
+
+    # Inside the noise range — must be filtered.
+    assert _is_ipam_noise("128.0.0.1") is True       # observed on lab EX2300
+    assert _is_ipam_noise("128.0.0.4") is True
+    assert _is_ipam_noise("128.0.0.16") is True
+    assert _is_ipam_noise("128.0.0.127") is True
+    assert _is_ipam_noise("128.255.255.255") is True  # /8 boundary
+
+    # Outside the noise range — must NOT be filtered.
+    assert _is_ipam_noise("127.255.255.255") is False
+    assert _is_ipam_noise("129.0.0.1") is False
+    assert _is_ipam_noise("172.21.140.6") is False
+    assert _is_ipam_noise("10.0.0.1") is False
+
+    # Non-IPv4 input must not raise.
+    assert _is_ipam_noise("not-an-ip") is False
+    assert _is_ipam_noise("") is False
+
+
+async def test_collect_ips_filters_junos_lo0_internal_range():
+    """End-to-end: SNMP returns Junos lo0 noise IPs alongside real IPs;
+    _collect_ips emits only the real ones."""
+    from app.onboarding.network_sync import _collect_ips
+
+    # Junos-shape: 5 lo0 internal /2 addresses + 1 real /24 mgmt.
+    fixture = _SnmpFixture(
+        ifname_rows=[],
+        ifdescr_rows=[],
+        ipaddr_ifindex_rows=[
+            {"1.4.128.0.0.1": 220},
+            {"1.4.128.0.0.4": 220},
+            {"1.4.128.0.0.16": 220},
+            {"1.4.128.0.0.127": 507},
+            {"1.4.172.21.140.6": 562},
+        ],
+        ipaddr_prefix_rows=[
+            {"1.4.128.0.0.1": "1.3.6.1.2.1.4.32.1.5.X.X.X.X.X.X.2"},
+            {"1.4.128.0.0.4": "1.3.6.1.2.1.4.32.1.5.X.X.X.X.X.X.2"},
+            {"1.4.128.0.0.16": "1.3.6.1.2.1.4.32.1.5.X.X.X.X.X.X.2"},
+            {"1.4.128.0.0.127": "1.3.6.1.2.1.4.32.1.5.X.X.X.X.X.X.2"},
+            {"1.4.172.21.140.6": "1.3.6.1.2.1.4.32.1.5.X.X.X.X.X.X.24"},
+        ],
+        ipadentifindex_rows=[],
+        ipadentnetmask_rows=[],
+    )
+    with patch("app.onboarding.network_sync.walk_table",
+               side_effect=_make_walk(fixture)):
+        rows, used_fb = await _collect_ips("172.21.140.6", "public")
+
+    # 5 noise rows filtered; only the real /24 mgmt IP survives.
+    assert used_fb is False
+    assert len(rows) == 1
+    assert rows[0][0] == "172.21.140.6"
+
+
+async def test_phase2_bulk_create_uses_namespace_not_parent():
+    """Regression for the same-length-prefix-rejection class: bulk-create
+    payloads must include namespace=<uuid>, not parent=<prefix-id>.
+
+    Pre-fix: parent=<prefix-id> with same-length prefix → Nautobot 400
+    "X/N cannot be assigned as the parent of Y/N".
+    Post-fix: namespace=<uuid> → Nautobot auto-resolves the most-specific
+    containing prefix; same-length /2 (Junos) and /0 (PAN-OS SNMP-
+    degenerate) cases pass.
+    """
+    fixture = _veos_shape()
+    created_ifaces = [
+        {"id": f"new-{n}", "name": n}
+        for n in ("Ethernet1", "Ethernet2", "Ethernet3", "Ethernet4")
+    ]
+    # Force a non-primary IP so the bulk_create_ips path actually fires.
+    fixture.ipaddr_ifindex_rows = [
+        {"1.4.172.21.140.16": 1},
+        {"1.4.10.255.0.5": 2},
+    ]
+    fixture.ipaddr_prefix_rows = [
+        {"1.4.172.21.140.16": "1.3.6.1.2.1.4.32.1.5.1.1.4.172.21.140.0.24"},
+        {"1.4.10.255.0.5": "1.3.6.1.2.1.4.32.1.5.1.1.4.10.255.0.0.24"},
+    ]
+    mocks = _default_nautobot_mocks(
+        primary_ip="172.21.140.16",
+        created_ifaces=created_ifaces,
+        created_ips=[{"id": "ip-1", "address": "10.255.0.5/24"}],
+    )
+    with patch("app.onboarding.network_sync.walk_table",
+               side_effect=_make_walk(fixture)), \
+         _patch_nautobot(mocks):
+        result = await run_phase2(
+            device_id="dev", device_name="arista-mnm",
+            device_ip="172.21.140.16", snmp_community="public",
+        )
+    assert result.success
+    assert mocks["create_ip_addresses_bulk"].await_count == 1
+    # The single bulk call's payload must use namespace=, not parent=.
+    call_args = mocks["create_ip_addresses_bulk"].await_args
+    assert call_args is not None
+    posted_payloads = call_args.args[0] if call_args.args else call_args.kwargs.get("ip_addresses")
+    assert isinstance(posted_payloads, list)
+    assert len(posted_payloads) == 1
+    payload = posted_payloads[0]
+    assert "namespace" in payload, f"expected namespace= in payload, got {payload}"
+    assert payload["namespace"] == "global-namespace-uuid"
+    assert "parent" not in payload, (
+        f"parent= must NOT be in payload (pre-fix shape); got {payload}"
+    )
+
+
+async def test_phase2_resolves_global_namespace_once_per_cycle():
+    """run_phase2 calls get_namespaces() exactly once per cycle to
+    resolve the Global namespace UUID. Cheap, but a regression guard
+    against per-IP get_namespaces() calls (which would scale poorly on
+    100-interface devices)."""
+    fixture = _veos_shape()
+    fixture.ipaddr_ifindex_rows = [
+        {"1.4.172.21.140.16": 1},
+        {"1.4.10.255.0.5": 2},
+        {"1.4.10.255.0.6": 3},
+    ]
+    fixture.ipaddr_prefix_rows = [
+        {"1.4.172.21.140.16": "1.3.6.1.2.1.4.32.1.5.1.1.4.172.21.140.0.24"},
+        {"1.4.10.255.0.5": "1.3.6.1.2.1.4.32.1.5.1.1.4.10.255.0.0.24"},
+        {"1.4.10.255.0.6": "1.3.6.1.2.1.4.32.1.5.1.1.4.10.255.0.0.24"},
+    ]
+    created_ifaces = [
+        {"id": f"new-{n}", "name": n}
+        for n in ("Ethernet1", "Ethernet2", "Ethernet3", "Ethernet4")
+    ]
+    mocks = _default_nautobot_mocks(
+        primary_ip="172.21.140.16",
+        created_ifaces=created_ifaces,
+        created_ips=[
+            {"id": "ip-1", "address": "10.255.0.5/24"},
+            {"id": "ip-2", "address": "10.255.0.6/24"},
+        ],
+    )
+    with patch("app.onboarding.network_sync.walk_table",
+               side_effect=_make_walk(fixture)), \
+         _patch_nautobot(mocks):
+        result = await run_phase2(
+            device_id="dev", device_name="x",
+            device_ip="172.21.140.16", snmp_community="public",
+        )
+    assert result.success
+    assert mocks["get_namespaces"].await_count == 1
+
+
+async def test_phase2_fails_cleanly_when_global_namespace_missing():
+    """If Nautobot's namespaces list doesn't contain Global (operator
+    misconfiguration or a different namespace name), Phase 2 fails
+    with an operator-actionable error rather than ploughing on with
+    namespace=None."""
+    fixture = _veos_shape()
+    fixture.ipaddr_ifindex_rows = [
+        {"1.4.172.21.140.16": 1},
+        {"1.4.10.255.0.5": 2},
+    ]
+    fixture.ipaddr_prefix_rows = [
+        {"1.4.172.21.140.16": "1.3.6.1.2.1.4.32.1.5.1.1.4.172.21.140.0.24"},
+        {"1.4.10.255.0.5": "1.3.6.1.2.1.4.32.1.5.1.1.4.10.255.0.0.24"},
+    ]
+    mocks = _default_nautobot_mocks(
+        primary_ip="172.21.140.16",
+        created_ifaces=[
+            {"id": f"new-{n}", "name": n}
+            for n in ("Ethernet1", "Ethernet2", "Ethernet3", "Ethernet4")
+        ],
+    )
+    # Override get_namespaces to omit Global.
+    mocks["get_namespaces"] = AsyncMock(return_value=[
+        {"id": "other-uuid", "name": "Tenant-A"},
+    ])
+    with patch("app.onboarding.network_sync.walk_table",
+               side_effect=_make_walk(fixture)), \
+         _patch_nautobot(mocks):
+        result = await run_phase2(
+            device_id="dev", device_name="x",
+            device_ip="172.21.140.16", snmp_community="public",
+        )
+    assert result.success is False
+    assert "Global namespace not found" in (result.error or "")
+    # ensure_prefix should NOT have been called — we bail before that.
+    assert mocks["ensure_prefix"].await_count == 0
+    assert mocks["create_ip_addresses_bulk"].await_count == 0
+
+
+async def test_phase2_per_ip_fallback_on_bulk_400_with_duplicate():
+    """When bulk_create_ips returns a 400 whose body indicates 'already
+    exists' on at least one record, the orchestrator falls back to per-IP
+    create with reuse-on-duplicate. The per-IP path looks up the existing
+    IPAddress by address+namespace and reuses its UUID.
+
+    Cross-device IP collision (e.g., 10.0.0.1 on both cisco-mnm Loopback
+    and pa-440 mgmt) is the canonical case.
+    """
+    from app.onboarding import network_sync
+    # Simulate the bulk create raising a duplicate-error 400.
+    class _DupError(Exception):
+        def __init__(self, body):
+            super().__init__("rejected by Nautobot (400)")
+            self.response_body = body
+
+    fixture = _veos_shape()
+    fixture.ipaddr_ifindex_rows = [
+        {"1.4.172.21.140.16": 1},
+        {"1.4.10.0.0.1": 2},  # this one will be flagged as duplicate
+    ]
+    fixture.ipaddr_prefix_rows = [
+        {"1.4.172.21.140.16": "1.3.6.1.2.1.4.32.1.5.1.1.4.172.21.140.0.24"},
+        {"1.4.10.0.0.1": "1.3.6.1.2.1.4.32.1.5.1.1.4.10.0.0.0.32"},
+    ]
+
+    mocks = _default_nautobot_mocks(
+        primary_ip="172.21.140.16",
+        created_ifaces=[
+            {"id": f"new-{n}", "name": n}
+            for n in ("Ethernet1", "Ethernet2", "Ethernet3", "Ethernet4")
+        ],
+    )
+    # Bulk raises duplicate; per-IP fallback then creates one + reuses one.
+    duplicate_body = [
+        {"__all__": ["IP address with this Parent and Host already exists."]},
+    ]
+    mocks["create_ip_addresses_bulk"] = AsyncMock(side_effect=[
+        _DupError(duplicate_body),  # bulk call (1 IP, the duplicate)
+        # Per-IP retry of the only payload — also raises (Nautobot still
+        # sees it as duplicate) → triggers the lookup path.
+        _DupError(duplicate_body),
+    ])
+    # Patch _lookup_ip_address to return the "existing" record.
+    with patch("app.onboarding.network_sync.walk_table",
+               side_effect=_make_walk(fixture)), \
+         patch("app.onboarding.network_sync._lookup_ip_address",
+               AsyncMock(return_value={"id": "existing-ip-uuid",
+                                       "address": "10.0.0.1/32"})), \
+         _patch_nautobot(mocks):
+        result = await network_sync.run_phase2(
+            device_id="dev", device_name="x",
+            device_ip="172.21.140.16", snmp_community="public",
+        )
+    # Phase 2 succeeds with the IP marked as reused (cross-device shared).
+    assert result.success is True
+    assert result.ips_added == 0
+    assert result.ips_reused == 2  # 1 for primary, 1 for duplicate-reused
+
+
+async def test_phase2_per_link_fallback_on_bulk_link_400_with_duplicate():
+    """When link_ips_to_interfaces_bulk fails with 'must make a unique
+    set' (idempotent re-run case), per-link fallback skips already-linked
+    records silently. Phase 2 still succeeds."""
+    from app.onboarding import network_sync
+
+    class _LinkDupError(Exception):
+        def __init__(self, body):
+            super().__init__("rejected by Nautobot (400)")
+            self.response_body = body
+
+    fixture = _veos_shape()
+    fixture.ipaddr_ifindex_rows = [
+        {"1.4.172.21.140.16": 1},
+        {"1.4.10.255.0.5": 2},
+    ]
+    fixture.ipaddr_prefix_rows = [
+        {"1.4.172.21.140.16": "1.3.6.1.2.1.4.32.1.5.1.1.4.172.21.140.0.24"},
+        {"1.4.10.255.0.5": "1.3.6.1.2.1.4.32.1.5.1.1.4.10.255.0.0.24"},
+    ]
+    created_ifaces = [
+        {"id": f"new-{n}", "name": n}
+        for n in ("Ethernet1", "Ethernet2", "Ethernet3", "Ethernet4")
+    ]
+    mocks = _default_nautobot_mocks(
+        primary_ip="172.21.140.16",
+        created_ifaces=created_ifaces,
+        created_ips=[{"id": "ip-1", "address": "10.255.0.5/24"}],
+    )
+    # Bulk link raises with unique-set duplicate. Per-link path retries
+    # individually and accepts the duplicate as already-linked.
+    duplicate_link_body = [
+        {"non_field_errors":
+            ["The fields interface, ip_address must make a unique set."]},
+    ]
+    mocks["link_ips_to_interfaces_bulk"] = AsyncMock(side_effect=[
+        _LinkDupError(duplicate_link_body),  # bulk fails
+        _LinkDupError(duplicate_link_body),  # per-link retry also "fails" duplicate-style
+    ])
+    with patch("app.onboarding.network_sync.walk_table",
+               side_effect=_make_walk(fixture)), \
+         _patch_nautobot(mocks):
+        result = await network_sync.run_phase2(
+            device_id="dev", device_name="x",
+            device_ip="172.21.140.16", snmp_community="public",
+        )
+    # Per-link fallback treats already-linked as success → Phase 2 success.
+    assert result.success is True
+    assert result.error is None
+
+
+async def test_phase2_per_ip_fallback_returns_none_on_non_duplicate_error():
+    """Per-IP fallback only swallows duplicate-class errors; any other
+    400 (e.g., validation rejection on address format) is hard failure."""
+    from app.onboarding import network_sync
+
+    class _OtherError(Exception):
+        def __init__(self, body):
+            super().__init__("rejected by Nautobot (400)")
+            self.response_body = body
+
+    fixture = _veos_shape()
+    fixture.ipaddr_ifindex_rows = [
+        {"1.4.172.21.140.16": 1},
+        {"1.4.10.0.0.1": 2},
+    ]
+    fixture.ipaddr_prefix_rows = [
+        {"1.4.172.21.140.16": "1.3.6.1.2.1.4.32.1.5.1.1.4.172.21.140.0.24"},
+        {"1.4.10.0.0.1": "1.3.6.1.2.1.4.32.1.5.1.1.4.10.0.0.0.32"},
+    ]
+    mocks = _default_nautobot_mocks(
+        primary_ip="172.21.140.16",
+        created_ifaces=[{"id": "i", "name": "Ethernet1"}],
+    )
+    other_body = [{"address": ["Invalid format"]}]
+    mocks["create_ip_addresses_bulk"] = AsyncMock(side_effect=[
+        _OtherError(other_body),  # bulk
+        _OtherError(other_body),  # per-IP retry also non-duplicate
+    ])
+    with patch("app.onboarding.network_sync.walk_table",
+               side_effect=_make_walk(fixture)), \
+         _patch_nautobot(mocks):
+        result = await network_sync.run_phase2(
+            device_id="dev", device_name="x",
+            device_ip="172.21.140.16", snmp_community="public",
+        )
+    assert result.success is False
+    assert "phase2_bulk_create_ips failed" in (result.error or "")
