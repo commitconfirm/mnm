@@ -66,7 +66,10 @@
     <div class="card">
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
         <h2 style="margin-bottom: 0;">Endpoints</h2>
-        <button id="trigger-collection-btn" class="btn">Trigger Collection</button>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <div id="endpoints-export-buttons" class="table-export-buttons"></div>
+          <button id="trigger-collection-btn" class="btn">Trigger Collection</button>
+        </div>
       </div>
 
       <div class="filter-bar">
@@ -133,6 +136,8 @@
 
   <script src="/static/js/datatable.js"></script>
   <script src="/static/js/icons.js"></script>
+  <script src="/static/js/col-help.js"></script>
+  <script src="/static/js/table-export.js"></script>
   <script src="/static/js/preferences.js"></script>
   <script src="/static/js/endpoints.js"></script>
 </body>

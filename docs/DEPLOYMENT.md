@@ -4,6 +4,45 @@
 
 Network engineers deploying MNM on a fresh Linux host. This guide assumes familiarity with networking concepts (SNMP, LLDP, ARP, VLANs) but not necessarily with Docker, Python, or REST APIs. Every command in this guide was run verbatim during v0.9.0 installation validation on a clean Ubuntu 24.04 VM.
 
+## What's in this guide and how it relates to the other deploy artifacts
+
+MNM ships three closely-coupled deploy artifacts. Each has its own ops-manual-grade documentation; this guide ties them together as a step-by-step walkthrough.
+
+| Artifact | Audience | What's in it |
+|---|---|---|
+| [`docker-compose.yml`](../docker-compose.yml) | Operators new to MNM | The default Compose file. Production-grade commentary: top-of-file orientation, per-service comment blocks (purpose, dependencies, exposed ports, persistent storage, common failure modes), inline comments on every non-obvious choice, volume + network annotations. Read top-to-bottom on first deploy. |
+| [`docker-compose.expert.yml`](../docker-compose.expert.yml) | Operators familiar with the stack | Functionally identical YAML, lean inline-only commentary. Use this if the default file's annotations feel excessive. Both files produce the same `docker compose config` output. |
+| [`.env.example`](../.env.example) | Operators configuring before first deploy | A guided tour of every environment variable. Each grouped by purpose; required vs optional clearly marked; `[SECRET]` flagged on sensitive values; deferred-feature variables flagged so operators don't waste time on Phase 3 / Phase 4 settings. |
+| [`bootstrap/bootstrap.sh`](../bootstrap/bootstrap.sh) + [`docs/BOOTSTRAP.md`](BOOTSTRAP.md) | Operators after first `docker compose up -d` | Idempotent post-deploy seed: Nautobot superuser, locations, roles, manufacturers, platforms, ~5,200 community device types, custom Statuses, custom fields, default credentials. Re-runnable any time; force a full re-run with `MNM_BOOTSTRAP_SKIP_CHECK=1`. |
+
+**Standard first-deploy sequence (covered in detail below):**
+
+1. Install Docker + Compose plugin (Phase 1)
+2. Clone the repo, copy `.env.example` → `.env`, edit `.env` (Phase 2). The `.env.example` walkthrough answers most "what do I set?" questions; this guide adds the cross-variable considerations.
+3. `docker compose up -d` using either the default or expert compose file (Phase 3). Default is recommended for first-deploy operators.
+4. Run `bash bootstrap/bootstrap.sh` (Phase 4)
+5. Verify (Phase 5) and run a smoke-test sweep (Phase 6)
+
+### Choosing between the default and expert compose files
+
+```bash
+# Default — recommended for first deploy and for ongoing reference
+docker compose up -d
+
+# Expert — same stack, less inline commentary
+docker compose -f docker-compose.expert.yml up -d
+```
+
+Both files produce the same containers with the same configuration. Pick one at deploy time and stick with it for the lifetime of the install (mixing files between `up` and `down` invocations works mechanically but is confusing). Switching is just `docker compose down` followed by `docker compose -f <other-file> up -d`; volumes survive.
+
+If you change one compose file (e.g., bumping an image version), change the other to match. Verify they remain structurally identical:
+
+```bash
+diff <(docker compose -f docker-compose.yml config) \
+     <(docker compose -f docker-compose.expert.yml config)
+# (no output = identical)
+```
+
 ---
 
 ## Prerequisites
@@ -364,7 +403,8 @@ After a successful installation:
 1. **Configure device credentials** — Add your network device SSH/NETCONF credentials to `.env` (`NAUTOBOT_NAPALM_USERNAME`, `NAUTOBOT_NAPALM_PASSWORD`), re-run `bootstrap/bootstrap.sh` to create the credential set in Nautobot
 2. **Run a real sweep** — Add a real CIDR range on the Discovery page, select the credential set, start a sweep
 3. **Review LLDP advisories** — After onboarding seed devices, the dashboard advisory cards show newly discovered LLDP neighbors for your review
-4. **Configure Proxmox** (optional) — Set `PROXMOX_HOST`, `PROXMOX_TOKEN_ID`, `PROXMOX_TOKEN_SECRET` in `.env`, recreate the controller container: `docker compose up -d --force-recreate controller`
+4. **Check the unsupported-vendor panel** — After your first sweep, scroll down on `/discover` to the **"Unsupported vendors / unclassified hosts found"** card. It lists IPs MNM saw during sweep but couldn't onboard, with vendor classification (where derivable), the raw sysDescr excerpt, OUI vendor, and open ports. The panel auto-hides when there's nothing to surface; when populated, the card shows the count, expanding into a sortable table with CSV / JSON export. Use it to plan which vendors you'd like to see supported in future MNM releases — vendor frequency in this panel directly informs v1.1 prioritisation.
+5. **Configure Proxmox** (optional) — Set `PROXMOX_HOST`, `PROXMOX_TOKEN_ID`, `PROXMOX_TOKEN_SECRET` in `.env`, recreate the controller container: `docker compose up -d --force-recreate controller`
 
 See [DISCOVERY.md](DISCOVERY.md) for the sweep pipeline in detail, and [CONNECTORS.md](CONNECTORS.md) for the Proxmox connector setup.
 

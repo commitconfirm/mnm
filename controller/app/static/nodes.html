@@ -66,6 +66,10 @@
     <div class="card">
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
         <h2 style="margin-bottom: 0;">Nodes</h2>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <div id="nodes-export-buttons" class="table-export-buttons"></div>
+          <button class="btn" id="add-node-btn">+ Add Node</button>
+        </div>
       </div>
 
       <div class="filter-bar">
@@ -89,7 +93,45 @@
     </div>
   </div>
 
+  <!-- Add Node modal (v1.0 Prompt 8) -->
+  <div id="add-node-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:1000; align-items:center; justify-content:center;">
+    <div class="card" style="max-width:480px; width:90%;">
+      <h3 style="margin-top:0;">Add Node</h3>
+      <p style="color:var(--muted); font-size:0.9em;">
+        Onboard a single device via the direct-REST orchestrator. Phase 1
+        (device creation) runs synchronously; Phase 2 (full interface +
+        IP sync) runs automatically within ~30 seconds via the polling
+        loop. Check the Nodes list for the new device.
+      </p>
+      <div style="display:grid; gap:10px;">
+        <div>
+          <label for="add-ip" style="display:block; font-size:0.9em;">IP address</label>
+          <input type="text" id="add-ip" placeholder="172.21.140.99" style="width:100%;">
+        </div>
+        <div>
+          <label for="add-community" style="display:block; font-size:0.9em;">SNMP community</label>
+          <input type="password" id="add-community" placeholder="public" style="width:100%;">
+        </div>
+        <div>
+          <label for="add-location" style="display:block; font-size:0.9em;">Location</label>
+          <select id="add-location" style="width:100%;"></select>
+        </div>
+        <div>
+          <label for="add-secrets-group" style="display:block; font-size:0.9em;">SecretsGroup</label>
+          <select id="add-secrets-group" style="width:100%;"></select>
+        </div>
+        <div id="add-node-status" style="font-size:0.9em; min-height:1.5em;"></div>
+        <div style="display:flex; gap:8px; justify-content:flex-end;">
+          <button class="btn secondary" id="add-node-cancel">Cancel</button>
+          <button class="btn" id="add-node-submit">Onboard</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <script src="/static/js/datatable.js"></script>
+  <script src="/static/js/col-help.js"></script>
+  <script src="/static/js/table-export.js"></script>
   <script src="/static/js/preferences.js"></script>
   <script src="/static/js/nodes.js"></script>
 </body>

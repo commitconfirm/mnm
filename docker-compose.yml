@@ -1,52 +1,190 @@
 ---
-# MNM - Modular Network Monitor
-# Phase 1: Nautobot + PostgreSQL + Redis + Celery
-# Phase 2: Traefik + Prometheus + SNMP Exporter + gnmic + Grafana
+# ============================================================================
+# MNM — Modular Network Monitor
+# Docker Compose deployment file (production-grade variant)
+# ============================================================================
+#
+# This file deploys the MNM stack: an 11-container network monitoring and
+# discovery appliance built around Nautobot (inventory) + Prometheus
+# (metrics) + a custom controller (discovery / polling / endpoint
+# correlation). Read this comment block first if you've never deployed
+# MNM before.
+#
+# ## What this stack does
+# Point MNM at a CIDR range and credentials; it sweeps the range, classifies
+# every host that responds, onboards anything that looks like a network
+# device into Nautobot, and starts polling those devices for ARP / MAC /
+# LLDP / route data. Discovered endpoints (everything that isn't an
+# onboarded device) get correlated by MAC into a temporal store with
+# movement-event tracking. The controller UI on :9090 is the operator
+# entry point; Nautobot on :8443 is the inventory source-of-truth.
+#
+# ## Prerequisites
+#  - Docker Engine 24+ and Docker Compose v2+
+#  - 8 GB RAM minimum, 16 GB recommended (Nautobot is the heaviest
+#    component; the rest combined is light)
+#  - 50 GB disk minimum, 160 GB recommended for the default 365-day
+#    Prometheus + endpoint-history retention
+#  - Linux host (validated on Ubuntu 24.04 LTS); macOS Docker Desktop
+#    and Windows WSL2 are untested
+#  - Network access for image pulls on initial deploy; outbound SNMP /
+#    SSH / NETCONF to monitored devices for ongoing operation
+#  - Internet access at bootstrap time only — to clone the netbox-
+#    community devicetype-library Git repo (5,200+ device types). After
+#    bootstrap completes, the stack runs fully air-gapped.
+#
+# ## First-run quickstart
+#  1. cp .env.example .env  &&  edit .env
+#     (the .env.example file is a guided tour; required vars marked)
+#  2. docker compose up -d
+#  3. Wait ~6-7 minutes for Nautobot to finish first-boot Django
+#     migrations (mnm-nautobot will be "starting" then "healthy")
+#  4. bash bootstrap/bootstrap.sh
+#     (~9-10 minutes; idempotent; see docs/BOOTSTRAP.md for what it does)
+#  5. Open http://<host>:9090 (controller — start here)
+#     Open http://<host>:8443 (Nautobot — inventory)
+#     Open http://<host>:8080/grafana/ (dashboards)
+#
+# ## Lifecycle commands
+#  docker compose up -d                     # start everything
+#  docker compose ps                        # see what's running
+#  docker compose logs -f mnm-controller    # tail one container's logs
+#  docker compose restart mnm-controller    # restart one service
+#  docker compose down                      # stop, PRESERVE data
+#  docker compose down -v                   # stop, WIPE all data
+#                                           # (named volumes only — bind
+#                                           #  mounts on ./config/ stay)
+#
+# ## Where data lives
+# All persistent data lives in named Docker volumes prefixed with `mnm_*`.
+# Volumes survive `down` and image rebuilds; only `down -v` (or
+# `docker volume rm`) deletes them. See the `volumes:` section at the
+# bottom of this file for what each volume contains and which are
+# backup targets.
+#
+# ## Where logs live
+# Container stdout/stderr is captured by Docker's json-file driver with
+# a 30 MB cap per container (10 MB × 3 rotated files; see x-default-
+# logging anchor below). Tail with `docker compose logs <service>` or
+# `docker logs <container_name>`. Application logs are also written to
+# the controller's in-memory ring buffer and exposed at /api/logs (the
+# controller's Logs page reads this).
+#
+# ## Expert users
+# If this commentary feels excessive, see docker-compose.expert.yml —
+# same stack, lean comments only. Both files are functionally
+# equivalent YAML; pick whichever matches your familiarity level.
+#
+# ## Maintenance discipline
+# docker-compose.yml and docker-compose.expert.yml share IDENTICAL YAML.
+# When you change one, change the other. Verify with:
+#   diff <(docker compose -f docker-compose.yml config) \
+#        <(docker compose -f docker-compose.expert.yml config)
+# Future automation could derive one from the other; out of v1.0 scope.
+#
+# ============================================================================
 
-# Default Docker logging cap for every MNM service. Without this, container
-# stdout/stderr grows unbounded on the host filesystem. 10MB × 3 files =
-# at most 30MB per container of rotated json-file logs.
+
+# ----------------------------------------------------------------------------
+# Default Docker logging cap, applied to every service via YAML anchor.
+# Without this, container stdout/stderr grows unbounded on the host
+# filesystem. 10 MB × 3 rotated files = at most 30 MB per container of
+# json-file logs. Adjust the anchor's options to change the cap globally.
+# ----------------------------------------------------------------------------
 x-default-logging: &default-logging
   driver: json-file
   options:
     max-size: "10m"
     max-file: "3"
 
+
 services:
 
-  # ---------------------------------------------------------------------------
-  # Reverse Proxy
-  # ---------------------------------------------------------------------------
+  # ==========================================================================
+  # SERVICE: traefik
+  # PURPOSE: Reverse proxy fronting Nautobot, Prometheus, and Grafana on a
+  #   single port (8080) via PathPrefix routing. Without Traefik you'd be
+  #   juggling three host ports and three hostnames; with it everything
+  #   sub-routes off http://<host>:8080.
+  # DEPENDS ON: docker.sock for container-discovery labels (mounted RO)
+  # EXPOSES: 8080 (HTTP — single entrypoint to Nautobot/Prometheus/Grafana)
+  # PERSISTS: nothing
+  # FAILURE MODES:
+  #   - Won't start if /var/run/docker.sock is missing or wrong perms.
+  #     Verify on host: `ls -l /var/run/docker.sock` (usually root:docker).
+  #   - 404 on a route you expect: check `traefik.http.routers.*` labels
+  #     on the target service; Traefik logs the route table on startup.
+  # ==========================================================================
   traefik:
     image: traefik:v2.11
     container_name: mnm-traefik
     restart: unless-stopped
     logging: *default-logging
     ports:
+      # Single entrypoint. Sub-paths route inside Traefik:
+      #   /                  → mnm-nautobot:8080  (catch-all, priority 1)
+      #   /grafana/...       → mnm-grafana:3000
+      #   /prometheus/...    → mnm-prometheus:9090
       - "8080:8080"
     environment:
+      # Pinned Docker API version. Traefik v2.x expects an API version
+      # it understands; newer Docker releases sometimes bump the API
+      # version past what v2.x recognises. 1.40 is conservative-but-
+      # working; bump cautiously if your Docker engine complains.
       DOCKER_API_VERSION: "1.40"
     volumes:
+      # Static config — entrypoints, providers, etc. Read-only mount.
       - ./config/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      # Docker socket so Traefik can watch container labels for routing
+      # rules. Read-only — Traefik never writes to Docker. Note that
+      # any container with docker.sock mounted is effectively root-
+      # equivalent on the host even when ":ro"; the socket grants
+      # privileged Docker API access regardless of ro/rw flag.
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       - mnm-network
 
-  # ---------------------------------------------------------------------------
-  # Data Layer
-  # ---------------------------------------------------------------------------
+
+  # ==========================================================================
+  # SERVICE: postgres
+  # PURPOSE: Single PostgreSQL 15 server hosting BOTH the `nautobot`
+  #   database (inventory, IPAM, jobs) AND the `mnm_controller` database
+  #   (endpoint correlation, polling state, sweep history). Two databases
+  #   on the same server, owned by the same role. The mnm_controller DB
+  #   is created by bootstrap/bootstrap.sh; this container starts with
+  #   only the `nautobot` DB present.
+  # DEPENDS ON: nothing
+  # EXPOSES: nothing on the host (5432 internal only — reachable from
+  #   other mnm-network containers)
+  # PERSISTS: mnm_postgres_data (BACKUP TARGET — losing this loses the
+  #   inventory AND the endpoint history)
+  # FAILURE MODES:
+  #   - "FATAL: password authentication failed" — POSTGRES_PASSWORD in
+  #     .env doesn't match what's already stored in the volume. To
+  #     change, either match the existing password or wipe with
+  #     `docker compose down -v` (destroys all data) and start fresh.
+  #   - Container restarts forever on first boot — check disk space.
+  #     The postgres image initializes templates on first start; needs
+  #     write room.
+  # ==========================================================================
   postgres:
     image: postgres:15
     container_name: mnm-postgres
     restart: unless-stopped
     logging: *default-logging
     environment:
+      # Default user and DB are both "nautobot" — this user gets
+      # superuser-on-this-cluster privileges by virtue of being the
+      # initial role. bootstrap.sh later uses this role to create
+      # the second database (`mnm_controller`) for the controller.
       POSTGRES_USER: ${POSTGRES_USER:-nautobot}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB:-nautobot}
     volumes:
       - mnm_postgres_data:/var/lib/postgresql/data
     healthcheck:
+      # pg_isready is the canonical readiness probe — no actual query,
+      # just a TCP+protocol-level "are you accepting connections?"
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nautobot}"]
       interval: 10s
       timeout: 5s
@@ -54,15 +192,39 @@ services:
     networks:
       - mnm-network
 
+
+  # ==========================================================================
+  # SERVICE: redis
+  # PURPOSE: Single Redis instance shared by Nautobot (cache + Celery
+  #   broker + Celery result backend) AND the controller (reads
+  #   celery-task-meta-* keys directly as a fallback for the upstream
+  #   nautobot-device-onboarding bug where JobResult rows can stay
+  #   PENDING forever). Logical-database split:
+  #     db 0 — Nautobot cache
+  #     db 1 — Nautobot Celery broker + result backend (controller
+  #            reads this for the JobResult fallback)
+  # DEPENDS ON: nothing
+  # EXPOSES: nothing on the host
+  # PERSISTS: mnm_redis_data (NOT a backup target — Redis state is
+  #   regeneratable from postgres; safe to lose)
+  # FAILURE MODES:
+  #   - AUTH failures: REDIS_PASSWORD in .env doesn't match what's in
+  #     the volume's appendonly file. Same fix as postgres password
+  #     mismatch — match it or `down -v`.
+  # ==========================================================================
   redis:
     image: redis:7-alpine
     container_name: mnm-redis
     restart: unless-stopped
     logging: *default-logging
+    # --requirepass forces password auth on every command. Without
+    # this, anything on mnm-network could read/write Redis.
     command: redis-server --requirepass ${REDIS_PASSWORD}
     volumes:
       - mnm_redis_data:/data
     healthcheck:
+      # PING with auth — confirms the server is up AND accepting our
+      # password. Bare PING without -a would mask password mismatches.
       test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 10s
       timeout: 5s
@@ -70,13 +232,46 @@ services:
     networks:
       - mnm-network
 
-  # ---------------------------------------------------------------------------
-  # Nautobot
-  # ---------------------------------------------------------------------------
+
+  # ==========================================================================
+  # SERVICE: nautobot
+  # PURPOSE: Nautobot 3.0 web app — the inventory source-of-truth.
+  #   Devices, Interfaces, IPs, Prefixes, VLANs, Cables, Locations,
+  #   Roles, Platforms all live here. The MNM controller writes to
+  #   Nautobot via REST API to record onboarded devices; the operator
+  #   reads inventory from Nautobot directly.
+  # IMPORTANT: This is a CUSTOM IMAGE built locally from ./nautobot/
+  #   Dockerfile, not the upstream networktocode/nautobot image. The
+  #   custom build adds the multi-vendor NAPALM driver set, the
+  #   nautobot-device-onboarding plugin, the welcome-wizard plugin,
+  #   and 4 patches (see CLAUDE.md "Lessons Learned" → Phase 1 for
+  #   the patch list). On first deploy this builds; subsequent deploys
+  #   reuse the local image.
+  # DEPENDS ON: postgres (healthy), redis (healthy)
+  # EXPOSES: 8443 (host) → 8080 (container) — Nautobot HTTP
+  #   Also routed through Traefik at http://<host>:8080/ (catch-all).
+  # PERSISTS: mnm_nautobot_media (uploaded files) +
+  #   mnm_nautobot_static (collected static assets — regeneratable but
+  #   collected lazily so faster to keep around)
+  # FAILURE MODES:
+  #   - First boot takes 4-5 MINUTES while Django runs migrations
+  #     against an empty postgres. start_period: 300s reflects this.
+  #     If you see the container "starting" for less time you may be
+  #     reusing an existing volume.
+  #   - "no such table" errors in logs after a postgres wipe: bring
+  #     nautobot down, wipe postgres volume, bring nautobot back up
+  #     so it can re-migrate.
+  #   - Crash-loop with "SECRET_KEY" error: NAUTOBOT_SECRET_KEY is
+  #     blank in .env. Generate one with:
+  #       python3 -c "import secrets; print(secrets.token_urlsafe(50))"
+  # ==========================================================================
   nautobot:
     build:
-      context: ./nautobot
-      dockerfile: Dockerfile
+      # Build context is the project root so the Dockerfile can
+      # COPY both ./nautobot/ files and ./nautobot-plugin/ (the
+      # mnm-plugin Nautobot Django app shipped with v1.0 Block E).
+      context: .
+      dockerfile: nautobot/Dockerfile
     image: mnm-nautobot:latest
     container_name: mnm-nautobot
     restart: unless-stopped
@@ -87,6 +282,10 @@ services:
       redis:
         condition: service_healthy
     ports:
+      # Host port 8443 → container 8080. Operators reach Nautobot
+      # directly here OR through Traefik on :8080. Both work; the
+      # direct port is convenient for cURL'ing the API without going
+      # through reverse-proxy path rewriting.
       - "8443:8080"
     environment:
       NAUTOBOT_DB_HOST: postgres
@@ -99,6 +298,11 @@ services:
       NAUTOBOT_REDIS_PASSWORD: ${REDIS_PASSWORD}
       NAUTOBOT_SECRET_KEY: ${NAUTOBOT_SECRET_KEY}
       NAUTOBOT_ALLOWED_HOSTS: ${NAUTOBOT_ALLOWED_HOSTS:-*}
+      # NAPALM credentials are passed under TWO env-var names because
+      # Nautobot core reads NAUTOBOT_NAPALM_* and the nornir plugin
+      # (used by some onboarding paths) reads bare NAPALM_*. They must
+      # match. Both blank-by-default; the operator sets them before
+      # onboarding any devices.
       NAUTOBOT_NAPALM_USERNAME: ${NAUTOBOT_NAPALM_USERNAME:-}
       NAUTOBOT_NAPALM_PASSWORD: ${NAUTOBOT_NAPALM_PASSWORD:-}
       NAUTOBOT_NAPALM_TIMEOUT: ${NAUTOBOT_NAPALM_TIMEOUT:-30}
@@ -113,8 +317,16 @@ services:
       interval: 15s
       timeout: 10s
       retries: 10
+      # 5 minutes — first-boot Django migrations against an empty
+      # postgres take ~4 minutes, plus collectstatic. start_period
+      # tells Docker "don't count failed health checks as 'unhealthy'
+      # for the first 300s" so the container doesn't get marked
+      # unhealthy while it's legitimately still bootstrapping.
       start_period: 300s
     labels:
+      # Traefik catch-all route — anything not matched by a more
+      # specific PathPrefix (Grafana, Prometheus) falls through to
+      # Nautobot. priority=1 is the lowest, so this is the fallback.
       - "traefik.enable=true"
       - "traefik.http.routers.nautobot.rule=PathPrefix(`/`)"
       - "traefik.http.routers.nautobot.priority=1"
@@ -122,6 +334,25 @@ services:
     networks:
       - mnm-network
 
+
+  # ==========================================================================
+  # SERVICE: nautobot-worker
+  # PURPOSE: Celery worker process for Nautobot's background jobs:
+  #   onboarding job runs, scheduled syncs, custom job execution. The
+  #   nautobot web container does NOT execute background jobs; this
+  #   worker does.
+  # DEPENDS ON: nautobot (healthy — needs Django + DB schema ready)
+  # EXPOSES: nothing
+  # PERSISTS: shares mnm_nautobot_media + mnm_nautobot_static with the
+  #   web container so file uploads from job runs are visible in the UI
+  # FAILURE MODES:
+  #   - Crash-loops on first start: nautobot web container probably
+  #     hasn't finished migrations. Worker can't run jobs against an
+  #     unmigrated DB. Wait for nautobot to be healthy.
+  #   - Healthcheck flakes: Celery's `inspect ping` is sensitive to
+  #     broker latency. Single occasional retry is normal; sustained
+  #     unhealthy means redis or nautobot is in a bad state.
+  # ==========================================================================
   nautobot-worker:
     image: mnm-nautobot:latest
     container_name: mnm-nautobot-worker
@@ -152,6 +383,10 @@ services:
       - mnm_nautobot_media:/opt/nautobot/media
       - mnm_nautobot_static:/opt/nautobot/static
     healthcheck:
+      # `celery inspect ping -d celery@<HOSTNAME>` returns OK if the
+      # named worker is alive and responding. The double-$ escapes
+      # the variable so Compose doesn't substitute it at build-time;
+      # bash inside the container does the lookup at run-time.
       test: ["CMD-SHELL", "nautobot-server celery inspect ping -d celery@$$HOSTNAME 2>/dev/null | grep -q OK"]
       interval: 30s
       timeout: 15s
@@ -160,6 +395,22 @@ services:
     networks:
       - mnm-network
 
+
+  # ==========================================================================
+  # SERVICE: nautobot-scheduler
+  # PURPOSE: Celery beat process that schedules Nautobot's periodic jobs
+  #   (e.g., the system housekeeping job). One scheduler per cluster —
+  #   running multiple beat instances would double-fire schedules.
+  # DEPENDS ON: nautobot (healthy)
+  # EXPOSES: nothing
+  # PERSISTS: shares the same volumes as the web + worker
+  # FAILURE MODES:
+  #   - Same first-boot pattern as nautobot-worker (waits on nautobot).
+  #   - Healthcheck reads /proc/1/cmdline rather than asking Celery
+  #     because beat doesn't expose a query interface — the only thing
+  #     we can verify is "is the beat process actually running as PID
+  #     1?" rather than "is it healthy in any deeper sense."
+  # ==========================================================================
   nautobot-scheduler:
     image: mnm-nautobot:latest
     container_name: mnm-nautobot-scheduler
@@ -190,6 +441,9 @@ services:
       - mnm_nautobot_media:/opt/nautobot/media
       - mnm_nautobot_static:/opt/nautobot/static
     healthcheck:
+      # Read the running command line of PID 1 and look for "celery
+      # beat". This is intentionally weak — beat has no API — but it
+      # at least confirms the right process is running.
       test: ["CMD-SHELL", "test -f /proc/1/cmdline && cat /proc/1/cmdline | tr '\\0' ' ' | grep -q 'celery beat'"]
       interval: 30s
       timeout: 5s
@@ -198,9 +452,29 @@ services:
     networks:
       - mnm-network
 
-  # ---------------------------------------------------------------------------
-  # Monitoring + Telemetry (Phase 2)
-  # ---------------------------------------------------------------------------
+
+  # ==========================================================================
+  # SERVICE: prometheus
+  # PURPOSE: Time-series metrics storage. Scrapes snmp-exporter (which
+  #   in turn scrapes monitored network devices via SNMP), the
+  #   controller's /api/proxmox/metrics endpoint when the Proxmox
+  #   connector is configured, and any other Prometheus-instrumented
+  #   service in the stack. Default 365-day retention with a 10 GB
+  #   hard cap.
+  # DEPENDS ON: nothing
+  # EXPOSES: nothing on host directly; reachable through Traefik at
+  #   http://<host>:8080/prometheus/
+  # PERSISTS: mnm_prometheus_data (BACKUP TARGET if you care about
+  #   historical metrics; otherwise regeneratable but lossy)
+  # FAILURE MODES:
+  #   - "TSDB closed" / "out of disk" errors: 10 GB cap may be too
+  #     small for your scrape volume. Bump --storage.tsdb.retention.size
+  #     below or shrink retention.time.
+  #   - Targets show DOWN in /prometheus/targets but devices respond:
+  #     check snmp-exporter logs and the controller's /api/snmp-targets
+  #     output; Prometheus pulls the SNMP target list dynamically from
+  #     the controller via http_sd.
+  # ==========================================================================
   prometheus:
     image: prom/prometheus:v3.4.0
     container_name: mnm-prometheus
@@ -209,7 +483,13 @@ services:
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.retention.time=${PROMETHEUS_RETENTION_DAYS:-365}d"
+      # Hard size cap. Whichever of time-or-size limit hits first wins.
+      # Bump if your environment generates more time-series data than
+      # this — e.g., 50+ devices on rich SNMP polling.
       - "--storage.tsdb.retention.size=10GB"
+      # Sub-path routing through Traefik. Both flags are required —
+      # external-url tells Prometheus where it lives publicly; route-
+      # prefix tells it to expect the prefix on incoming requests.
       - "--web.external-url=/prometheus/"
       - "--web.route-prefix=/prometheus/"
     volumes:
@@ -227,6 +507,30 @@ services:
     networks:
       - mnm-network
 
+
+  # ==========================================================================
+  # SERVICE: snmp-exporter
+  # PURPOSE: Translates Prometheus scrape requests into SNMP polls. One
+  #   exporter handles all monitored devices — it doesn't poll on its
+  #   own schedule; it polls when Prometheus scrapes it with a target
+  #   query. The list of devices to scrape is generated dynamically by
+  #   the controller's /api/snmp-targets endpoint (configured in
+  #   prometheus.yml as an http_sd target), so newly onboarded devices
+  #   appear in monitoring within ~60 seconds.
+  # NOTE: This service runs with the snmp.yml that ships inside the
+  #   prom/snmp-exporter image (no config volume mounted). The empty
+  #   ./config/snmp_exporter/ directory is a placeholder for a future
+  #   custom-generated config from snmp_exporter's `generator` tool —
+  #   not currently used.
+  # DEPENDS ON: nothing
+  # EXPOSES: nothing on host (port 9116 internal only)
+  # PERSISTS: nothing
+  # FAILURE MODES:
+  #   - Targets unreachable: usually a network reachability problem
+  #     between the snmp-exporter container and the device, not a
+  #     snmp-exporter problem. Test from inside the container:
+  #       docker exec mnm-snmp-exporter wget -O- "http://localhost:9116/snmp?target=<device-ip>&module=if_mib"
+  # ==========================================================================
   snmp-exporter:
     image: prom/snmp-exporter:v0.29.0
     container_name: mnm-snmp-exporter
@@ -240,6 +544,25 @@ services:
     networks:
       - mnm-network
 
+
+  # ==========================================================================
+  # SERVICE: gnmic
+  # PURPOSE: gNMI streaming-telemetry collector. Subscribes to gNMI
+  #   feeds on devices that support it (Junos, Arista, Cisco IOS-XR),
+  #   forwards the streamed updates to the configured outputs (today:
+  #   Prometheus exposition). Active only when devices have gNMI
+  #   enabled and the gnmic.yml config lists them as targets.
+  # DEPENDS ON: nothing at start; needs reachable devices in
+  #   ./config/gnmic/gnmic.yml for actual data flow
+  # EXPOSES: nothing on host
+  # PERSISTS: nothing
+  # FAILURE MODES:
+  #   - Container running but no metrics flowing: check gnmic.yml — by
+  #     default it ships with no targets. Add devices and recreate
+  #     the container.
+  #   - "no gNMI connection" errors: the listed device probably doesn't
+  #     have gNMI enabled. gNMI is opt-in on most platforms.
+  # ==========================================================================
   gnmic:
     image: ghcr.io/openconfig/gnmic:latest
     container_name: mnm-gnmic
@@ -249,11 +572,39 @@ services:
       - ./config/gnmic/gnmic.yml:/app/gnmic.yml:ro
     command: subscribe --config /app/gnmic.yml
     environment:
+      # Credentials passed as env vars so the gnmic.yml config file
+      # can reference them via ${} expansion without committing
+      # secrets to git. Both blank by default.
       GNMI_USERNAME: ${GNMI_USERNAME:-}
       GNMI_PASSWORD: ${GNMI_PASSWORD:-}
     networks:
       - mnm-network
 
+
+  # ==========================================================================
+  # SERVICE: grafana
+  # PURPOSE: Dashboards. Three dashboards ship pre-provisioned in the
+  #   "MNM" folder: Device Dashboard, Network Overview, Proxmox
+  #   Overview. Anonymous read-only viewing is enabled by default
+  #   (Viewer role) — anyone who can reach Grafana can view dashboards
+  #   without logging in. Editing requires the admin login.
+  # DEPENDS ON: prometheus (healthy — Grafana needs the data source
+  #   reachable on first paint)
+  # EXPOSES: 3000 (host) — also routed through Traefik at
+  #   http://<host>:8080/grafana/
+  # PERSISTS: mnm_grafana_data (NOT a backup target — dashboards are
+  #   provisioned from ./config/grafana/dashboards on each restart, so
+  #   the volume mostly holds Grafana's internal state which is
+  #   regeneratable)
+  # FAILURE MODES:
+  #   - "Datasource not found" on dashboards: Prometheus container is
+  #     unhealthy or the datasource provisioning file references a
+  #     wrong UID. Provisioning runs at Grafana startup — restart
+  #     after editing files in ./config/grafana/provisioning/.
+  #   - First-login admin password rejected: GRAFANA_ADMIN_PASSWORD
+  #     defaults to "mnm-admin" if unset (see env line below). Set a
+  #     real password in .env before exposing this beyond a lab.
+  # ==========================================================================
   grafana:
     image: grafana/grafana-oss:12.0.1
     container_name: mnm-grafana
@@ -263,13 +614,35 @@ services:
       prometheus:
         condition: service_healthy
     ports:
+      # Direct host port for operators who want Grafana without the
+      # Traefik prefix rewrite. Both work; pick whichever is more
+      # convenient for your dashboards.
       - "3000:3000"
     environment:
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-mnm-admin}
-      GF_SERVER_ROOT_URL: "http://localhost:8080/grafana"
+      # GRAFANA_ADMIN_PASSWORD is mandatory — the :? syntax causes
+      # docker compose to fail loudly with the error message below
+      # if the variable is unset or empty. Better than silently
+      # defaulting to a known weak value. Set it in .env before
+      # `docker compose up -d` or the container will refuse to
+      # start.
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set in .env}"
+      # Sub-path setup for Traefik routing. ROOT_URL templates from
+      # MNM_DOMAIN so Grafana's generated URLs (share links,
+      # snapshot URLs, alert callback links) point at the host
+      # operators actually reach. Set MNM_DOMAIN in .env to your
+      # reachable hostname (or external IP) for share links to work
+      # correctly. Defaults to "localhost" — fine for lab on the
+      # host itself, wrong for any other deployment.
+      GF_SERVER_ROOT_URL: "http://${MNM_DOMAIN:-localhost}:8080/grafana"
       GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      # Anonymous read-only access. Operators viewing dashboards
+      # without a login is intentional — the data is intended to be
+      # shared. Disable both flags below to require login for every
+      # view.
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      # Default landing dashboard for users who hit /grafana/ without
+      # a specific dashboard URL. Path is inside the container.
       GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/device-dashboard.json
     volumes:
       - mnm_grafana_data:/var/lib/grafana
@@ -287,9 +660,49 @@ services:
     networks:
       - mnm-network
 
-  # ---------------------------------------------------------------------------
-  # Controller (Phase 2.5)
-  # ---------------------------------------------------------------------------
+
+  # ==========================================================================
+  # SERVICE: controller
+  # PURPOSE: The MNM controller — the brain of the stack. FastAPI HTTP
+  #   API + vanilla-JS web UI on port 9090. Owns:
+  #     - Sweep / discovery pipeline
+  #     - Direct-REST onboarding orchestrator (Phase 1 + Phase 2 via
+  #       polling-job pattern)
+  #     - Modular polling loop (per-device, per-job-type schedules)
+  #     - Direct SNMP collectors for ARP / MAC / LLDP
+  #     - NAPALM fallback for routes / BGP (until v1.1)
+  #     - Endpoint correlation engine + temporal store
+  #     - Proxmox connector (when enabled)
+  #     - All operator-facing operational pages
+  # IMPORTANT: This is a CUSTOM IMAGE built locally from ./controller/
+  #   Dockerfile. On first deploy this builds; subsequent deploys
+  #   reuse the local image.
+  # DEPENDS ON: nautobot (healthy — needed for inventory reads),
+  #   postgres (healthy — controller's mnm_controller DB lives here)
+  # EXPOSES: 9090 — primary operator UI + REST API
+  # PERSISTS:
+  #   - mnm_controller_data: /data — currently sparse; reserved for
+  #     future controller-local state. Not a backup target today.
+  #   - All real persistent state lives in postgres (mnm_controller DB).
+  # SECURITY:
+  #   The controller mounts /var/run/docker.sock with READ-WRITE so it
+  #   can read container health for the dashboard's Container Status
+  #   card and (rarely) restart sibling containers. This makes the
+  #   controller container effectively root-equivalent on the host.
+  #   Treat the MNM host as you would any management/jump host —
+  #   restrict who can reach :9090, restrict who can SSH to the host.
+  # FAILURE MODES:
+  #   - "db_connected: false" in /api/health: controller couldn't reach
+  #     its mnm_controller database. Either bootstrap hasn't run yet
+  #     (creates the DB) or postgres is unreachable. Run
+  #     `bash bootstrap/bootstrap.sh` if you haven't.
+  #   - 502s on REST endpoints: controller is up but a downstream
+  #     dependency (Nautobot, Redis) isn't. Check `docker compose ps`.
+  #   - "MissingReferenceError" on onboarding attempts: bootstrap
+  #     library is missing a DeviceType / Platform / Role for the
+  #     vendor you're onboarding. Error message includes a one-line
+  #     REST fix command; see docs/BOOTSTRAP.md for the permanent fix.
+  # ==========================================================================
   controller:
     build:
       context: ./controller
@@ -298,6 +711,15 @@ services:
     container_name: mnm-controller
     restart: unless-stopped
     logging: *default-logging
+    # SYS_PTRACE — grants ptrace(2) syscall access inside this
+    # container so py-spy can attach to the controller process and
+    # capture stack traces during the v1.0.1-tracked controller-
+    # wedge investigation. Does NOT grant network or filesystem
+    # privileges. py-spy must be present in the container (pip
+    # install) and an operator must actively `docker exec` to
+    # use it; the cap is a permission gate, not a runtime cost.
+    cap_add:
+      - SYS_PTRACE
     depends_on:
       nautobot:
         condition: service_healthy
@@ -315,6 +737,11 @@ services:
       MNM_DB_NAME: ${MNM_CONTROLLER_DB:-mnm_controller}
       MNM_DB_USER: ${POSTGRES_USER:-nautobot}
       MNM_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      # Proxmox connector — all five vars blank by default. Setting
+      # PROXMOX_HOST enables the connector at controller startup; the
+      # other four are only consulted when PROXMOX_HOST is non-empty.
+      # See docs/CONNECTORS.md for the API-token + PVEAuditor-role
+      # setup on the Proxmox side.
       PROXMOX_HOST: ${PROXMOX_HOST:-}
       PROXMOX_TOKEN_ID: ${PROXMOX_TOKEN_ID:-}
       PROXMOX_TOKEN_SECRET: ${PROXMOX_TOKEN_SECRET:-}
@@ -323,14 +750,20 @@ services:
       ANOMALY_STALE_DAYS: ${ANOMALY_STALE_DAYS:-7}
       MNM_RETENTION_DAYS: ${MNM_RETENTION_DAYS:-365}
       MNM_PRUNE_INTERVAL_HOURS: ${MNM_PRUNE_INTERVAL_HOURS:-24}
-      # Celery result backend (Redis db 1) — used as a fallback when the
-      # nautobot-device-onboarding plugin leaves a JobResult row stuck in
-      # PENDING. Controller reads celery-task-meta-* directly from here.
+      # Celery result backend (Redis db 1) — used as a fallback when
+      # the nautobot-device-onboarding plugin leaves a JobResult row
+      # stuck in PENDING. Controller reads celery-task-meta-* directly
+      # from here. Same Redis instance as Nautobot's broker; different
+      # logical DB.
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/1
     volumes:
+      # docker.sock RW — see SECURITY note above. Required for the
+      # Container Status card on the dashboard.
       - /var/run/docker.sock:/var/run/docker.sock
       - mnm_controller_data:/data
     healthcheck:
+      # Pure Python check — no curl in the controller image. Tries
+      # the health endpoint and lets Python's urllib raise on non-2xx.
       test: ["CMD-SHELL", "python3 -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:9090/api/health\")'"]
       interval: 15s
       timeout: 5s
@@ -338,16 +771,62 @@ services:
     networks:
       - mnm-network
 
+
+# ----------------------------------------------------------------------------
+# Volumes — persistent data. Survives `down`; deleted by `down -v`.
+# ----------------------------------------------------------------------------
 volumes:
   mnm_postgres_data:
-  mnm_redis_data:
-  mnm_nautobot_media:
-  mnm_nautobot_static:
-  mnm_prometheus_data:
-  mnm_grafana_data:
-  mnm_controller_data:
+    # PostgreSQL data directory. Hosts BOTH the `nautobot` database
+    # (inventory, IPAM, devices) AND the `mnm_controller` database
+    # (sweep history, polling state, endpoint correlation, events).
+    # BACKUP TARGET — losing this loses everything MNM has learned.
 
+  mnm_redis_data:
+    # Redis AOF + RDB. Cache + Celery state. Regeneratable from
+    # postgres on next start. NOT a backup target.
+
+  mnm_nautobot_media:
+    # Nautobot's uploaded files (DeviceType import images,
+    # attachments). Small. BACKUP TARGET if operators have uploaded
+    # anything; otherwise regeneratable.
+
+  mnm_nautobot_static:
+    # Collected static assets (Django collectstatic output). Regenerated
+    # on every `nautobot-server collectstatic` — kept around as a
+    # volume only to avoid the ~1 minute regeneration on every restart.
+    # NOT a backup target.
+
+  mnm_prometheus_data:
+    # TSDB. Default 365-day retention with 10 GB cap. BACKUP TARGET
+    # if you care about historical metrics; otherwise regeneratable
+    # but lossy (you lose history).
+
+  mnm_grafana_data:
+    # Grafana's internal state (sessions, alerting state, plugin
+    # data). Dashboards themselves are provisioned from
+    # ./config/grafana/dashboards on every restart, so the volume's
+    # contents are mostly disposable. NOT a backup target.
+
+  mnm_controller_data:
+    # Reserved for future controller-local state (e.g., cached OUI
+    # database refresh state). Currently sparse. NOT a backup target
+    # today; revisit when meaningful state lands here.
+
+
+# ----------------------------------------------------------------------------
+# Networks — internal communication.
+# ----------------------------------------------------------------------------
 networks:
   mnm-network:
     name: mnm-network
     driver: bridge
+    # Internal bridge network. Only `traefik`, `nautobot`, `grafana`,
+    # and `controller` expose ports to the host; postgres, redis,
+    # prometheus, snmp-exporter, gnmic, and the Nautobot worker /
+    # scheduler are reachable only from within this network. This is
+    # intentional — exposing postgres or redis to the host network
+    # would unnecessarily widen the attack surface. The name: line
+    # forces the network name to `mnm-network` rather than the default
+    # `<projectdir>_mnm-network` so external tooling (e.g., the
+    # bootstrap script's docker exec calls) can reference it stably.

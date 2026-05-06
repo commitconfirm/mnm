@@ -126,11 +126,16 @@ if [ "${MNM_BOOTSTRAP_SKIP_CHECK:-}" != "1" ] && [ -n "$TOKEN" ]; then
             -H "Accept: application/json" 2>/dev/null \
         | python3 -c "import sys,json; print(json.load(sys.stdin).get('count',0))" 2>/dev/null) || DT_CHECK=0
 
-    CF_CHECK=$(docker exec "$CONTAINER" \
-        curl -sf "${API_BASE}/extras/custom-fields/?name=endpoint_data_source&limit=1" \
+    # Nautobot 3.x doesn't expose a list-filter for CustomField (`?key=` and
+    # `?name=` both return 400 "Unknown filter field"); the only working
+    # pattern is detail-retrieval by key as URL path: GET /…/custom-fields/<key>/
+    # returns 200 if the field exists, 404 otherwise.
+    CF_CHECK_HTTP=$(docker exec "$CONTAINER" \
+        curl -sk -o /dev/null -w "%{http_code}" \
+            "${API_BASE}/extras/custom-fields/endpoint_data_source/" \
             -H "Authorization: Token ${TOKEN}" \
-            -H "Accept: application/json" 2>/dev/null \
-        | python3 -c "import sys,json; print(json.load(sys.stdin).get('count',0))" 2>/dev/null) || CF_CHECK=0
+            -H "Accept: application/json" 2>/dev/null) || CF_CHECK_HTTP=000
+    if [ "$CF_CHECK_HTTP" = "200" ]; then CF_CHECK=1; else CF_CHECK=0; fi
 
     if [ "$DT_CHECK" -gt 5000 ] && [ "$CF_CHECK" -gt 0 ]; then
         echo ""
@@ -284,7 +289,15 @@ PLATFORMS=(
     # Juniper (built-in junos driver)
     "juniper_junos|junos|Juniper Junos|Juniper"
     # Cisco (built-in ios, nxos, iosxr drivers)
-    "cisco_ios|ios|Cisco IOS/IOS-XE|Cisco"
+    # cisco_ios = classic IOS; cisco_iosxe = IOS-XE (separate Platform so the
+    # MNM classifier's two-stage Cisco discrimination can target the right
+    # network_driver). Both use the NAPALM ``ios`` driver — IOS-XE's CLI is
+    # close enough that the ios driver works (lab-validated against c8000v
+    # 17.16.1a). Discovered during Block C.5 live onboarding when the
+    # community welcome-wizard library only ships ``cisco_ios``; without
+    # this row, IOS-XE devices land with platform=null.
+    "cisco_ios|ios|Cisco IOS|Cisco"
+    "cisco_iosxe|ios|Cisco IOS-XE|Cisco"
     "cisco_nxos|nxos|Cisco NX-OS|Cisco"
     "cisco_nxos_ssh|nxos_ssh|Cisco NX-OS SSH|Cisco"
     "cisco_iosxr|iosxr|Cisco IOS-XR|Cisco"
@@ -411,6 +424,168 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 6a. Manufacturer name dedup pass
+# ---------------------------------------------------------------------------
+# The netbox-community DeviceType library may import manufacturer records
+# under slightly different names than the canonical entries bootstrap section
+# 4 creates. The known case: "Palo Alto" (no "Networks") appears in older
+# library YAML files while "Palo Alto Networks" is the canonical form used by
+# bootstrap section 4 and the paloalto_panos Platform binding (section 4b).
+# When both records coexist, Nautobot's platform–manufacturer validation
+# rejects device creation at Step A with:
+#   "platform is limited to Palo Alto Networks device types,
+#    but this device's type belongs to Palo Alto"
+#
+# This pass reassigns all DeviceTypes from each DUPLICATE name to its
+# CANONICAL name, then deletes the now-orphaned duplicate manufacturer.
+# Idempotent: if the duplicate is already absent, logs a skip and returns.
+# Fail-safe: if any DeviceType remains attached to the duplicate after the
+# reassign pass (e.g., a PATCH failed mid-batch), the delete is skipped and
+# a warning is logged so the operator can investigate.
+#
+# Format: "duplicate_name|canonical_name"
+# Run order: after section 6 bulk import, before section 6b DeviceType creates.
+MANUFACTURER_DEDUP_PAIRS=(
+    "Palo Alto|Palo Alto Networks"
+)
+
+echo ""
+echo "--- Manufacturer Dedup Pass ---"
+
+dedup_manufacturer() {
+    local dup_name="$1"
+    local can_name="$2"
+
+    local dup_id
+    dup_id=$(api_get_id "dcim/manufacturers" "$dup_name")
+    local can_id
+    can_id=$(api_get_id "dcim/manufacturers" "$can_name")
+
+    if [ -z "$dup_id" ]; then
+        echo "  Dedup '$dup_name' → '$can_name': duplicate not present (skipped)"
+        return 0
+    fi
+    if [ -z "$can_id" ]; then
+        echo "  Dedup '$dup_name' → '$can_name': canonical '$can_name' not found — skipping (check section 4)"
+        return 0
+    fi
+    if [ "$dup_id" = "$can_id" ]; then
+        echo "  Dedup '$dup_name' → '$can_name': same record (skipped)"
+        return 0
+    fi
+
+    # URL-encode the duplicate name for use in filter params (e.g. "Palo Alto" → "Palo%20Alto").
+    local dup_name_enc
+    dup_name_enc=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${dup_name}'))")
+
+    # Fetch and reassign DeviceTypes under the duplicate (name-based filter; Nautobot 3.x
+    # does not support manufacturer_id for device-types). Always fetch from offset=0 —
+    # PATCHing items to the canonical manufacturer removes them from the filtered set, so
+    # offset-advancing pagination would skip items. Each iteration fetches whatever is
+    # still under the duplicate name until the set is empty.
+    local reassigned=0
+    local limit=50
+    while true; do
+        local page
+        page=$(docker exec "$CONTAINER" \
+            curl -sf "${API_BASE}/dcim/device-types/?manufacturer=${dup_name_enc}&limit=${limit}" \
+                -H "Authorization: Token ${TOKEN}" \
+                -H "Accept: application/json" 2>/dev/null) || page='{"count":0,"results":[]}'
+
+        local ids
+        ids=$(echo "$page" | python3 -c "
+import sys, json
+for r in json.load(sys.stdin).get('results', []):
+    print(r['id'])
+" 2>/dev/null) || ids=""
+        [ -z "$ids" ] && break
+
+        while IFS= read -r dt_id; do
+            [ -z "$dt_id" ] && continue
+            docker exec "$CONTAINER" \
+                curl -sf -X PATCH "${API_BASE}/dcim/device-types/${dt_id}/" \
+                    -H "Authorization: Token ${TOKEN}" \
+                    -H "Content-Type: application/json" \
+                    -H "Accept: application/json" \
+                    -d "{\"manufacturer\":\"${can_id}\"}" 2>/dev/null >/dev/null || true
+            reassigned=$((reassigned + 1))
+        done <<< "$ids"
+    done
+
+    # Safety check: verify no DeviceTypes remain under the duplicate name before deleting.
+    local remaining
+    remaining=$(docker exec "$CONTAINER" \
+        curl -sf "${API_BASE}/dcim/device-types/?manufacturer=${dup_name_enc}&limit=1" \
+            -H "Authorization: Token ${TOKEN}" \
+            -H "Accept: application/json" 2>/dev/null \
+        | python3 -c "import sys, json; print(json.load(sys.stdin).get('count', 0))" 2>/dev/null) || remaining=1
+
+    if [ "${remaining:-1}" -gt 0 ]; then
+        echo "  Dedup '$dup_name': ${remaining} DeviceType(s) still attached — NOT deleting (investigate manually)"
+        return 1
+    fi
+
+    # Delete the now-orphaned duplicate manufacturer.
+    docker exec "$CONTAINER" \
+        curl -sf -X DELETE "${API_BASE}/dcim/manufacturers/${dup_id}/" \
+            -H "Authorization: Token ${TOKEN}" \
+            -H "Accept: application/json" 2>/dev/null >/dev/null || true
+
+    if [ "$reassigned" -gt 0 ]; then
+        echo "  Dedup '$dup_name' → '$can_name': $reassigned DeviceType(s) reassigned, duplicate deleted"
+    else
+        echo "  Dedup '$dup_name' → '$can_name': no DeviceTypes to reassign, duplicate deleted"
+    fi
+}
+
+for _pair in "${MANUFACTURER_DEDUP_PAIRS[@]}"; do
+    IFS='|' read -r _DUP_NAME _CAN_NAME <<< "$_pair"
+    dedup_manufacturer "$_DUP_NAME" "$_CAN_NAME"
+done
+
+# ---------------------------------------------------------------------------
+# 6b. Lab-only virtual DeviceTypes not present in the community library
+# ---------------------------------------------------------------------------
+# The welcome-wizard / netbox-community devicetype-library does not ship
+# definitions for several common virtual lab platforms. Without these rows
+# pre-populated, onboarding a virtual device fails with a cryptic 400 from
+# Step A because get_devicetype_by_model returns None. Block D3 closes the
+# three known gaps (vEOS-lab, C8000V, cisco_iosxe Platform — see section
+# 4b for the Platform). Operators adding new virtual devices should extend
+# this section rather than creating DeviceTypes by hand each time.
+#
+# u_height=0 because these are virtual; physical specs (port count, etc.)
+# come from the device-type templates Phase 2 walks via SNMP, so the
+# DeviceType record itself only needs to satisfy the Nautobot foreign-key
+# constraint.
+echo ""
+echo "--- Lab Virtual DeviceTypes ---"
+
+# Format: model|manufacturer
+LAB_DEVICETYPES=(
+    # Arista vEOS-lab — virtual EOS image used in lab environments. Closes
+    # the v0.9.x vEOS onboarding blocker discovered during Prompt 5.
+    "vEOS-lab|Arista"
+    # Cisco C8000V — virtual Catalyst 8000V (IOS-XE on x86). Lab-validated
+    # at 17.16.1a during Block C.5; community library has C8000K (the
+    # physical chassis) but not the virtual variant.
+    "C8000V|Cisco"
+)
+
+for entry in "${LAB_DEVICETYPES[@]}"; do
+    IFS='|' read -r MODEL MFG_NAME <<< "$entry"
+    MFG_ID=$(api_get_id "dcim/manufacturers" "$MFG_NAME" 2>/dev/null) || MFG_ID=""
+    if [ -z "$MFG_ID" ]; then
+        echo "  DeviceType '${MODEL}': skipped — manufacturer '${MFG_NAME}' missing" >&2
+        continue
+    fi
+    PAYLOAD="{\"model\":\"${MODEL}\",\"manufacturer\":\"${MFG_ID}\",\"u_height\":0}"
+    api_create "dcim/device-types" "$MODEL" "model" \
+        "$PAYLOAD" \
+        "DeviceType '${MODEL}' (${MFG_NAME})" >/dev/null
+done
+
+# ---------------------------------------------------------------------------
 # 7. Secrets and Secrets Group (only if NAPALM credentials are set)
 # ---------------------------------------------------------------------------
 echo ""
@@ -509,15 +684,20 @@ for FIELD_DEF in "${DISCOVERY_FIELDS[@]}"; do
     FIELD_TYPE="${REMAINDER%%:*}"
     FIELD_LABEL="${REMAINDER#*:}"
 
-    # Check if custom field exists
-    ENCODED_NAME=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${FIELD_NAME}'))")
-    EXISTING=$(docker exec "$CONTAINER" \
-        curl -sf "${API_BASE}/extras/custom-fields/?name=${ENCODED_NAME}" \
+    # Check if custom field exists.  Nautobot 3.x deprecated `name=` in
+    # favour of `key=` for the POST payload, but neither is exposed as a
+    # list-endpoint filter — `?name=<X>` and `?key=<X>` both return HTTP 400
+    # "Unknown filter field".  The only reliable existence-check is the
+    # detail-retrieval URL path: GET /…/custom-fields/<key>/ → 200 if the
+    # field exists, 404 otherwise.  See
+    # .claude/investigations/v1-pre-tag-2026-05-06.md (Round 1+2).
+    HTTP_CODE=$(docker exec "$CONTAINER" \
+        curl -sk -o /dev/null -w "%{http_code}" \
+            "${API_BASE}/extras/custom-fields/${FIELD_NAME}/" \
             -H "Authorization: Token ${TOKEN}" \
-            -H "Accept: application/json" 2>/dev/null) || EXISTING='{"count":0}'
-    COUNT=$(echo "$EXISTING" | python3 -c "import sys,json; print(json.load(sys.stdin).get('count',0))" 2>/dev/null) || COUNT=0
+            -H "Accept: application/json" 2>/dev/null) || HTTP_CODE=000
 
-    if [ "$COUNT" -gt 0 ]; then
+    if [ "$HTTP_CODE" = "200" ]; then
         echo "  Custom field '${FIELD_NAME}': already exists (skipped)" >&2
         inc_skipped
     else
@@ -526,7 +706,7 @@ for FIELD_DEF in "${DISCOVERY_FIELDS[@]}"; do
                 -H "Authorization: Token ${TOKEN}" \
                 -H "Content-Type: application/json" \
                 -H "Accept: application/json" \
-                -d "{\"name\":\"${FIELD_NAME}\",\"label\":\"${FIELD_LABEL}\",\"type\":\"${FIELD_TYPE}\",\"content_types\":[\"ipam.ipaddress\"],\"filter_logic\":\"loose\"}" 2>&1)
+                -d "{\"key\":\"${FIELD_NAME}\",\"label\":\"${FIELD_LABEL}\",\"type\":\"${FIELD_TYPE}\",\"content_types\":[\"ipam.ipaddress\"],\"filter_logic\":\"loose\"}" 2>&1)
 
         if echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" >/dev/null 2>&1; then
             echo "  Custom field '${FIELD_NAME}': created" >&2
@@ -536,6 +716,30 @@ for FIELD_DEF in "${DISCOVERY_FIELDS[@]}"; do
         fi
     fi
 done
+
+# ---------------------------------------------------------------------------
+# Section 6c — verify mnm-plugin migrations applied
+# ---------------------------------------------------------------------------
+# v1.0 Block E adds a Nautobot Django app (mnm-plugin) providing
+# the Endpoint, ARP, MAC, LLDP, Route, BGP, and Fingerprint
+# models. Plugin migrations run as part of Nautobot's startup.
+# This section asserts they actually applied — catches the case
+# where Nautobot started without picking up the plugin (config
+# error, install failure during build, etc.).
+echo ""
+echo "Verifying mnm_plugin migrations..." >&2
+PLUGIN_MIGRATIONS=$(docker exec "$CONTAINER" \
+    nautobot-server showmigrations mnm_plugin 2>/dev/null | \
+    grep -c '\[X\]' || true)
+
+if [ "${PLUGIN_MIGRATIONS:-0}" -lt 1 ]; then
+    echo "  WARNING: mnm_plugin migrations not detected." >&2
+    echo "  Run: docker exec ${CONTAINER} nautobot-server migrate mnm_plugin" >&2
+    echo "  If the plugin isn't installed, rebuild nautobot:" >&2
+    echo "    docker compose build nautobot && docker compose up -d --force-recreate nautobot" >&2
+else
+    echo "  mnm_plugin: ${PLUGIN_MIGRATIONS} migration(s) applied" >&2
+fi
 
 # ---------------------------------------------------------------------------
 # Summary

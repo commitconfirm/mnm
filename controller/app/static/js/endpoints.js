@@ -81,7 +81,21 @@ const endpointsDT = new DataTable({
     { key: 'vlan', label: 'VLAN', sortable: true, render: function(v) { return (v != null && v !== 0 && v !== '0') ? escHtml(String(v)) : '-'; } },
     { key: 'first_seen', label: 'First Seen', sortable: true, render: function(v) { return '<span title="' + escHtml(v || '') + '">' + timeAgo(v) + '</span>'; } },
     { key: 'last_seen', label: 'Last Seen', sortable: true, render: function(v) { return '<span title="' + escHtml(v || '') + '">' + timeAgo(v) + '</span>'; } },
-    { key: 'source', label: 'Source', sortable: true, render: function(v) { return sourceBadge(v); } },
+    {
+      key: 'source',
+      label: 'Source' + MNMColHelp.icon({
+        title: 'Where this endpoint record came from',
+        values: [
+          ['Infrastructure', 'Discovered via ARP, MAC, or LLDP data collected from onboarded nodes (switches, routers, firewalls).'],
+          ['Sweep',          'Discovered directly via sweep probes (SNMP, port scans, banners) against the endpoint IP.'],
+          ['Both',           'Correlated across both sources.'],
+        ],
+        docsLink: '/docs/ENDPOINTS.md',
+      }),
+      exportLabel: 'Source',
+      sortable: true,
+      render: function(v) { return sourceBadge(v); },
+    },
   ],
   pageSize: 100,
   storageKey: 'mnm-endpoints-table',
@@ -372,4 +386,10 @@ checkAuth().then(async () => {
   loadHistory();
   loadWatches();
   startAutoRefresh();
+  const exportHost = document.getElementById('endpoints-export-buttons');
+  if (exportHost) {
+    exportHost.replaceWith(
+      MNMTableExport.makeButtons('#endpoints-dt table', 'mnm-endpoints')
+    );
+  }
 });

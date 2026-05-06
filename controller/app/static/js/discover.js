@@ -257,12 +257,12 @@ function renderTable(hosts, onboardingByIp) {
       <td>${escHtml(ip)}</td>
       <td>${escHtml(info.dns_name || '-')}</td>
       <td>${escHtml(info.mac_vendor || '-')}</td>
-      <td>${escHtml(ports)}</td>
+      <td class="align-center">${escHtml(ports)}</td>
       <td>${escHtml((info.snmp && info.snmp.sysName || '') || '-')}</td>
-      <td>${sshHttp}</td>
-      <td>${classificationBadge(info.classification)}</td>
-      <td>${statusBadge(info.status)}</td>
-      <td>${actionParts.join(' ')}</td>
+      <td class="align-center">${sshHttp}</td>
+      <td class="align-center">${classificationBadge(info.classification)}</td>
+      <td class="align-center">${statusBadge(info.status)}</td>
+      <td class="align-center">${actionParts.join(' ')}</td>
     </tr>`);
 
     // Detail row (preserve expanded state across re-renders)
@@ -522,12 +522,12 @@ async function loadHistory() {
       const dur = h.duration_seconds != null ? h.duration_seconds + 's' : '-';
       return `<tr>
         <td>${started}</td>
-        <td>${dur}</td>
+        <td class="align-center">${dur}</td>
         <td>${escHtml(ranges)}</td>
-        <td>${s.alive || 0}</td>
-        <td>${s.onboarded || 0}</td>
-        <td>${s.recorded || 0}</td>
-        <td>${s.failed || 0}</td>
+        <td class="align-center">${s.alive || 0}</td>
+        <td class="align-center">${s.onboarded || 0}</td>
+        <td class="align-center">${s.recorded || 0}</td>
+        <td class="align-center">${s.failed || 0}</td>
       </tr>`;
     }).join('');
   } catch (e) {
@@ -553,6 +553,49 @@ function setTheme(theme) {
 
 // Init preferences
 MNMPreferences.init();
+
+// Column-help tooltips on the sweep-results header cells (static <th>;
+// see docs/UI_CONVENTIONS.md). Injected once at page load.
+(function injectColHelp() {
+  if (typeof MNMColHelp === 'undefined') return;
+  const targets = [
+    {
+      sel: '[data-col-help="sweep-classification"]',
+      opts: {
+        title: 'How the sweep classified this host',
+        values: [
+          ['switch',         'Layer-2 switch (sysDescr / OUI / banner match).'],
+          ['router',         'Router or L3 switch.'],
+          ['firewall',       'Firewall appliance.'],
+          ['network_device', 'Network gear with no specific subtype identified.'],
+          ['server',         'Server-class host (web / SSH / NetBIOS / etc).'],
+          ['access_point',   'Wireless access point.'],
+          ['endpoint',       'Generic endpoint (workstation, printer, IoT).'],
+          ['unknown',        'No useful signals — could not classify.'],
+        ],
+      },
+    },
+    {
+      sel: '[data-col-help="sweep-status"]',
+      opts: {
+        title: 'Sweep + onboarding state for this host',
+        values: [
+          ['alive',      'Responded to probes; not yet recorded.'],
+          ['dead',       'No response (hidden by default; toggle "Show all").'],
+          ['known',      'Already onboarded as a Node in Nautobot — skipped.'],
+          ['onboarding', 'Onboarding job submitted, in progress.'],
+          ['onboarded',  'Successfully onboarded as a Node.'],
+          ['recorded',   'Stored as a passive endpoint (not onboarded).'],
+          ['failed',     'Onboarding attempt failed; see Details for error.'],
+        ],
+      },
+    },
+  ];
+  for (const t of targets) {
+    const el = document.querySelector(t.sel);
+    if (el) el.innerHTML = MNMColHelp.icon(t.opts);
+  }
+})();
 
 // Init
 // ---------------------------------------------------------------------------
@@ -677,25 +720,198 @@ checkAuth().then(() => {
   }).catch(() => {});
 });
 
-// Retry failed onboarding for a single IP
+// Retry onboarding for a single IP via the direct-REST orchestrator
+// (v1.0 Prompt 8). The sweep's inline onboarding already uses the new
+// path; this button is the manual retry affordance for operator-
+// initiated retries after a sweep attempt failed.
+//
+// The orchestrator returns synchronously after Phase 1 (seconds). Phase 2
+// runs asynchronously via the polling loop; the sweep-status poll picks
+// up the eventual state transition. We also poll the dedicated Phase 2
+// endpoint on success so the operator sees progress without waiting for
+// the next sweep-status tick.
+//
+// Note the cache-timing race flagged in Prompt 7.5: the first polling-
+// loop dispatch of Phase 2 may return "Device not found in Nautobot"
+// because get_devices is cached. If the operator sees "failed" state
+// immediately after a successful Phase 1, the same retry button here
+// (or the Retry Phase 2 button on the Nodes page) will drive it to
+// success. Prompt 9 fixes at the polling layer.
 async function retryOnboard(ip) {
   if (!ip) return;
   try {
-    var r = await fetch('/api/discover/onboard', {
+    // Pull location / secrets / community from the sweep form — the
+    // operator already configured these to run the sweep, so they're
+    // the same credentials we want for the retry.
+    var locEl = document.getElementById('location-select');
+    var sgEl = document.getElementById('creds-select');
+    var commEl = document.getElementById('snmp-community');
+    var location_id = locEl ? locEl.value : '';
+    var secrets_group_id = sgEl ? sgEl.value : '';
+    var snmp_community = commEl ? commEl.value : '';
+    if (!location_id || !secrets_group_id || !snmp_community) {
+      alert('Retry needs Location, SecretsGroup, and SNMP Community from the sweep form — configure them and try again.');
+      return;
+    }
+    var r = await fetch('/api/onboarding/direct-rest', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ip: ip }),
+      body: JSON.stringify({
+        ip: ip,
+        snmp_community: snmp_community,
+        secrets_group_id: secrets_group_id,
+        location_id: location_id,
+      }),
     });
-    if (r.ok) {
-      var d = await r.json();
-      alert('Onboarding re-submitted for ' + ip);
-      pollStatus();
-    } else {
+    if (!r.ok) {
       var err = await r.json().catch(function() { return {}; });
       alert('Retry failed: ' + (err.detail || r.statusText));
+      return;
     }
+    var d = await r.json();
+    if (!d.success) {
+      if (d.error_type === 'AlreadyOnboardedError') {
+        alert('Already onboarded as "' + (d.device_name || 'unknown') + '". Go to Nodes to manage.');
+      } else {
+        alert('Onboarding failed (' + (d.error_type || 'unknown') + '): ' + (d.error || ''));
+      }
+      pollStatus();
+      return;
+    }
+    // Phase 1 succeeded. Sweep-status poll will show "succeeded"
+    // momentarily; Phase 2 runs in the background via the polling loop.
+    pollStatus();
   } catch (e) {
     alert('Retry failed: ' + e.message);
   }
 }
 window.retryOnboard = retryOnboard;
+
+
+// ---------------------------------------------------------------------------
+// Block D5 — Unsupported / unclassified hosts panel
+// ---------------------------------------------------------------------------
+//
+// Reads /api/sweeps/unsupported. Renders a collapsed-by-default card
+// with a count badge; expand reveals a sortable DataTable. CSV/JSON
+// export reuses the shared table-export helper.
+//
+// "Unsupported vendor" status is currently rare in real data — see
+// CLAUDE.md "v1.0.1 cleanup backlog" for the classifier-vendor-rule
+// gap. Most hosts surface here as "unclassified" today; the panel's
+// utility is the same regardless (operators see what didn't onboard
+// and can decide what to prioritise).
+
+const unsupportedDT = new DataTable({
+  containerId: 'unsupported-dt',
+  pageSize: 50,
+  storageKey: 'mnm-unsupported-dt',
+  columns: [
+    { key: 'ip', label: 'IP', sortable: true },
+    {
+      key: 'classified_vendor',
+      label: 'Vendor' + MNMColHelp.icon({
+        title: 'Classifier-derived vendor',
+        values: [
+          ['(blank)',     'Classifier could not identify a vendor — see Status / sysDescr columns for raw signals.'],
+          ['<vendor>',    'Classifier identified a vendor; if shown here it is NOT in MNM\'s SUPPORTED_VENDORS set.'],
+        ],
+        docsLink: '/docs/DEPLOYMENT.md',
+      }),
+      exportLabel: 'Vendor',
+      sortable: true,
+      render: function(v) { return v ? escHtml(v) : '<em style="color:var(--text-muted)">unknown</em>'; },
+    },
+    {
+      key: 'classification_status',
+      label: 'Status' + MNMColHelp.icon({
+        title: 'Why this host did not get onboarded',
+        values: [
+          ['unsupported_vendor', 'Classifier identified a vendor not in MNM\'s SUPPORTED_VENDORS set (juniper, arista, palo_alto, fortinet, cisco).'],
+          ['unclassified',       'Classifier could not identify a vendor from the available signals (sysDescr, ports, OUI). Most non-supported vendors surface here today.'],
+          ['classification_error', 'Classifier raised when re-running on stored signals. Rare — investigate the sysDescr excerpt.'],
+        ],
+      }),
+      exportLabel: 'Status',
+      sortable: true,
+      render: function(v) {
+        if (v === 'unsupported_vendor') return '<span class="badge warning">unsupported vendor</span>';
+        if (v === 'unclassified')        return '<span class="badge">unclassified</span>';
+        if (v === 'classification_error') return '<span class="badge danger">classification error</span>';
+        return escHtml(v || '-');
+      },
+    },
+    { key: 'platform_hint', label: 'Platform Hint', sortable: true,
+      render: function(v) { return v ? escHtml(v) : '-'; } },
+    { key: 'oui_vendor', label: 'OUI Vendor', sortable: true,
+      render: function(v) { return v ? escHtml(v) : '-'; } },
+    { key: 'last_seen', label: 'Last Seen', sortable: true,
+      render: function(v) { return v ? '<span title="' + escHtml(v) + '">' + timeAgo(v) + '</span>' : '-'; } },
+    { key: 'sys_descr_excerpt', label: 'sysDescr', sortable: false,
+      render: function(v) { return v ? '<code style="font-size:0.78rem">' + escHtml(v) + '</code>' : '-'; } },
+  ],
+});
+
+let unsupportedLoaded = false;
+let unsupportedExpanded = false;
+
+async function loadUnsupportedCount() {
+  try {
+    const r = await fetch('/api/sweeps/unsupported?limit=1');
+    if (!r.ok) return;
+    const d = await r.json();
+    const badge = document.getElementById('unsupported-count');
+    if (badge) {
+      badge.textContent = d.count + (d.count === 1 ? ' host' : ' hosts');
+      // Hide the entire card when count is zero — operators with a
+      // fully-supported network shouldn't see a "0 hosts" advisory
+      // taking up screen space.
+      const card = document.getElementById('unsupported-card');
+      if (card) card.style.display = d.count > 0 ? '' : 'none';
+    }
+  } catch (e) { /* silent — non-critical */ }
+}
+
+async function loadUnsupportedDetails() {
+  if (unsupportedLoaded) return;
+  try {
+    // Fetch up to 1000; pagination + sort happen in the DataTable.
+    const r = await fetch('/api/sweeps/unsupported?limit=1000');
+    if (!r.ok) return;
+    const d = await r.json();
+    unsupportedDT.setData(d.results || []);
+    unsupportedDT.render();
+    unsupportedLoaded = true;
+  } catch (e) {
+    const wrap = document.getElementById('unsupported-dt');
+    if (wrap) wrap.innerHTML = '<p style="color:var(--red)">Failed to load: ' + escHtml(e.message) + '</p>';
+  }
+}
+
+(function initUnsupportedPanel() {
+  const toggle = document.getElementById('unsupported-toggle');
+  const detail = document.getElementById('unsupported-detail');
+  if (!toggle || !detail) return;
+  toggle.addEventListener('click', async () => {
+    unsupportedExpanded = !unsupportedExpanded;
+    detail.hidden = !unsupportedExpanded;
+    toggle.textContent = unsupportedExpanded ? 'Hide details' : 'Show details';
+    if (unsupportedExpanded) {
+      await loadUnsupportedDetails();
+      // Wire the export buttons after the table has data so they
+      // re-resolve the table selector cleanly (per UI_CONVENTIONS §3).
+      const host = document.getElementById('unsupported-export');
+      if (host && typeof MNMTableExport !== 'undefined' && !host.hasChildNodes()) {
+        host.replaceWith(
+          MNMTableExport.makeButtons('#unsupported-dt table', 'mnm-unsupported')
+        );
+      }
+    }
+  });
+  // Refresh the count on page load, and again whenever a sweep
+  // completes so the operator sees the new advisory promptly.
+  loadUnsupportedCount();
+  // Hook into the existing pollStatus cycle — re-fetch the count
+  // whenever the status display refreshes.
+  setInterval(loadUnsupportedCount, 30000);
+})();

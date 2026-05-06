@@ -25,7 +25,19 @@ function makeTable(containerId, columns, storageKey, data) {
   });
   t.setData(data);
   t.render();
+  wireExportButtonsFor(containerId);
   return t;
+}
+
+// Wire CSV/JSON export buttons declared with
+// data-export-for="<containerId>" in the section-head.
+function wireExportButtonsFor(containerId) {
+  var host = document.querySelector('[data-export-for="' + containerId + '"]');
+  if (!host || host.dataset.wired) return;
+  var base = host.getAttribute('data-export-base') || 'mnm-table';
+  var built = MNMTableExport.makeButtons('#' + containerId + ' table', base);
+  while (built.firstChild) host.appendChild(built.firstChild);
+  host.dataset.wired = '1';
 }
 
 // ---- Populate node filter dropdown ----
@@ -168,7 +180,16 @@ async function doSearch() {
         { key: 'mac', label: 'MAC', sortable: true, render: function(v) { return macLink(v); } },
         { key: 'interface', label: 'Interface', sortable: true },
         { key: 'vlan', label: 'VLAN', sortable: true, render: function(v) { return (v && v !== 0 && v !== '0') ? esc(String(v)) : '-'; } },
-        { key: 'entry_type', label: 'Type', sortable: true },
+        { key: 'entry_type', label: 'Type' + MNMColHelp.icon({
+          title: 'Bridge-table entry kind (BRIDGE-MIB dot1dTpFdbStatus)',
+          values: [
+            ['dynamic', 'Learned by source-MAC observation; ages out.'],
+            ['static',  'Operator-configured; does not age out.'],
+            ['self',    'MAC belongs to the bridge itself (CPU port).'],
+            ['other',   'Vendor-specific or unknown classification.'],
+            ['invalid', 'Entry exists but is not in use.'],
+          ],
+        }), exportLabel: 'Type', sortable: true },
         { key: 'collected_at', label: 'Last Seen', sortable: true, render: function(v) { return timeAgo(v); } },
       ], 'investigate-mac', res.mac_hits);
     }
@@ -182,7 +203,18 @@ async function doSearch() {
         { key: 'node_name', label: 'Node', sortable: true, render: function(v) { return nodeLink(v); } },
         { key: 'prefix', label: 'Prefix', sortable: true, render: function(v) { return '<code>' + esc(v) + '</code>'; } },
         { key: 'next_hop', label: 'Next Hop', sortable: true, render: function(v) { return esc(v || 'connected'); } },
-        { key: 'protocol', label: 'Protocol', sortable: true },
+        { key: 'protocol', label: 'Protocol' + MNMColHelp.icon({
+          title: 'Routing-protocol source for this RIB entry',
+          values: [
+            ['connected', 'Directly attached interface route.'],
+            ['local',     'Local /32 (or /128) for an interface address.'],
+            ['static',    'Operator-configured static route.'],
+            ['ospf',      'Learned via OSPF.'],
+            ['bgp',       'Learned via BGP.'],
+            ['isis',      'Learned via IS-IS.'],
+            ['unknown',   'Source not recognised by NAPALM normalisation.'],
+          ],
+        }), exportLabel: 'Protocol', sortable: true },
         { key: 'metric', label: 'Metric', sortable: true, render: function(v) { return v != null ? v : '-'; } },
         { key: 'outgoing_interface', label: 'Interface', sortable: true },
         { key: 'vrf', label: 'VRF', sortable: true },
@@ -213,7 +245,17 @@ async function doSearch() {
         { key: 'node_name', label: 'Node', sortable: true, render: function(v) { return nodeLink(v); } },
         { key: 'prefix', label: 'Prefix', sortable: true, render: function(v) { return '<code>' + esc(v) + '</code>'; } },
         { key: 'next_hop', label: 'Next Hop', sortable: true },
-        { key: 'protocol', label: 'Protocol', sortable: true },
+        { key: 'protocol', label: 'Protocol' + MNMColHelp.icon({
+          title: 'Routing-protocol source for this gateway candidate',
+          values: [
+            ['connected', 'Directly attached interface route.'],
+            ['local',     'Local /32 (or /128) for an interface address.'],
+            ['static',    'Operator-configured static route.'],
+            ['ospf',      'Learned via OSPF.'],
+            ['bgp',       'Learned via BGP.'],
+            ['isis',      'Learned via IS-IS.'],
+          ],
+        }), exportLabel: 'Protocol', sortable: true },
         { key: 'outgoing_interface', label: 'Interface', sortable: true },
       ], 'investigate-gateways', res.gateways);
     }

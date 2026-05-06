@@ -1,0 +1,21 @@
+{% extends "generic/object_list.html" %}
+{% load helpers %}
+
+{% block title %}MAC Entries{% endblock %}
+
+{% block content %}
+  <p class="text-muted">
+    Per-node MAC / FDB table snapshots collected via SNMP
+    (<code>dot1qTpFdbTable</code> with
+    <code>dot1dTpFdbTable</code> fallback; Junos uses
+    <code>JUNIPER-L2ALD-MIB::jnxL2aldVlanTable</code> for VLAN
+    resolution where the standard <code>dot1qVlanCurrentTable</code>
+    is empty). One row per
+    <code>(node, mac, interface, vlan)</code> tuple. Static
+    entries (<em>self</em> / <em>mgmt</em> per Block C P4 remap)
+    are tagged with the <span class="label label-success">Static</span>
+    chip; everything else is dynamic.
+  </p>
+  {% include "mnm_plugin/inc/filter_bar.html" %}
+  {{ block.super }}
+{% endblock %}

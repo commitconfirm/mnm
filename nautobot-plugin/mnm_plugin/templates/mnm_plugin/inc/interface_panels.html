@@ -1,0 +1,152 @@
+{% load helpers %}
+{# E5 — interface-detail extension. Four inline panels on dcim.Interface detail page. #}
+{# Rendered via mnm_plugin.template_content.InterfaceMnmPanels.right_page() #}
+
+<div class="panel panel-default">
+  <div class="panel-heading">
+    <strong>MNM — Endpoints currently on this port</strong>
+    <span class="badge">{{ active_endpoints|length }}</span>
+  </div>
+  {% if active_endpoints_err %}
+    <div class="panel-body text-danger">{{ active_endpoints_err }}</div>
+  {% elif active_endpoints %}
+    <table class="table table-hover panel-body">
+      <thead>
+        <tr><th>MAC</th><th>IP</th><th>VLAN</th><th>Hostname</th><th>Last seen</th></tr>
+      </thead>
+      <tbody>
+        {% for ep in active_endpoints %}
+          <tr>
+            <td>
+              <a href="{% url 'plugins:mnm_plugin:endpoint' ep.pk %}"><code>{{ ep.mac_address }}</code></a>
+            </td>
+            <td>{{ ep.current_ip|default:"—" }}</td>
+            <td>{{ ep.current_vlan }}</td>
+            <td>{{ ep.hostname|default:"—" }}</td>
+            <td>{{ ep.last_seen }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <div class="panel-footer">
+      <a href="{{ endpoint_list_url }}&active=true">Show all endpoints currently on this port →</a>
+    </div>
+  {% else %}
+    <div class="panel-body text-muted">No data for this port.</div>
+  {% endif %}
+</div>
+
+<div class="panel panel-default">
+  <div class="panel-heading">
+    <strong>MNM — Endpoints historically on this port</strong>
+    <span class="badge">{{ historical_endpoints|length }}</span>
+    <small class="text-muted"> ({{ historical_window_days }}-day window)</small>
+  </div>
+  {% if historical_endpoints_err %}
+    <div class="panel-body text-danger">{{ historical_endpoints_err }}</div>
+  {% elif historical_endpoints %}
+    <table class="table table-hover panel-body">
+      <thead>
+        <tr><th>MAC</th><th>IP</th><th>VLAN</th><th>Hostname</th><th>First seen</th><th>Last seen</th></tr>
+      </thead>
+      <tbody>
+        {% for ep in historical_endpoints %}
+          <tr>
+            <td>
+              <a href="{% url 'plugins:mnm_plugin:endpoint' ep.pk %}"><code>{{ ep.mac_address }}</code></a>
+            </td>
+            <td>{{ ep.current_ip|default:"—" }}</td>
+            <td>{{ ep.current_vlan }}</td>
+            <td>{{ ep.hostname|default:"—" }}</td>
+            <td>{{ ep.first_seen }}</td>
+            <td>{{ ep.last_seen }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <div class="panel-footer">
+      <a href="{{ endpoint_list_url }}">Show all endpoints on this port →</a>
+    </div>
+  {% elif historical_endpoints_has_older_than_window %}
+    <div class="panel-body text-muted">
+      No endpoints in the last {{ historical_window_days }} days.
+      <a href="{{ endpoint_list_url }}">Show endpoints beyond {{ historical_window_days }} days →</a>
+    </div>
+  {% else %}
+    <div class="panel-body text-muted">No data for this port.</div>
+  {% endif %}
+</div>
+
+<div class="panel panel-default">
+  <div class="panel-heading">
+    <strong>MNM — LLDP neighbors on this port</strong>
+    <span class="badge">{{ lldp_neighbors|length }}</span>
+  </div>
+  {% if lldp_neighbors_err %}
+    <div class="panel-body text-danger">{{ lldp_neighbors_err }}</div>
+  {% elif lldp_neighbors %}
+    <table class="table table-hover panel-body">
+      <thead>
+        <tr><th>Remote system</th><th>Remote port</th><th>Chassis ID</th><th>Last seen</th></tr>
+      </thead>
+      <tbody>
+        {% for n in lldp_neighbors %}
+          <tr>
+            <td>
+              <a href="{% url 'plugins:mnm_plugin:lldpneighbor' n.pk %}">
+                {{ n.remote_system_name|default:"—" }}
+              </a>
+            </td>
+            <td>{{ n.remote_port|default:"—" }}</td>
+            <td><code>{{ n.remote_chassis_id|default:"—" }}</code></td>
+            <td>{{ n.collected_at }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <div class="panel-footer">
+      <a href="{{ lldp_list_url }}">Show all LLDP neighbors on this port →</a>
+    </div>
+  {% else %}
+    <div class="panel-body text-muted">No data for this port.</div>
+  {% endif %}
+</div>
+
+<div class="panel panel-default">
+  <div class="panel-heading">
+    <strong>MNM — MAC entries on this port</strong>
+    <span class="badge">{{ mac_entries|length }}</span>
+  </div>
+  {% if mac_entries_err %}
+    <div class="panel-body text-danger">{{ mac_entries_err }}</div>
+  {% elif mac_entries %}
+    <table class="table table-hover panel-body">
+      <thead>
+        <tr><th>MAC</th><th>VLAN</th><th>Type</th><th>Collected</th></tr>
+      </thead>
+      <tbody>
+        {% for m in mac_entries %}
+          <tr>
+            <td>
+              <a href="{% url 'plugins:mnm_plugin:macentry' m.pk %}"><code>{{ m.mac }}</code></a>
+            </td>
+            <td>{{ m.vlan }}</td>
+            <td>
+              {% if m.entry_type == "static" %}
+                <span class="label label-success">Static</span>
+              {% else %}
+                <span class="label label-default">Dynamic</span>
+              {% endif %}
+            </td>
+            <td>{{ m.collected_at }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <div class="panel-footer">
+      <a href="{{ mac_list_url }}">Show all MAC entries on this port →</a>
+    </div>
+  {% else %}
+    <div class="panel-body text-muted">No data for this port.</div>
+  {% endif %}
+</div>

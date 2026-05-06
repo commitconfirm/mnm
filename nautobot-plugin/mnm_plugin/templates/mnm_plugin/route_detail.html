@@ -1,0 +1,83 @@
+{% extends "generic/object_detail.html" %}
+{% load helpers %}
+
+{% block title %}{{ object.prefix }} via {{ object.next_hop|default:"?" }}{% endblock %}
+
+{% block content_left_page %}
+  <div class="panel panel-default">
+    <div class="panel-heading"><strong>Route</strong></div>
+    <table class="table table-hover panel-body attr-table">
+      <tr><td>Node</td><td>{{ object.node_name }}</td></tr>
+      <tr><td>Prefix</td><td><code>{{ object.prefix }}</code></td></tr>
+      <tr><td>Next hop</td><td>{{ object.next_hop|default:"—" }}</td></tr>
+      <tr><td>Protocol</td><td>{{ object.protocol }}</td></tr>
+      <tr><td>VRF</td><td>{{ object.vrf }}</td></tr>
+      <tr><td>Metric</td><td>{{ object.metric|default:"—" }}</td></tr>
+      <tr><td>Preference</td><td>{{ object.preference|default:"—" }}</td></tr>
+      <tr><td>Outgoing interface</td><td>{{ object.outgoing_interface|default:"—" }}</td></tr>
+      <tr>
+        <td>Active</td>
+        <td>
+          {% if object.active %}
+            <span class="label label-success">Yes</span>
+          {% else %}
+            <span class="label label-default">No</span>
+          {% endif %}
+        </td>
+      </tr>
+      <tr><td>Collected</td><td>{{ object.collected_at }}</td></tr>
+    </table>
+  </div>
+
+  {# E4: cross-row history — prior observations of the same (node, prefix, next_hop, vrf) #}
+  <div class="panel panel-default">
+    <div class="panel-heading">
+      <strong>Prior observations</strong>
+      <span class="badge">{{ history|length }}</span>
+    </div>
+    <table class="table table-hover panel-body">
+      <thead>
+        <tr><th>Protocol</th><th>Outgoing interface</th><th>Metric</th><th>Collected</th></tr>
+      </thead>
+      <tbody>
+        {% for row in history %}
+          <tr>
+            <td>{{ row.protocol }}</td>
+            <td>{{ row.outgoing_interface|default:"—" }}</td>
+            <td>{{ row.metric|default:"—" }}</td>
+            <td>{{ row.collected_at }}</td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="4" class="text-muted text-center">No prior observations</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endblock %}
+
+{% block content_right_page %}
+  <div class="panel panel-default">
+    <div class="panel-heading">
+      <strong>Same prefix on other nodes</strong>
+      <span class="badge">{{ same_prefix_other_nodes|length }}</span>
+    </div>
+    <table class="table table-hover panel-body">
+      <thead>
+        <tr><th>Node</th><th>Next Hop</th><th>Protocol</th><th>VRF</th><th>Collected</th></tr>
+      </thead>
+      <tbody>
+        {% for row in same_prefix_other_nodes %}
+          <tr>
+            <td>{{ row.node_name }}</td>
+            <td>{{ row.next_hop|default:"—" }}</td>
+            <td>{{ row.protocol }}</td>
+            <td>{{ row.vrf }}</td>
+            <td>{{ row.collected_at }}</td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="5" class="text-muted text-center">No other nodes have this prefix</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endblock %}

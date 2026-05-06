@@ -1,0 +1,19 @@
+{% extends "generic/object_list.html" %}
+{% load helpers %}
+
+{% block title %}ARP Entries{% endblock %}
+
+{% block content %}
+  <p class="text-muted">
+    Per-node ARP table snapshots collected via SNMP
+    (<code>ipNetToMediaTable</code> with
+    <code>ipNetToPhysicalTable</code> fallback). One row per
+    <code>(node, ip, mac, vrf)</code> tuple — upserted every
+    poll cycle. Rows where <code>interface</code> reads
+    <code>ifindex:N</code> mark fallback values where
+    bridge-port → ifIndex resolution failed; data is preserved
+    per Rule 7 but the link to a Nautobot Interface is missing.
+  </p>
+  {% include "mnm_plugin/inc/filter_bar.html" %}
+  {{ block.super }}
+{% endblock %}

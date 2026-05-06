@@ -21,7 +21,10 @@ import random
 import time
 from datetime import datetime, timezone, timedelta
 
-from app import db, nautobot_client, endpoint_store
+from app import (
+    db, nautobot_client, endpoint_store, snmp_collector,
+    arp_snmp, mac_snmp, lldp_snmp,
+)
 from app.logging_config import StructuredLogger
 
 log = StructuredLogger(__name__, module="polling")
@@ -32,9 +35,19 @@ log = StructuredLogger(__name__, module="polling")
 
 JOB_TYPES = ("arp", "mac", "dhcp", "lldp", "routes", "bgp")
 
+# One-shot job types are scheduled individually (not seeded by
+# ensure_device_polls) and disable themselves on success. ``phase2_populate``
+# is seeded by the onboarding orchestrator at Step G.5 and disabled by the
+# dispatch branch below once run_phase2 returns success.
+ONE_SHOT_JOB_TYPES = ("phase2_populate",)
+
+
 def _default_interval(job_type: str) -> int:
     defaults = {"arp": 300, "mac": 300, "dhcp": 600, "lldp": 3600,
-                "routes": 3600, "bgp": 3600}
+                "routes": 3600, "bgp": 3600,
+                # Retry interval for phase2 (only used after a failure —
+                # on success the row is disabled).
+                "phase2_populate": 300}
     env_key = f"MNM_POLL_{job_type.upper()}_INTERVAL"
     # Fall back to old MNM_COLLECTION_INTERVAL (minutes) converted to seconds
     old_fallback = int(os.environ.get("MNM_COLLECTION_INTERVAL", "0")) * 60
@@ -77,6 +90,141 @@ async def ensure_device_polls(device_name: str) -> None:
                     next_due=_utcnow(),  # due immediately on first appearance
                 ))
         await session.commit()
+
+
+async def ensure_phase2_populate_row(device_name: str) -> None:
+    """Seed a one-shot ``phase2_populate`` poll row for a freshly-onboarded
+    device. Idempotent — re-enables and resets ``next_due`` if a disabled
+    row from a previous onboarding still exists.
+
+    Called from the onboarding orchestrator's Step G.5 (Prompt 6). The
+    poll loop picks the row up on its next tick (≤ ``MNM_POLL_CHECK_INTERVAL``
+    seconds), runs :func:`app.onboarding.network_sync.run_phase2`, and
+    disables the row on success.
+    """
+    if not db.is_ready():
+        return
+    async with db.SessionLocal() as session:
+        from sqlalchemy import select as sa_select
+        existing = (await session.execute(
+            sa_select(db.DevicePoll).where(
+                db.DevicePoll.device_name == device_name,
+                db.DevicePoll.job_type == "phase2_populate",
+            )
+        )).scalar_one_or_none()
+        now = _utcnow()
+        if existing is None:
+            session.add(db.DevicePoll(
+                device_name=device_name,
+                job_type="phase2_populate",
+                interval_sec=_default_interval("phase2_populate"),
+                enabled=True,
+                next_due=now,
+            ))
+        else:
+            existing.enabled = True
+            existing.next_due = now
+            existing.last_error = None
+        await session.commit()
+
+
+async def disable_device_poll(device_name: str, job_type: str) -> None:
+    """Mark a poll row disabled — used for one-shot jobs on success."""
+    if not db.is_ready():
+        return
+    async with db.SessionLocal() as session:
+        from sqlalchemy import select as sa_select
+        row = (await session.execute(
+            sa_select(db.DevicePoll).where(
+                db.DevicePoll.device_name == device_name,
+                db.DevicePoll.job_type == job_type,
+            )
+        )).scalar_one_or_none()
+        if row:
+            row.enabled = False
+            row.last_success = _utcnow()
+            row.last_attempt = _utcnow()
+            row.last_error = None
+            await session.commit()
+
+
+async def get_phase2_state(device_name: str) -> "dict | None":
+    """Compute the Phase 2 state for one device.
+
+    Returns ``None`` when no ``phase2_populate`` row exists (legacy
+    plugin-onboarded devices). Otherwise returns a dict suitable for
+    both the ``GET /api/onboarding/phase2-status/{device_name}`` endpoint
+    and the ``/api/nodes`` list response. ``state`` is one of:
+
+      * ``pending`` — row exists, never attempted (``last_attempt`` is
+        ``None``).
+      * ``running`` — row enabled, ``last_attempt`` is newer than
+        ``last_success`` within the last 60 s.
+      * ``completed`` — ``enabled=False`` and ``last_success`` populated.
+      * ``failed`` — row enabled, ``last_attempt`` newer than
+        ``last_success``, outside the running window.
+    """
+    if not db.is_ready():
+        return None
+    async with db.SessionLocal() as session:
+        from sqlalchemy import select as sa_select
+        row = (await session.execute(
+            sa_select(db.DevicePoll).where(
+                db.DevicePoll.device_name == device_name,
+                db.DevicePoll.job_type == "phase2_populate",
+            )
+        )).scalar_one_or_none()
+    if row is None:
+        return None
+    now = _utcnow()
+    last_attempt = row.last_attempt
+    last_success = row.last_success
+    enabled = bool(row.enabled)
+    if not enabled and last_success is not None:
+        state = "completed"
+    elif last_attempt is None:
+        state = "pending"
+    elif (last_success is None or last_attempt > last_success) \
+            and last_attempt > now - timedelta(seconds=60):
+        state = "running"
+    elif last_success is None or (last_attempt and last_attempt > last_success):
+        state = "failed"
+    else:
+        state = "pending"
+    return {
+        "device_name": device_name,
+        "state": state,
+        "enabled": enabled,
+        "last_attempt": last_attempt.isoformat() if last_attempt else None,
+        "last_success": last_success.isoformat() if last_success else None,
+        "next_due": row.next_due.isoformat() if row.next_due else None,
+        "last_error": row.last_error,
+    }
+
+
+async def defer_device_poll(
+    device_name: str, job_type: str, retry_in_seconds: int,
+    *, error: "str | None" = None,
+) -> None:
+    """Push a poll row's ``next_due`` forward — used for one-shot job
+    retry backoff on failure. ``error`` is persisted into ``last_error``
+    for surfacing via the phase2-status endpoint / operator log search."""
+    if not db.is_ready():
+        return
+    async with db.SessionLocal() as session:
+        from sqlalchemy import select as sa_select
+        row = (await session.execute(
+            sa_select(db.DevicePoll).where(
+                db.DevicePoll.device_name == device_name,
+                db.DevicePoll.job_type == job_type,
+            )
+        )).scalar_one_or_none()
+        if row:
+            row.last_attempt = _utcnow()
+            row.next_due = _utcnow() + timedelta(seconds=retry_in_seconds)
+            if error:
+                row.last_error = error[:500]
+            await session.commit()
 
 
 async def populate_from_nautobot() -> int:
@@ -264,60 +412,240 @@ def _resolve_device_id(devices: list[dict], device_name: str) -> str | None:
     return None
 
 
-async def collect_arp(device_name: str, device_id: str) -> dict:
-    """Collect ARP table from one device. Returns result dict."""
+async def collect_arp(device_name: str, device_id: str,
+                      device_ip: "str | None" = None) -> dict:
+    """Collect ARP table from one device via direct SNMP (Block C P3).
+
+    Walks ipNetToMediaTable / ipNetToPhysicalTable through ``arp_snmp``,
+    then resolves each entry's ifIndex to an interface name via
+    ``snmp_collector.collect_ifindex_to_name``. Unresolved ifIndex values
+    fall back to ``ifindex:N`` sentinel strings so data is preserved
+    (Rule 7) even when ifTable is unwalkable.
+
+    Returns the same {device_name, job_type, success, entries, count,
+    duration} shape the dispatcher and ``_correlate_and_record`` expect.
+    Each entry dict matches the {ip, mac, interface} contract that
+    ``upsert_node_arp_bulk`` and ``endpoint_collector._correlate_endpoints``
+    read.
+    """
     t0 = time.monotonic()
     await _mark_attempt(device_name, "arp")
-    try:
-        data = await nautobot_client.napalm_get(device_id, "get_arp_table")
-        entries = data.get("get_arp_table", [])
-        # Persist raw ARP data (Phase 2.85)
-        try:
-            await endpoint_store.upsert_node_arp_bulk(device_name, entries)
-        except Exception:
-            pass
+
+    if not device_ip:
         duration = time.monotonic() - t0
-        await _mark_success(device_name, "arp", duration)
-        log.info("poll_arp_done", "ARP collection complete",
-                 context={"device": device_name, "entries": len(entries), "duration": round(duration, 1)})
-        return {"device_name": device_name, "job_type": "arp", "success": True,
-                "entries": entries, "count": len(entries), "duration": duration}
-    except Exception as exc:
-        duration = time.monotonic() - t0
-        err = str(exc)[:500]
+        err = "no primary_ip4 on device"
         await _mark_failure(device_name, "arp", err, duration)
-        log.warning("poll_arp_failed", "ARP collection failed",
+        log.warning("arp_snmp_collect_failed",
+                    "ARP collection skipped — no device IP",
                     context={"device": device_name, "error": err})
         return {"device_name": device_name, "job_type": "arp", "success": False,
                 "error": err, "count": 0, "duration": duration}
 
+    community = os.environ.get("SNMP_COMMUNITY", "public")
+    log.debug("arp_snmp_collect_start", "Direct-SNMP ARP collection start",
+              context={"device": device_name})
 
-async def collect_mac(device_name: str, device_id: str) -> dict:
-    """Collect MAC address table from one device."""
+    try:
+        arp_entries = await arp_snmp.collect_arp(device_ip, community)
+    except snmp_collector.SnmpError as exc:
+        duration = time.monotonic() - t0
+        err = f"{exc.__class__.__name__}: {str(exc)[:400]}"
+        await _mark_failure(device_name, "arp", err, duration)
+        log.warning("arp_snmp_collect_failed",
+                    "Direct-SNMP ARP collection failed",
+                    context={"device": device_name, "error": err,
+                             "exc_class": exc.__class__.__name__})
+        return {"device_name": device_name, "job_type": "arp", "success": False,
+                "error": err, "count": 0, "duration": duration}
+
+    # ifIndex → interface name. collect_ifindex_to_name swallows SnmpError
+    # internally and returns {} on failure; an empty map means every entry
+    # gets the ifindex:N sentinel — degraded but not lost.
+    name_map = await snmp_collector.collect_ifindex_to_name(device_ip, community)
+    if not name_map:
+        log.warning("arp_snmp_ifindex_lookup_empty",
+                    "ifIndex→name resolution returned empty; "
+                    "entries will use ifindex:N sentinel",
+                    context={"device": device_name,
+                             "entries": len(arp_entries)})
+
+    # Dedupe by (ip, mac) — the upsert's UNIQUE constraint is
+    # (node_name, ip, mac, vrf) and PostgreSQL ON CONFLICT DO UPDATE
+    # raises CardinalityViolationError if the same key appears twice
+    # in one batch. Junos exposes loopback IPs on multiple lo0.X
+    # subinterfaces, producing repeats with different ifIndex values
+    # for the same (ip, mac) pair. Keep the first interface seen per
+    # key — matches NAPALM's implicit dedup behavior.
+    seen_keys: set[tuple[str, str]] = set()
+    entries: list[dict] = []
+    for e in arp_entries:
+        key = (e.ip_address, (e.mac_address or "").upper())
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        entries.append({
+            "ip": e.ip_address,
+            "mac": e.mac_address,
+            "interface": name_map.get(e.interface_index,
+                                      f"ifindex:{e.interface_index}"),
+        })
+
+    try:
+        await endpoint_store.upsert_node_arp_bulk(device_name, entries)
+    except Exception:  # noqa: BLE001 — persistence failure shouldn't kill collection
+        pass
+
+    # Two-tier write per E0 §5d: mirror to mnm-plugin Nautobot DB
+    # alongside the controller-DB write. plugin_writer is fail-soft
+    # (BLE001 internal); the outer guard here is belt-and-suspenders
+    # for any synchronous error path (e.g. import failure on first call).
+    try:
+        from app import plugin_writer
+        await plugin_writer.upsert_arp_bulk(device_name, entries)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "plugin_writer_dispatch_failed",
+            "Plugin ARP mirror failed (non-fatal — controller DB is "
+            "authoritative)",
+            context={"device": device_name,
+                     "error": str(exc),
+                     "error_class": type(exc).__name__,
+                     "count": len(entries)})
+
+    duration = time.monotonic() - t0
+    await _mark_success(device_name, "arp", duration)
+    log.info("arp_snmp_collect_complete",
+             "Direct-SNMP ARP collection complete",
+             context={"device": device_name, "entries": len(entries),
+                      "duration": round(duration, 1)})
+    return {"device_name": device_name, "job_type": "arp", "success": True,
+            "entries": entries, "count": len(entries), "duration": duration}
+
+
+async def collect_mac(device_name: str, device_id: str,
+                      device_ip: "str | None" = None) -> dict:
+    """Collect MAC/FDB table from one device via direct SNMP (Block C P4).
+
+    Walks dot1qTpFdbTable / dot1dTpFdbTable through ``mac_snmp``, then
+    resolves each entry's ``bridge_port`` to an interface name through two
+    paired walks: ``snmp_collector.collect_bridgeport_to_ifindex`` (BRIDGE-MIB
+    dot1dBasePortIfIndex) and ``snmp_collector.collect_ifindex_to_name``
+    (IF-MIB ifName / ifDescr fallback). Unresolved bridge ports fall back to
+    ``ifindex:N`` sentinel strings so data is preserved (Rule 7) even when the
+    bridge-port table or ifTable is unwalkable.
+
+    Returns the same {device_name, job_type, success, entries, count,
+    duration} shape the dispatcher and ``_correlate_and_record`` expect.
+    Each entry dict matches the {mac, interface, vlan, static} contract that
+    ``upsert_node_mac_bulk`` and ``endpoint_collector._correlate_endpoints``
+    read.
+    """
     t0 = time.monotonic()
     await _mark_attempt(device_name, "mac")
-    try:
-        data = await nautobot_client.napalm_get(device_id, "get_mac_address_table")
-        entries = data.get("get_mac_address_table", [])
-        # Persist raw MAC data (Phase 2.85)
-        try:
-            await endpoint_store.upsert_node_mac_bulk(device_name, entries)
-        except Exception:
-            pass
+
+    if not device_ip:
         duration = time.monotonic() - t0
-        await _mark_success(device_name, "mac", duration)
-        log.info("poll_mac_done", "MAC collection complete",
-                 context={"device": device_name, "entries": len(entries), "duration": round(duration, 1)})
-        return {"device_name": device_name, "job_type": "mac", "success": True,
-                "entries": entries, "count": len(entries), "duration": duration}
-    except Exception as exc:
-        duration = time.monotonic() - t0
-        err = str(exc)[:500]
+        err = "no primary_ip4 on device"
         await _mark_failure(device_name, "mac", err, duration)
-        log.warning("poll_mac_failed", "MAC collection failed",
+        log.warning("mac_snmp_collect_failed",
+                    "MAC collection skipped — no device IP",
                     context={"device": device_name, "error": err})
         return {"device_name": device_name, "job_type": "mac", "success": False,
                 "error": err, "count": 0, "duration": duration}
+
+    community = os.environ.get("SNMP_COMMUNITY", "public")
+    log.debug("mac_snmp_collect_start", "Direct-SNMP MAC collection start",
+              context={"device": device_name})
+
+    try:
+        mac_entries = await mac_snmp.collect_mac(device_ip, community)
+    except snmp_collector.SnmpError as exc:
+        duration = time.monotonic() - t0
+        err = f"{exc.__class__.__name__}: {str(exc)[:400]}"
+        await _mark_failure(device_name, "mac", err, duration)
+        log.warning("mac_snmp_collect_failed",
+                    "Direct-SNMP MAC collection failed",
+                    context={"device": device_name, "error": err,
+                             "exc_class": exc.__class__.__name__})
+        return {"device_name": device_name, "job_type": "mac", "success": False,
+                "error": err, "count": 0, "duration": duration}
+
+    # Bridge-port → ifIndex and ifIndex → name. Both helpers swallow SnmpError
+    # internally and return {} on failure; an empty map means affected entries
+    # get the ifindex:N sentinel — degraded but data preserved.
+    bridge_to_ifindex = await snmp_collector.collect_bridgeport_to_ifindex(
+        device_ip, community,
+    )
+    name_map = await snmp_collector.collect_ifindex_to_name(device_ip, community)
+
+    sentinel_count = 0
+    # Dedupe by (mac.upper(), interface, vlan_int) — matches the upsert's
+    # uq_mac_node_mac_iface_vlan unique constraint. Same dedup discipline as
+    # the ARP path (P3): PostgreSQL ON CONFLICT DO UPDATE raises
+    # CardinalityViolationError if the same constrained tuple appears twice
+    # in one batch. Within the FDB table this is rare, but defensive against
+    # orphan-FDB rows that all dedupe to vlan=0.
+    seen_keys: set[tuple[str, str, int]] = set()
+    entries: list[dict] = []
+    for entry in mac_entries:
+        ifindex = bridge_to_ifindex.get(entry.bridge_port)
+        if ifindex is None:
+            # Bridge-port not in the dot1dBasePortTable — keep bridge_port in
+            # the sentinel so operators can correlate back to the FDB row.
+            interface = f"ifindex:{entry.bridge_port}"
+            sentinel_count += 1
+        else:
+            resolved = name_map.get(ifindex)
+            if resolved is None:
+                interface = f"ifindex:{ifindex}"
+                sentinel_count += 1
+            else:
+                interface = resolved
+
+        vlan_int = int(entry.vlan or 0)
+        mac_upper = (entry.mac_address or "").upper()
+        key = (mac_upper, interface, vlan_int)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+
+        entries.append({
+            "mac": entry.mac_address,
+            "interface": interface,
+            "vlan": vlan_int,
+            # static = entry was administratively configured (entry_status
+            # of "self" or "mgmt"); learned/other map to dynamic.
+            "static": entry.entry_status in ("self", "mgmt"),
+        })
+
+    try:
+        await endpoint_store.upsert_node_mac_bulk(device_name, entries)
+    except Exception:  # noqa: BLE001 — persistence failure shouldn't kill collection
+        pass
+
+    # Two-tier write per E0 §5d.
+    try:
+        from app import plugin_writer
+        await plugin_writer.upsert_mac_bulk(device_name, entries)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "plugin_writer_dispatch_failed",
+            "Plugin MAC mirror failed (non-fatal — controller DB is "
+            "authoritative)",
+            context={"device": device_name,
+                     "error": str(exc),
+                     "error_class": type(exc).__name__,
+                     "count": len(entries)})
+
+    duration = time.monotonic() - t0
+    await _mark_success(device_name, "mac", duration)
+    log.info("mac_snmp_collect_complete",
+             "Direct-SNMP MAC collection complete",
+             context={"device": device_name, "entries": len(entries),
+                      "sentinel_entries": sentinel_count,
+                      "duration": round(duration, 1)})
+    return {"device_name": device_name, "job_type": "mac", "success": True,
+            "entries": entries, "count": len(entries), "duration": duration}
 
 
 async def collect_dhcp(device_name: str, device_id: str, device_ip: str | None = None,
@@ -353,33 +681,136 @@ async def collect_dhcp(device_name: str, device_id: str, device_ip: str | None =
                 "error": err, "count": 0, "duration": duration}
 
 
-async def collect_lldp(device_name: str, device_id: str) -> dict:
-    """Collect LLDP neighbors from one device."""
+async def collect_lldp(device_name: str, device_id: str,
+                       device_ip: "str | None" = None) -> dict:
+    """Collect LLDP neighbors from one device via direct SNMP (Block C P5).
+
+    Walks lldpRemTable + lldpRemManAddrTable through ``lldp_snmp``. Uses
+    ``snmp_collector.collect_ifindex_to_name`` to resolve each neighbor's
+    ``local_port_ifindex`` to a Junos-style local-interface name; sentinel
+    ``ifindex:N`` on resolution miss preserves the entry per Rule 7.
+
+    Adapter groups by local interface name to match the existing
+    ``upsert_node_lldp_bulk`` dict-shape contract (NAPALM-shape held during
+    P5/P6 soak window). All 5 expansion columns added by P2 migration
+    (``local_port_ifindex``, ``local_port_name``,
+    ``remote_chassis_id_subtype``, ``remote_port_id_subtype``,
+    ``remote_system_description``) populate from the LldpNeighbor fields.
+
+    Returns the same {device_name, job_type, success, entries, count,
+    duration} shape the dispatcher expects. ``entries`` is the grouped
+    dict for downstream readers.
+    """
     t0 = time.monotonic()
     await _mark_attempt(device_name, "lldp")
-    try:
-        data = await nautobot_client.napalm_get(device_id, "get_lldp_neighbors")
-        neighbors = data.get("get_lldp_neighbors", {})
-        count = sum(len(v) if isinstance(v, list) else 1 for v in neighbors.values())
-        # Persist raw LLDP data (Phase 2.85)
-        try:
-            await endpoint_store.upsert_node_lldp_bulk(device_name, neighbors)
-        except Exception:
-            pass
+
+    if not device_ip:
         duration = time.monotonic() - t0
-        await _mark_success(device_name, "lldp", duration)
-        log.info("poll_lldp_done", "LLDP collection complete",
-                 context={"device": device_name, "neighbors": count, "duration": round(duration, 1)})
-        return {"device_name": device_name, "job_type": "lldp", "success": True,
-                "entries": neighbors, "count": count, "duration": duration}
-    except Exception as exc:
-        duration = time.monotonic() - t0
-        err = str(exc)[:500]
+        err = "no primary_ip4 on device"
         await _mark_failure(device_name, "lldp", err, duration)
-        log.warning("poll_lldp_failed", "LLDP collection failed",
+        log.warning("lldp_snmp_collect_failed",
+                    "LLDP collection skipped — no device IP",
                     context={"device": device_name, "error": err})
         return {"device_name": device_name, "job_type": "lldp", "success": False,
                 "error": err, "count": 0, "duration": duration}
+
+    community = os.environ.get("SNMP_COMMUNITY", "public")
+    log.debug("lldp_snmp_collect_start", "Direct-SNMP LLDP collection start",
+              context={"device": device_name})
+
+    try:
+        neighbors = await lldp_snmp.collect_lldp(device_ip, community)
+    except snmp_collector.SnmpError as exc:
+        duration = time.monotonic() - t0
+        err = f"{exc.__class__.__name__}: {str(exc)[:400]}"
+        await _mark_failure(device_name, "lldp", err, duration)
+        log.warning("lldp_snmp_collect_failed",
+                    "Direct-SNMP LLDP collection failed",
+                    context={"device": device_name, "error": err,
+                             "exc_class": exc.__class__.__name__})
+        return {"device_name": device_name, "job_type": "lldp", "success": False,
+                "error": err, "count": 0, "duration": duration}
+
+    # ifIndex → name resolution. lldp_snmp.collect_lldp already resolves
+    # local_port_name internally via the same helper, but we re-run here
+    # to derive the *grouping key* (the dict key the upsert uses to derive
+    # local_interface). Empty map → all entries get ifindex:N sentinels.
+    name_map = await snmp_collector.collect_ifindex_to_name(device_ip, community)
+
+    sentinel_count = 0
+    grouped: dict[str, list[dict]] = {}
+    # Dedupe by the upsert's UNIQUE constraint
+    # (node_name, local_interface, remote_system_name, remote_port).
+    # Two distinct neighbors on the same local port can collapse to the
+    # same key when both have remote_system_name=None (None → "" via the
+    # `or ""` coercion below) and identical remote_port_id — observed on
+    # ex4300-48t ge-0/0/24 with two unmanaged neighbors advertising the
+    # same port-MAC identifier but different chassis IDs. PostgreSQL ON
+    # CONFLICT DO UPDATE raises CardinalityViolationError on a single
+    # batch with duplicate keys; same class of bug as P3's Junos lo0.X
+    # collision. Keep first seen — matches NAPALM's implicit dedup.
+    seen_keys: set[tuple[str, str, str]] = set()
+    for n in neighbors:
+        local_idx = n.local_port_ifindex
+        local_iface = name_map.get(local_idx, f"ifindex:{local_idx}")
+        if local_iface.startswith("ifindex:"):
+            sentinel_count += 1
+
+        sys_name = n.remote_system_name or ""
+        remote_port = n.remote_port_id or ""
+        key = (local_iface, sys_name, remote_port)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+
+        grouped.setdefault(local_iface, []).append({
+            # Existing NAPALM-shape fields the upsert reads
+            "remote_system_name": sys_name,
+            "remote_port": remote_port,
+            "remote_chassis_id": n.remote_chassis_id or "",
+            "remote_management_ip": n.management_ip or "",
+            # Block C P2 expansion columns (P5 first populator)
+            "local_port_ifindex": local_idx,
+            "local_port_name": n.local_port_name or local_iface,
+            "remote_chassis_id_subtype": n.remote_chassis_id_subtype,
+            "remote_port_id_subtype": n.remote_port_id_subtype,
+            "remote_system_description": n.remote_system_description,
+        })
+
+    try:
+        await endpoint_store.upsert_node_lldp_bulk(device_name, grouped)
+    except Exception:  # noqa: BLE001 — persistence failure shouldn't kill collection
+        pass
+
+    # Two-tier write per E0 §5d. Plugin schema is flat (one row per
+    # neighbor with local_interface denormalized); the writer
+    # iterates-and-flattens the grouped dict internally.
+    try:
+        from app import plugin_writer
+        await plugin_writer.upsert_lldp_bulk(device_name, grouped)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "plugin_writer_dispatch_failed",
+            "Plugin LLDP mirror failed (non-fatal — controller DB is "
+            "authoritative)",
+            context={"device": device_name,
+                     "error": str(exc),
+                     "error_class": type(exc).__name__,
+                     "count": sum(len(v) for v in (grouped or {}).values())})
+
+    persisted_count = sum(len(v) for v in grouped.values())
+    duration = time.monotonic() - t0
+    await _mark_success(device_name, "lldp", duration)
+    log.info("lldp_snmp_collect_complete",
+             "Direct-SNMP LLDP collection complete",
+             context={"device": device_name,
+                      "neighbors_raw": len(neighbors),
+                      "neighbors_persisted": persisted_count,
+                      "local_interfaces": len(grouped),
+                      "sentinel_neighbors": sentinel_count,
+                      "duration": round(duration, 1)})
+    return {"device_name": device_name, "job_type": "lldp", "success": True,
+            "entries": grouped, "count": persisted_count, "duration": duration}
 
 
 async def collect_routes(device_name: str, device_id: str,
@@ -438,6 +869,23 @@ async def collect_routes(device_name: str, device_id: str,
 
         # Upsert in bulk
         count = await endpoint_store.upsert_routes_bulk(routes)
+
+        # Two-tier write per E0 §5d: mirror to mnm-plugin Nautobot DB.
+        # Routes flow through NAPALM Tier 2 in v1.0; the plugin schema
+        # doesn't care which collection path produced the row.
+        try:
+            from app import plugin_writer
+            await plugin_writer.upsert_route_bulk(routes)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "plugin_writer_dispatch_failed",
+                "Plugin Routes mirror failed (non-fatal — controller "
+                "DB is authoritative)",
+                context={"device": device_name,
+                         "error": str(exc),
+                         "error_class": type(exc).__name__,
+                         "count": len(routes)})
+
         # Also populate FIB from SNMP data (SNMP RIB ≈ FIB on most platforms)
         if routes and tier_used == "snmp":
             try:
@@ -527,57 +975,6 @@ async def _collect_routes_snmp(device_name: str, device_ip: str) -> list[dict]:
     return routes
 
 
-async def _snmp_walk(device_ip: str, community: str, base_oid: str,
-                     max_rows: int = 5000) -> list[tuple[str, object]]:
-    """Walk an SNMP table via repeated bulkCmd calls.
-
-    pysnmp 6.x bulkCmd returns a single (errI, errS, errIdx, varBinds) tuple
-    per call — not an async iterator. We loop manually, advancing the OID
-    on each call.
-
-    Returns list of (oid_string, value) tuples.
-    """
-    from pysnmp.hlapi.asyncio import (
-        CommunityData, ContextData, ObjectIdentity, ObjectType,
-        SnmpEngine, UdpTransportTarget, bulkCmd,
-    )
-
-    engine = SnmpEngine()
-    target = UdpTransportTarget((device_ip, 161), timeout=10, retries=1)
-    results: list[tuple[str, object]] = []
-    oid_cursor = ObjectType(ObjectIdentity(base_oid))
-
-    for _ in range(max_rows // 25 + 1):
-        errI, errS, errIdx, varBinds = await bulkCmd(
-            engine, CommunityData(community), target, ContextData(),
-            0, 25, oid_cursor,
-        )
-        if errI or errS:
-            break
-        if not varBinds:
-            break
-
-        out_of_scope = False
-        last_ot = None
-        for item in varBinds:
-            # pysnmp 6.x returns [[ObjectType(oid, val)], ...] — each item is a list
-            ot = item[0] if isinstance(item, list) else item
-            oid_str = str(ot[0])
-            if not oid_str.startswith(base_oid + "."):
-                out_of_scope = True
-                break
-            results.append((oid_str, ot[1]))
-            last_ot = ot
-            if len(results) >= max_rows:
-                return results
-
-        if out_of_scope or not varBinds or last_ot is None:
-            break
-        # Advance cursor to last received OID
-        oid_cursor = ObjectType(last_ot[0])
-
-    return results
-
 
 async def _snmp_walk_ip_cidr_route(
     device_name: str, device_ip: str, community: str
@@ -590,19 +987,20 @@ async def _snmp_walk_ip_cidr_route(
     import ipaddress as _ipaddress
 
     BASE_OID = "1.3.6.1.2.1.4.24.4"
-    raw_results = await _snmp_walk(device_ip, community, BASE_OID)
+    raw_results = await snmp_collector.walk_table(device_ip, community, BASE_OID)
     if not raw_results:
         return []
 
-    # Group by index key
+    # Group by index key. walk_table suffixes have the form "1.<col>.<index>"
+    # (the leading "1" is the table-entry subidentifier); strip it to get "<col>.<index>".
     raw: dict[str, dict] = {}
-    for oid_str, val in raw_results:
-        suffix = oid_str[len(BASE_OID) + 3:]  # skip ".1."
-        parts = suffix.split(".", 1)
-        if len(parts) < 2:
-            continue
-        col, index_key = parts[0], parts[1]
-        raw.setdefault(index_key, {})[col] = val
+    for row in raw_results:
+        for oid_suffix, val in row.items():
+            parts = oid_suffix[2:].split(".", 1)  # skip "1."
+            if len(parts) < 2:
+                continue
+            col, index_key = parts[0], parts[1]
+            raw.setdefault(index_key, {})[col] = val
 
     routes = []
     for index_key, cols in raw.items():
@@ -646,18 +1044,18 @@ async def _snmp_walk_ip_route(
     import ipaddress as _ipaddress
 
     BASE_OID = "1.3.6.1.2.1.4.21"
-    raw_results = await _snmp_walk(device_ip, community, BASE_OID)
+    raw_results = await snmp_collector.walk_table(device_ip, community, BASE_OID)
     if not raw_results:
         return []
 
     raw: dict[str, dict] = {}
-    for oid_str, val in raw_results:
-        suffix = oid_str[len(BASE_OID) + 3:]
-        parts = suffix.split(".", 1)
-        if len(parts) < 2:
-            continue
-        col, index_key = parts[0], parts[1]
-        raw.setdefault(index_key, {})[col] = val
+    for row in raw_results:
+        for oid_suffix, val in row.items():
+            parts = oid_suffix[2:].split(".", 1)  # skip "1."
+            if len(parts) < 2:
+                continue
+            col, index_key = parts[0], parts[1]
+            raw.setdefault(index_key, {})[col] = val
 
     routes = []
     for index_key, cols in raw.items():
@@ -747,6 +1145,23 @@ async def collect_bgp(device_name: str, device_id: str) -> dict:
 
         count = await endpoint_store.upsert_bgp_neighbors_bulk(neighbors)
 
+        # Two-tier write per E0 §5d: mirror to mnm-plugin Nautobot DB.
+        # FortiGate and vEOS rows stay empty because their
+        # device_polls.bgp.enabled = False per Block C close-out;
+        # this branch only fires when collection succeeds.
+        try:
+            from app import plugin_writer
+            await plugin_writer.upsert_bgp_neighbor_bulk(neighbors)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "plugin_writer_dispatch_failed",
+                "Plugin BGP mirror failed (non-fatal — controller "
+                "DB is authoritative)",
+                context={"device": device_name,
+                         "error": str(exc),
+                         "error_class": type(exc).__name__,
+                         "count": len(neighbors)})
+
         duration = time.monotonic() - t0
         await _mark_success(device_name, "bgp", duration)
         log.info("poll_bgp_done", "BGP collection complete",
@@ -797,18 +1212,98 @@ async def poll_device(device_name: str, device_id: str,
     results = []
     for jt in due_jobs:
         if jt == "arp":
-            results.append(await collect_arp(device_name, device_id))
+            results.append(await collect_arp(device_name, device_id,
+                                             device_ip=device_ip))
         elif jt == "mac":
-            results.append(await collect_mac(device_name, device_id))
+            results.append(await collect_mac(device_name, device_id,
+                                             device_ip=device_ip))
         elif jt == "dhcp":
             results.append(await collect_dhcp(device_name, device_id, device_ip, is_junos))
         elif jt == "lldp":
-            results.append(await collect_lldp(device_name, device_id))
+            results.append(await collect_lldp(device_name, device_id,
+                                              device_ip=device_ip))
         elif jt == "routes":
             results.append(await collect_routes(device_name, device_id, device_ip=device_ip))
         elif jt == "bgp":
             results.append(await collect_bgp(device_name, device_id))
+        elif jt == "phase2_populate":
+            results.append(await _run_phase2_populate(
+                device_name, device_id, device_ip,
+            ))
     return results
+
+
+async def _run_phase2_populate(
+    device_name: str, device_id: str, device_ip: "str | None",
+) -> dict:
+    """Dispatch the one-shot Phase 2 network sync for a device.
+
+    On success: disable the poll row (one-shot semantic). On failure:
+    defer ``next_due`` by 5 minutes for retry and transition the device
+    status to ``Onboarding Incomplete`` so Prompt 9's status-gated
+    polling will skip the core collectors until Phase 2 succeeds.
+    """
+    from app.onboarding import network_sync
+
+    if not device_ip:
+        await defer_device_poll(device_name, "phase2_populate", 300)
+        return {"device_name": device_name, "job_type": "phase2_populate",
+                "success": False, "error": "no primary_ip4 on device",
+                "count": 0, "duration": 0.0}
+
+    community = os.environ.get("SNMP_COMMUNITY", "public")
+    t0 = time.monotonic()
+    result = await network_sync.run_phase2(
+        device_id=device_id,
+        device_name=device_name,
+        device_ip=device_ip,
+        snmp_community=community,
+    )
+    duration = time.monotonic() - t0
+
+    if result.success:
+        await disable_device_poll(device_name, "phase2_populate")
+        # Transition device status back to Active if a prior failed
+        # attempt had flipped it to Onboarding Incomplete. Best-effort.
+        try:
+            active = await nautobot_client.get_status_by_name(
+                "Active", content_type="dcim.device",
+            )
+            if active and active.get("id"):
+                await nautobot_client.set_device_status(
+                    device_id, active["id"],
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("phase2_status_restore_failed",
+                        "could not restore device status to Active",
+                        context={"device_id": device_id, "error": str(exc)})
+    else:
+        await defer_device_poll(
+            device_name, "phase2_populate", 300,
+            error=result.error,
+        )
+        # Transition device status so Prompt 9's gate short-circuits the
+        # core collectors. Best-effort: if the status flip itself fails,
+        # log and continue — the retry mechanism still drives toward
+        # eventual success.
+        try:
+            incomplete = await nautobot_client.get_status_by_name(
+                "Onboarding Incomplete", content_type="dcim.device",
+            )
+            if incomplete and incomplete.get("id"):
+                await nautobot_client.set_device_status(
+                    device_id, incomplete["id"],
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("phase2_status_flip_failed",
+                        "could not mark device Onboarding Incomplete",
+                        context={"device_id": device_id, "error": str(exc)})
+
+    return {"device_name": device_name, "job_type": "phase2_populate",
+            "success": result.success,
+            "error": result.error,
+            "count": result.interfaces_added + result.ips_added,
+            "duration": round(duration, 2)}
 
 
 # ---------------------------------------------------------------------------
@@ -878,6 +1373,12 @@ async def _correlate_and_record(all_results: list[dict]) -> dict:
     total_recorded = 0
     total_failed = 0
 
+    # Collected endpoints to mirror to the mnm-plugin Nautobot DB
+    # after the per-endpoint controller-DB writes complete.
+    # Per E0 §5d two-tier write: controller DB is authoritative,
+    # plugin DB is the mirror; plugin failures are non-fatal.
+    plugin_batch: list[dict] = []
+
     for device_name, data in by_device.items():
         arp_entries = data.get("arp", [])
         mac_entries = data.get("mac", [])
@@ -930,6 +1431,10 @@ async def _correlate_and_record(all_results: list[dict]) -> dict:
                     change_source=change_source,
                 )
                 total_recorded += 1
+                # Stage for plugin mirror — only endpoints the
+                # controller DB accepted; uplink-skipped /
+                # exception rows don't propagate.
+                plugin_batch.append(ep)
             except Exception:
                 total_failed += 1
 
@@ -939,6 +1444,26 @@ async def _correlate_and_record(all_results: list[dict]) -> dict:
                     await _record_endpoint(ip, ep)
                 except Exception:
                     pass
+
+    # Two-tier write: mirror endpoints to mnm-plugin Nautobot DB.
+    # Failures are logged inside plugin_writer; this outer guard is
+    # belt-and-suspenders for any synchronous error path that
+    # escapes the writer.
+    if plugin_batch:
+        try:
+            from app import plugin_writer
+            await plugin_writer.upsert_endpoint_bulk(plugin_batch)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "plugin_writer_dispatch_failed",
+                "Plugin endpoint mirror failed (non-fatal — "
+                "controller DB is authoritative)",
+                context={
+                    "error": str(exc),
+                    "error_class": type(exc).__name__,
+                    "count": len(plugin_batch),
+                },
+            )
 
     return {
         "endpoints_found": total_found,
@@ -1010,7 +1535,7 @@ async def poll_loop() -> None:
                 await asyncio.sleep(POLL_CHECK_INTERVAL)
                 continue
 
-            # Build device info map
+            # Build device info map (name lowercased -> id/ip/platform/status)
             device_info: dict[str, dict] = {}
             for d in devices:
                 name = d.get("name", "")
@@ -1020,10 +1545,48 @@ async def poll_loop() -> None:
                 ip_addr = ip_display.split("/")[0] if "/" in ip_display else ip_display
                 platform = d.get("platform") or {}
                 plat_name = platform.get("name") or "" if isinstance(platform, dict) else ""
+                status = d.get("status") or {}
+                status_name = status.get("display") or status.get("name") or "" \
+                    if isinstance(status, dict) else ""
                 device_info[name.lower()] = {
                     "id": did, "ip": ip_addr,
                     "is_junos": "junos" in plat_name.lower(),
+                    "status_name": status_name,
                 }
+
+            # Status-gated dispatch: core collectors (arp/mac/lldp/routes/bgp/
+            # dhcp) only run for devices with Nautobot status=Active. Devices
+            # in Onboarding Incomplete / Onboarding Failed would otherwise
+            # generate collector-failure noise while the orchestrator drives
+            # them toward Active. phase2_populate is exempt — by definition
+            # it runs on not-yet-Active devices.
+            gated_device_jobs: dict[str, list[str]] = {}
+            for dn, jts in device_jobs.items():
+                info = device_info.get(dn.lower(), {})
+                is_active = (info.get("status_name") == "Active")
+                kept = [
+                    jt for jt in jts
+                    if jt == "phase2_populate" or is_active
+                ]
+                skipped = [jt for jt in jts if jt not in kept]
+                if skipped:
+                    log.debug(
+                        "poll_skip_status_gated",
+                        "Skipped non-Active device's core poll rows",
+                        context={
+                            "device": dn,
+                            "status": info.get("status_name") or "(unknown)",
+                            "skipped": skipped,
+                        },
+                    )
+                if kept:
+                    gated_device_jobs[dn] = kept
+            device_jobs = gated_device_jobs
+
+            if not device_jobs:
+                _poll_state["polls_dispatched"] = 0
+                await asyncio.sleep(POLL_CHECK_INTERVAL)
+                continue
 
             # Dispatch per-device tasks with bounded concurrency
             all_results: list[dict] = []
@@ -1032,6 +1595,46 @@ async def poll_loop() -> None:
                 async with semaphore:
                     info = device_info.get(dev_name.lower(), {})
                     dev_id = info.get("id")
+                    # Cache-miss retry: phase2_populate is dispatched
+                    # immediately after Phase 1 Step H clears the cache, but
+                    # the polling loop's own get_devices() call may have
+                    # refilled it before Step H ran. Clear + retry once so
+                    # the freshly-created device resolves.
+                    if not dev_id and "phase2_populate" in job_types:
+                        log.info(
+                            "phase2_dispatch_cache_miss_retry",
+                            "Device missing from Nautobot cache; "
+                            "clearing cache and retrying once",
+                            context={"device": dev_name},
+                        )
+                        nautobot_client.clear_cache()
+                        try:
+                            fresh = await nautobot_client.get_devices()
+                        except Exception as exc:  # noqa: BLE001
+                            fresh = []
+                            log.warning(
+                                "phase2_dispatch_cache_miss_refetch_failed",
+                                "Cache-clear refetch failed",
+                                context={"device": dev_name, "error": str(exc)},
+                            )
+                        for d in fresh:
+                            if (d.get("name") or "").lower() == dev_name.lower():
+                                pip = d.get("primary_ip4") or {}
+                                ip_display = (pip.get("display")
+                                              or pip.get("address") or "") \
+                                    if isinstance(pip, dict) else ""
+                                ip_addr = (ip_display.split("/")[0]
+                                           if "/" in ip_display else ip_display)
+                                plat = d.get("platform") or {}
+                                plat_name = (plat.get("name") or "") \
+                                    if isinstance(plat, dict) else ""
+                                info = {
+                                    "id": d.get("id", ""),
+                                    "ip": ip_addr,
+                                    "is_junos": "junos" in plat_name.lower(),
+                                }
+                                dev_id = info["id"]
+                                break
                     if not dev_id:
                         # Ensure poll rows exist even if device disappeared
                         for jt in job_types:

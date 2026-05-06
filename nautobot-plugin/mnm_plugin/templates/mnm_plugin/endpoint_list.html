@@ -1,0 +1,15 @@
+{% extends "generic/object_list.html" %}
+{% load helpers %}
+
+{% block title %}Endpoints{% endblock %}
+
+{% block content %}
+  <p class="text-muted">
+    MAC-keyed endpoint records collected from network infrastructure
+    (ARP, MAC tables, DHCP) and sweep observations. One row per
+    <code>(MAC, switch, port, VLAN)</code> combination — multi-record
+    history per MAC is intentional.
+  </p>
+  {% include "mnm_plugin/inc/filter_bar.html" %}
+  {{ block.super }}
+{% endblock %}

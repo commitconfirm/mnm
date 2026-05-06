@@ -18,7 +18,7 @@ from app.logging_config import StructuredLogger, setup_logging, get_recent_logs
 # Initialize structured logging before anything else
 setup_logging()
 
-from app import auto_discover, db, discovery, docker_manager, endpoint_store, nautobot_client, polling, probes
+from app import auto_discover, db, discovery, docker_manager, endpoint_store, nautobot_client, polling, probes, snmp_collector
 from app.connectors import proxmox as proxmox_connector
 from app.config import (
     DATA_DIR, load_config, load_config_async, save_config, save_config_async,
@@ -145,6 +145,20 @@ async def on_startup():
         log.warning("primary_ip_repair_error", "Primary IP repair failed at startup",
                     context={"error": str(e)})
 
+    # Ensure custom onboarding Statuses exist in Nautobot (v1.0 onboarding
+    # workstream, Prompt 2; reality-check §2 / operator Q5 decision).
+    # Must tolerate Nautobot briefly unavailable at boot — log a warning and
+    # continue so the controller still comes up.
+    try:
+        slugs = await nautobot_client.ensure_custom_statuses()
+        log.info("custom_statuses_ready",
+                 "Nautobot custom onboarding statuses ready",
+                 context={"slugs": list(slugs.keys())})
+    except Exception as e:
+        log.warning("custom_statuses_unavailable",
+                    "Could not bootstrap custom Statuses — Nautobot not ready",
+                    context={"error": str(e)})
+
     # Seed any missing poll job types for existing devices (e.g. routes, bgp added after initial onboarding)
     try:
         devices = await nautobot_client.get_devices()
@@ -172,6 +186,7 @@ async def on_startup():
 @app.on_event("shutdown")
 async def on_shutdown():
     await nautobot_client.close_client()
+    await snmp_collector.shutdown_engine()
     log.info("shutdown", "MNM Controller shutting down")
 
 
@@ -355,29 +370,6 @@ async def start_sweep(body: SweepRequest):
     return {"status": "started"}
 
 
-class OnboardRequest(BaseModel):
-    ip: str
-
-
-@app.post("/api/discover/onboard", dependencies=[Depends(require_auth)])
-async def onboard_single(body: OnboardRequest):
-    """Re-submit onboarding for a single IP. Uses the saved sweep schedule's
-    location and credentials. For retrying failed onboarding attempts."""
-    config = await load_config_async()
-    schedules = config.get("sweep_schedules", [])
-    if not schedules:
-        raise HTTPException(status_code=400, detail="No sweep schedule configured — need location and credentials")
-    s = schedules[0]
-    asyncio.create_task(
-        discovery._onboard_host(
-            body.ip,
-            s["location_id"],
-            s["secrets_group_id"],
-        )
-    )
-    return {"status": "submitted", "ip": body.ip}
-
-
 @app.post("/api/discover/stop", dependencies=[Depends(require_auth)])
 async def stop_sweep():
     """Stop the currently running sweep."""
@@ -414,6 +406,123 @@ async def sweep_history():
     """Return history of past sweep runs."""
     state = discovery.get_sweep_state()
     return {"history": state.get("history", [])}
+
+
+@app.get("/api/onboarding/phase2-status/{device_name}",
+         dependencies=[Depends(require_auth)])
+async def phase2_status(device_name: str):
+    """Return the Phase 2 onboarding status for a device.
+
+    State-derivation logic is shared with the ``/api/nodes`` list via
+    :func:`app.polling.get_phase2_state`. Returns 404 when no
+    ``phase2_populate`` row exists (legacy plugin-onboarded devices).
+    """
+    from app import db as app_db
+    if not app_db.is_ready():
+        raise HTTPException(status_code=503, detail="controller DB not ready")
+    state = await polling.get_phase2_state(device_name)
+    if state is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no phase2_populate row for device {device_name!r}",
+        )
+    return state
+
+
+# ---------------------------------------------------------------------------
+# Direct-REST onboarding (v1.0 Prompt 8).
+#
+# ``/api/onboarding/direct-rest`` is now the default onboarding path from
+# the Discover UI and the Nodes "Add Node" form. The legacy plugin-based
+# path at ``/api/nautobot/onboard`` + ``/api/nautobot/sync-network-data``
+# is retained per operator Q1 (plugin stays installed during v1.0) but
+# is no longer reachable from the UI. Prompt 10 (deferred) removes it.
+# ---------------------------------------------------------------------------
+
+
+class DirectRESTOnboardRequest(BaseModel):
+    ip: str
+    snmp_community: str
+    secrets_group_id: str
+    location_id: str
+
+
+@app.post("/api/onboarding/direct-rest",
+          dependencies=[Depends(require_auth)])
+async def onboarding_direct_rest(body: DirectRESTOnboardRequest):
+    """Invoke the direct-REST Phase 1 orchestrator synchronously.
+
+    Returns after Phase 1 completes (seconds). Phase 2 is scheduled by
+    Step G.5 as a one-shot polling-job row; the frontend polls
+    ``/api/onboarding/phase2-status/{device_name}`` to observe progress.
+
+    Credential hygiene: ``snmp_community`` is sensitive. Never logged;
+    only its presence (``snmp_community_set: bool``) is recorded.
+    """
+    from app.onboarding import orchestrator
+
+    log.info("onboarding_api_called",
+             "Direct-REST onboarding invoked via API",
+             context={"ip": body.ip,
+                      "location_id": body.location_id,
+                      "secrets_group_id": body.secrets_group_id,
+                      "snmp_community_set": bool(body.snmp_community)})
+
+    try:
+        result = await orchestrator.onboard_device(
+            ip=body.ip,
+            snmp_community=body.snmp_community,
+            secrets_group_id=body.secrets_group_id,
+            location_id=body.location_id,
+        )
+    except Exception as exc:
+        log.error("onboarding_api_exception",
+                  "Direct-REST orchestrator raised unexpectedly",
+                  context={"ip": body.ip, "error": str(exc)}, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    # Derive error_type from the orchestrator's error string prefix for
+    # UI-side dispatch (AlreadyOnboardedError vs ClassificationFailedError
+    # vs UnsupportedVendorError vs NautobotWriteError vs ProbeFailedError).
+    error_type: "str | None" = None
+    if result.error:
+        prefix = result.error.split(":", 1)[0].strip()
+        error_type = prefix or None
+
+    return {
+        "success": result.success,
+        "device_id": result.device_id,
+        "device_name": result.device_name,
+        "phase1_steps_completed": result.phase1_steps_completed,
+        "error": result.error,
+        "error_type": error_type,
+        "rollback_performed": result.rollback_performed,
+    }
+
+
+@app.post("/api/onboarding/retry-phase2/{device_name}",
+          dependencies=[Depends(require_auth)])
+async def onboarding_retry_phase2(device_name: str):
+    """Re-enable the ``phase2_populate`` row for a device.
+
+    Operator-triggered retry for devices stuck in Onboarding Incomplete.
+    Uses :func:`polling.ensure_phase2_populate_row`, which is idempotent —
+    re-enables a disabled row and resets ``next_due`` to now so the next
+    polling-loop tick picks it up.
+    """
+    if not db.is_ready():
+        raise HTTPException(status_code=503, detail="controller DB not ready")
+
+    try:
+        await polling.ensure_phase2_populate_row(device_name)
+    except Exception as exc:
+        log.error("phase2_retry_failed",
+                  "ensure_phase2_populate_row raised",
+                  context={"device_name": device_name, "error": str(exc)},
+                  exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    return {"success": True, "device_name": device_name, "error": None}
 
 
 # In-memory state for the sync-incomplete progress tracker (Rule 9 — every
@@ -775,9 +884,16 @@ class OnboardRequest(BaseModel):
     secrets_group_id: str
 
 
+# LEGACY plugin-based onboarding path (v1.0 Q1: plugin stays installed
+# during v1.0 release). As of Prompt 8 this endpoint is no longer called
+# from the Discover UI or the Nodes UI — both route through
+# ``/api/onboarding/direct-rest`` instead. Prompt 10 (deferred out of
+# v1.0 scope per Q1) removes this handler and its ``submit_onboarding_job``
+# dependency entirely.
 @app.post("/api/discover/onboard", dependencies=[Depends(require_auth)])
 async def onboard_single(body: OnboardRequest):
-    """Onboard a single device (e.g., from LLDP neighbor advisory)."""
+    """LEGACY plugin-based onboarding — retained for API callers, not
+    reachable from the UI."""
     try:
         result = await nautobot_client.submit_onboarding_job(
             ip=body.ip,
@@ -837,6 +953,178 @@ async def auto_discover_recent(hours: int = 24):
     auto-discovery did recently (Rule 6 compliance).
     """
     return {"nodes": await auto_discover.get_recent_auto_discovered(hours)}
+
+
+# -------------------------------------------------------------------------
+# Unsupported / unclassified visibility (Block D5)
+# -------------------------------------------------------------------------
+@app.get("/api/sweeps/unsupported", dependencies=[Depends(require_auth)])
+async def get_unsupported_classifications(
+    limit: int = 100,
+    offset: int = 0,
+    order_by: str = "classified_vendor",
+    order_dir: str = "asc",
+):
+    """Catalog of sweep-discovered IPs that did not get onboarded as a
+    Nautobot Device, classified by status.
+
+    Reads existing IPAM custom fields written by the sweep pipeline; runs
+    the classifier at read time on the stored signals (sysDescr, ports,
+    OUI vendor) to derive a vendor + platform per IP. No new schema, no
+    new collector path.
+
+    The vendor field is NOT persisted by the sweep pipeline today —
+    `discovery_classification` only stores the role (switch/router/etc.).
+    Re-classifying at read time also benefits from any classifier
+    improvements between sweep and read time. Sweep-pipeline gap to
+    persist vendor directly is a v1.0.1 cleanup candidate.
+
+    Status enum (computed at read time, not stored):
+      - "unsupported_vendor": classifier identified a vendor not in
+        SUPPORTED_VENDORS
+      - "unclassified": classifier returned vendor=None
+      - "classification_error": currently unreachable from stored data
+        (kept in the enum for forward compatibility — sweep-pipeline
+        gap means errors aren't persisted)
+
+    Pagination is in-memory after the IPAM fetch — D5's expected data
+    volume (unsupported set is small relative to total IPAM) makes this
+    fine; revisit if real deployments push this past a few hundred rows.
+    """
+    from app.onboarding.classifier import classify_from_signals
+    from app.onboarding.orchestrator import SUPPORTED_VENDORS
+
+    try:
+        ip_records = await nautobot_client.get_ip_addresses()
+        devices = await nautobot_client.get_devices()
+    except Exception as e:  # noqa: BLE001 — endpoint reports rather than 500s
+        return {"results": [], "count": 0, "limit": limit, "offset": offset,
+                "error": str(e)}
+
+    # Set of IPs (host portion) that have a Device record. Excluded from
+    # the response — they're already onboarded, by definition not the
+    # operator's "what didn't make it through" question.
+    onboarded_ips: set[str] = set()
+    for dev in devices:
+        primary = dev.get("primary_ip4") or dev.get("primary_ip6")
+        if isinstance(primary, dict):
+            disp = (primary.get("display") or primary.get("address") or "")
+            host = disp.split("/")[0]
+            if host:
+                onboarded_ips.add(host)
+
+    rows: list[dict] = []
+    for rec in ip_records:
+        cf = rec.get("custom_fields") or {}
+        # Skip IPs the sweep pipeline never touched — discovery_method
+        # is empty for IPs created via other paths (manual, onboarding).
+        if not cf.get("discovery_method"):
+            continue
+        host_ip = (rec.get("display") or rec.get("address") or "").split("/")[0]
+        if not host_ip or host_ip in onboarded_ips:
+            continue
+
+        # Re-classify at read time from stored signals.
+        sysdescr_raw = cf.get("discovery_snmp_sysdescr") or ""
+        ports_raw = cf.get("discovery_ports_open") or ""
+        ports_open: list[str] = []
+        if ports_raw:
+            ports_open = [p.strip() for p in str(ports_raw).split(",") if p.strip()]
+        try:
+            cls_result = classify_from_signals(
+                sysdescr=sysdescr_raw or None,
+                sysobjectid=None,  # not persisted by sweep pipeline today
+                ports_open=ports_open or None,
+                mac_vendor=cf.get("discovery_mac_vendor", "") or "",
+                snmp_responds=bool(sysdescr_raw),
+            )
+        except Exception:  # noqa: BLE001 — re-classification never crashes the endpoint
+            # classification_error path: re-classify itself raised. Leave
+            # vendor null and mark the row so the operator can investigate.
+            rows.append({
+                "ip": host_ip,
+                "classified_vendor": None,
+                "classification_status": "classification_error",
+                "platform_hint": None,
+                "chassis_model_hint": None,
+                "sys_descr_excerpt": _excerpt(sysdescr_raw, 200),
+                "sys_object_id": None,
+                "oui_vendor": cf.get("discovery_mac_vendor") or None,
+                "open_ports": ports_open or None,
+                "last_seen": cf.get("discovery_last_seen") or None,
+                "first_seen": cf.get("discovery_first_seen") or None,
+                "in_supported_vendors": False,
+            })
+            continue
+
+        in_supported = (cls_result.vendor in SUPPORTED_VENDORS) if cls_result.vendor else False
+        if cls_result.vendor and in_supported:
+            # Classifier says we support this vendor but it isn't onboarded.
+            # That's an "operator action available" case, not D5's surface
+            # (which is "MNM doesn't support this"). Skip — Discover page
+            # already exposes retry-onboarding for these via the sweep
+            # results table.
+            continue
+
+        if cls_result.vendor is None:
+            status = "unclassified"
+        else:
+            status = "unsupported_vendor"
+
+        rows.append({
+            "ip": host_ip,
+            "classified_vendor": cls_result.vendor,
+            "classification_status": status,
+            "platform_hint": cls_result.platform,
+            # chassis_model_hint not derivable from sweep signals; only
+            # vendor probes (post-onboarding) extract chassis model.
+            "chassis_model_hint": None,
+            "sys_descr_excerpt": _excerpt(sysdescr_raw, 200),
+            "sys_object_id": None,  # not persisted; v1.0.1 candidate
+            "oui_vendor": cf.get("discovery_mac_vendor") or None,
+            "open_ports": ports_open or None,
+            "last_seen": cf.get("discovery_last_seen") or None,
+            "first_seen": cf.get("discovery_first_seen") or None,
+            "in_supported_vendors": False,
+        })
+
+    # Ordering. Default: classified_vendor ASC then last_seen DESC.
+    # Nulls sort last on ASC, first on DESC — match Postgres NULLS LAST/FIRST
+    # semantics by handling explicitly.
+    primary = order_by or "classified_vendor"
+    desc = (order_dir or "asc").lower() == "desc"
+    valid_keys = {"ip", "classified_vendor", "classification_status",
+                  "last_seen", "first_seen"}
+    if primary not in valid_keys:
+        primary = "classified_vendor"
+
+    def _sort_key(row: dict):
+        primary_val = row.get(primary)
+        secondary_val = row.get("last_seen") or ""
+        # None values: sort last regardless of direction
+        return (primary_val is None, primary_val or "", secondary_val)
+
+    rows.sort(key=_sort_key, reverse=desc)
+    if primary != "last_seen":
+        # Stable secondary by last_seen DESC when not the primary key
+        rows.sort(key=lambda r: r.get("last_seen") or "", reverse=True)
+        rows.sort(key=_sort_key, reverse=desc)
+
+    total = len(rows)
+    page = rows[offset:offset + limit]
+    return {
+        "results": page,
+        "count": total,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+def _excerpt(text: str | None, n: int) -> str | None:
+    if not text:
+        return None
+    s = str(text)
+    return s[:n] + ("…" if len(s) > n else "")
 
 
 # -------------------------------------------------------------------------
@@ -939,9 +1227,14 @@ class SyncNetworkDataRequest(BaseModel):
     dryrun: bool = False
 
 
+# LEGACY plugin Phase 2 wrapper. As of Prompt 8 Phase 2 network sync is
+# driven automatically by the polling-loop one-shot ``phase2_populate``
+# job (see ``onboarding/network_sync.py``). This endpoint is retained
+# per Q1 but is no longer called from the UI. Prompt 10 removes it.
 @app.post("/api/nautobot/sync-network-data", dependencies=[Depends(require_auth)])
 async def sync_network_data(body: SyncNetworkDataRequest):
-    """Trigger 'Sync Network Data From Network' job for specified or all devices."""
+    """LEGACY plugin 'Sync Network Data From Network' job wrapper —
+    retained for API callers, not reachable from the UI."""
     try:
         result = await nautobot_client.submit_sync_network_data(
             device_ids=body.device_ids,
@@ -1938,15 +2231,36 @@ async def list_nodes():
 
         jobs = poll_by_device.get(name, {})
 
-        # Compute poll health: green/yellow/red/gray
-        if not jobs:
+        # Prompt 9 Block A: health calculation is computed over *enabled*
+        # rows only. A disabled row is an operator-set scheduling gate
+        # (e.g. the FG-40F / arista-mnm NAPALM disables pending Block C
+        # SNMP-collector polling integration) — not a failure signal.
+        # ``phase2_populate`` is a one-shot job type whose enabled=False
+        # means "Phase 2 succeeded" — also not a health signal, so it's
+        # excluded explicitly.
+        active_jobs = {
+            jt: j for jt, j in jobs.items()
+            if j.get("enabled") and jt != "phase2_populate"
+        }
+        # Polling-coverage indicator: N active / M total rows (excluding
+        # phase2_populate from the denominator for the same reason).
+        total_rows = sum(1 for jt in jobs if jt != "phase2_populate")
+        coverage_label = f"{len(active_jobs)}/{total_rows} active" \
+            if total_rows else "0/0 active"
+
+        if not active_jobs:
             health = "gray"
-            health_label = "No polls configured"
+            health_label = (
+                "All polls disabled" if total_rows
+                else "No polls configured"
+            )
         else:
-            successes = sum(1 for j in jobs.values() if j.get("last_success"))
-            failures = sum(1 for j in jobs.values() if j.get("last_error") and not j.get("last_success"))
-            stale = sum(1 for j in jobs.values() if not j.get("last_success") and not j.get("last_error"))
-            total = len(jobs)
+            successes = sum(1 for j in active_jobs.values() if j.get("last_success"))
+            failures = sum(1 for j in active_jobs.values()
+                           if j.get("last_error") and not j.get("last_success"))
+            stale = sum(1 for j in active_jobs.values()
+                        if not j.get("last_success") and not j.get("last_error"))
+            total = len(active_jobs)
             if successes == total:
                 health = "green"
                 health_label = "All polls healthy"
@@ -1977,6 +2291,14 @@ async def list_nodes():
         primary_ip = dev.get("primary_ip4") or dev.get("primary_ip") or {}
         ip_display = primary_ip.get("display", "") if isinstance(primary_ip, dict) else ""
 
+        # Prompt 8: expose Nautobot ``status`` and derived Phase 2 state
+        # so the Nodes UI can surface onboarding progress + Retry Phase 2
+        # button without per-row /api/onboarding/phase2-status polling.
+        status_obj = dev.get("status") or {}
+        status_name = status_obj.get("display", "") if isinstance(status_obj, dict) else ""
+        phase2 = await polling.get_phase2_state(name)
+        phase2_state = phase2["state"] if phase2 else None
+
         nodes.append({
             "name": name,
             "id": dev.get("id", ""),
@@ -1984,8 +2306,11 @@ async def list_nodes():
             "primary_ip": ip_display,
             "role": role_name,
             "location": location_name,
+            "status_name": status_name,
+            "phase2_state": phase2_state,
             "health": health,
             "health_label": health_label,
+            "coverage_label": coverage_label,
             "last_polled": last_polled,
             "jobs": jobs,
             "interface_count": dev.get("interface_count"),

@@ -1,0 +1,75 @@
+{% extends "generic/object_detail.html" %}
+{% load helpers %}
+
+{% block title %}{{ object.node_name }} ↔ {{ object.neighbor_ip }} (AS{{ object.remote_asn }}){% endblock %}
+
+{% block content_left_page %}
+  <div class="panel panel-default">
+    <div class="panel-heading"><strong>BGP Neighbor</strong></div>
+    <table class="table table-hover panel-body attr-table">
+      <tr><td>Node</td><td>{{ object.node_name }}</td></tr>
+      <tr><td>Neighbor IP</td><td><code>{{ object.neighbor_ip }}</code></td></tr>
+      <tr><td>Remote ASN</td><td>{{ object.remote_asn }}</td></tr>
+      <tr><td>Local ASN</td><td>{{ object.local_asn|default:"—" }}</td></tr>
+      <tr><td>State</td><td>{{ object.state }}</td></tr>
+      <tr><td>VRF</td><td>{{ object.vrf }}</td></tr>
+      <tr><td>Address family</td><td>{{ object.address_family }}</td></tr>
+      <tr><td>Prefixes received</td><td>{{ object.prefixes_received|default:"—" }}</td></tr>
+      <tr><td>Prefixes sent</td><td>{{ object.prefixes_sent|default:"—" }}</td></tr>
+      <tr><td>Uptime (seconds)</td><td>{{ object.uptime_seconds|default:"—" }}</td></tr>
+      <tr><td>Collected</td><td>{{ object.collected_at }}</td></tr>
+    </table>
+  </div>
+
+  {# E4: cross-row history — prior observations of the same (node, neighbor_ip, vrf, address_family) #}
+  <div class="panel panel-default">
+    <div class="panel-heading">
+      <strong>Prior observations</strong>
+      <span class="badge">{{ history|length }}</span>
+    </div>
+    <table class="table table-hover panel-body">
+      <thead>
+        <tr><th>State</th><th>Prefixes Rx</th><th>Uptime (s)</th><th>Collected</th></tr>
+      </thead>
+      <tbody>
+        {% for row in history %}
+          <tr>
+            <td>{{ row.state }}</td>
+            <td>{{ row.prefixes_received|default:"—" }}</td>
+            <td>{{ row.uptime_seconds|default:"—" }}</td>
+            <td>{{ row.collected_at }}</td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="4" class="text-muted text-center">No prior observations</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endblock %}
+
+{% block content_right_page %}
+  <div class="panel panel-default">
+    <div class="panel-heading">
+      <strong>Other neighbors on this node</strong>
+      <span class="badge">{{ other_neighbors_on_node|length }}</span>
+    </div>
+    <table class="table table-hover panel-body">
+      <thead>
+        <tr><th>Neighbor</th><th>Remote ASN</th><th>State</th><th>VRF</th><th>Collected</th></tr>
+      </thead>
+      <tbody>
+        {% for row in other_neighbors_on_node %}
+          <tr>
+            <td><code>{{ row.neighbor_ip }}</code></td>
+            <td>{{ row.remote_asn }}</td>
+            <td>{{ row.state }}</td>
+            <td>{{ row.vrf }}</td>
+            <td>{{ row.collected_at }}</td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="5" class="text-muted text-center">No other BGP neighbors</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endblock %}

@@ -55,7 +55,7 @@ Once a device is onboarded, MNM polls it on a schedule for forwarding-plane data
 ### Controller UI
 A FastAPI + vanilla-JS web app on port 9090 that's the primary operator entry point:
 - **Dashboard** — container health, device count, IPs tracked, recent events, Proxmox node status, advisory cards (incomplete devices, discovered subnets, LLDP neighbors)
-- **Discovery** — trigger sweeps, view live progress, manage CIDR ranges and schedules
+- **Discovery** — trigger sweeps, view live progress, manage CIDR ranges and schedules. Includes an **Unsupported vendors / unclassified hosts** panel that surfaces sweep-discovered IPs MNM didn't onboard, with raw signals (sysDescr, OUI vendor, open ports) and CSV/JSON export, so operators can see which vendors to prioritise for future support.
 - **Endpoints** — sortable / filterable table, per-MAC detail page with full movement timeline
 - **Events** — network activity feed with filtering, IP conflict detection, anomaly buckets
 - **Logs** — structured log viewer with level/module filters and a one-click export bundle for GitHub issue reports
@@ -83,13 +83,22 @@ A FastAPI + vanilla-JS web app on port 9090 that's the primary operator entry po
 git clone https://github.com/commitconfirm/mnm.git
 cd mnm
 cp .env.example .env
-# Edit .env — set MNM_ADMIN_PASSWORD, NAUTOBOT_NAPALM_USERNAME/PASSWORD,
-# SNMP_COMMUNITY, and (optionally) PROXMOX_HOST/TOKEN if you have a Proxmox host
+# Edit .env — see the file itself for a guided tour. Required values
+# are clearly marked [REQUIRED]; secrets are marked [SECRET].
 docker compose up -d
-./bootstrap/bootstrap.sh
+bash bootstrap/bootstrap.sh
 ```
 
-The bootstrap script is idempotent — it creates the Nautobot superuser, locations, roles, manufacturers, secrets, the controller's PostgreSQL database, and the device-type library. Safe to re-run.
+The bootstrap script is idempotent — it creates the Nautobot superuser, locations, roles, manufacturers, platforms, ~5,200 community device types, the controller's PostgreSQL database, and (when NAPALM credentials are set in `.env`) a default Nautobot SecretsGroup. Safe to re-run. See [docs/BOOTSTRAP.md](docs/BOOTSTRAP.md) for what gets created and how to extend the bootstrap library when new vendors enter your network.
+
+#### Two compose-file variants
+
+MNM ships two functionally-identical Compose files:
+
+- **`docker-compose.yml`** (default) — production-grade ops manual. Top-of-file orientation, per-service comment blocks (purpose, dependencies, exposed ports, persistent storage, failure modes), inline annotations on every non-obvious choice. Recommended for first-deploy operators and as ongoing reference.
+- **`docker-compose.expert.yml`** — same YAML, lean inline-only commentary. For operators already familiar with the stack who don't want the full annotation pass.
+
+Both files produce identical `docker compose config` output. Use the expert variant by passing `-f docker-compose.expert.yml` to every Compose command. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the full first-deploy walkthrough.
 
 ### First Login
 
@@ -144,6 +153,7 @@ For the full architectural breakdown including container map, port assignments, 
 | [docs/CONNECTORS.md](docs/CONNECTORS.md) | Connector framework reference + Proxmox VE setup (API token, PVEAuditor role) |
 | [docs/API.md](docs/API.md) | Controller REST API reference with curl examples |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common issues drawn from real deployment experience |
+| [docs/PLUGIN.md](docs/PLUGIN.md) | The mnm-plugin Nautobot Django app — Endpoint, ARP, MAC, LLDP, Route, BGP, and Fingerprint models surfaced in Nautobot (v1.0 Block E) |
 
 ## Supported Vendors
 
