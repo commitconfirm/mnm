@@ -126,11 +126,16 @@ if [ "${MNM_BOOTSTRAP_SKIP_CHECK:-}" != "1" ] && [ -n "$TOKEN" ]; then
             -H "Accept: application/json" 2>/dev/null \
         | python3 -c "import sys,json; print(json.load(sys.stdin).get('count',0))" 2>/dev/null) || DT_CHECK=0
 
-    CF_CHECK=$(docker exec "$CONTAINER" \
-        curl -sf "${API_BASE}/extras/custom-fields/?key=endpoint_data_source&limit=1" \
+    # Nautobot 3.x doesn't expose a list-filter for CustomField (`?key=` and
+    # `?name=` both return 400 "Unknown filter field"); the only working
+    # pattern is detail-retrieval by key as URL path: GET /…/custom-fields/<key>/
+    # returns 200 if the field exists, 404 otherwise.
+    CF_CHECK_HTTP=$(docker exec "$CONTAINER" \
+        curl -sk -o /dev/null -w "%{http_code}" \
+            "${API_BASE}/extras/custom-fields/endpoint_data_source/" \
             -H "Authorization: Token ${TOKEN}" \
-            -H "Accept: application/json" 2>/dev/null \
-        | python3 -c "import sys,json; print(json.load(sys.stdin).get('count',0))" 2>/dev/null) || CF_CHECK=0
+            -H "Accept: application/json" 2>/dev/null) || CF_CHECK_HTTP=000
+    if [ "$CF_CHECK_HTTP" = "200" ]; then CF_CHECK=1; else CF_CHECK=0; fi
 
     if [ "$DT_CHECK" -gt 5000 ] && [ "$CF_CHECK" -gt 0 ]; then
         echo ""
@@ -680,19 +685,19 @@ for FIELD_DEF in "${DISCOVERY_FIELDS[@]}"; do
     FIELD_LABEL="${REMAINDER#*:}"
 
     # Check if custom field exists.  Nautobot 3.x deprecated `name=` in
-    # favour of `key=` for both POST payloads and list-endpoint filters;
-    # `?name=<X>` returns HTTP 400 "Unknown filter field" and the
-    # defensive `|| EXISTING='{"count":0}'` fallback would silently
-    # report missing-and-create on every re-run.  See
+    # favour of `key=` for the POST payload, but neither is exposed as a
+    # list-endpoint filter — `?name=<X>` and `?key=<X>` both return HTTP 400
+    # "Unknown filter field".  The only reliable existence-check is the
+    # detail-retrieval URL path: GET /…/custom-fields/<key>/ → 200 if the
+    # field exists, 404 otherwise.  See
     # .claude/investigations/v1-pre-tag-2026-05-06.md (Round 1+2).
-    ENCODED_KEY=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${FIELD_NAME}'))")
-    EXISTING=$(docker exec "$CONTAINER" \
-        curl -sf "${API_BASE}/extras/custom-fields/?key=${ENCODED_KEY}" \
+    HTTP_CODE=$(docker exec "$CONTAINER" \
+        curl -sk -o /dev/null -w "%{http_code}" \
+            "${API_BASE}/extras/custom-fields/${FIELD_NAME}/" \
             -H "Authorization: Token ${TOKEN}" \
-            -H "Accept: application/json" 2>/dev/null) || EXISTING='{"count":0}'
-    COUNT=$(echo "$EXISTING" | python3 -c "import sys,json; print(json.load(sys.stdin).get('count',0))" 2>/dev/null) || COUNT=0
+            -H "Accept: application/json" 2>/dev/null) || HTTP_CODE=000
 
-    if [ "$COUNT" -gt 0 ]; then
+    if [ "$HTTP_CODE" = "200" ]; then
         echo "  Custom field '${FIELD_NAME}': already exists (skipped)" >&2
         inc_skipped
     else
