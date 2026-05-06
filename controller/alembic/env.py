@@ -9,7 +9,6 @@ Imports ``app.db`` to register every model on ``Base.metadata``, so
 ``alembic revision --autogenerate`` introspects the full current schema.
 """
 import asyncio
-from logging.config import fileConfig
 
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
@@ -30,9 +29,15 @@ config = context.config
 # file free of credentials and matches how the application connects.
 config.set_main_option("sqlalchemy.url", _build_dsn())
 
-# Interpret the config file for Python logging.
-if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+# NOTE: alembic's stock template calls ``fileConfig(config.config_file_name)``
+# here.  The controller intentionally does NOT.  ``fileConfig`` defaults to
+# ``disable_existing_loggers=True`` and replaces root logger handlers per
+# alembic.ini's ``[logger_root]`` block, which clobbers the StructuredFormatter
+# handler that ``app.logging_config.setup_logging()`` installs at controller
+# import time.  See .claude/investigations/v1-pre-tag-2026-05-06.md (Round 3).
+# The application owns logger configuration; alembic logs propagate through
+# the root logger and reach the StructuredFormatter without any alembic-side
+# config.
 
 target_metadata = Base.metadata
 
