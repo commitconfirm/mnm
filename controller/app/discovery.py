@@ -767,21 +767,28 @@ SNMP_OIDS = {
 
 
 async def _snmp_get(ip: str, community: str, snmp_v3: dict | None = None) -> dict[str, str]:
-    """Perform async SNMP GET for system MIB objects using pysnmp asyncio hlapi."""
+    """Perform async SNMP GET for system MIB objects using pysnmp 7.x asyncio hlapi.
+
+    Uses the shared ``SnmpEngine`` from ``snmp_collector._get_engine()`` to
+    avoid the per-call UDP socket leak removed in mnm commit ``ebbfef8``
+    (LEAK-FIX). Transport is created per call; the shared engine reuses its
+    underlying dispatcher socket.
+    """
     result: dict[str, str] = {}
     try:
-        from pysnmp.hlapi.asyncio import (
+        from pysnmp.hlapi.v3arch.asyncio import (
             CommunityData, ContextData, ObjectIdentity, ObjectType,
-            SnmpEngine, UdpTransportTarget, getCmd,
+            UdpTransportTarget, get_cmd,
         )
+        from app.snmp_collector import _get_engine
 
-        engine = SnmpEngine()
-        transport = UdpTransportTarget((ip, 161), timeout=3, retries=1)
+        engine = _get_engine()
+        transport = await UdpTransportTarget.create((ip, 161), timeout=3, retries=1)
         context = ContextData()
         auth = CommunityData(community, mpModel=1)  # SNMPv2c
 
         for name, oid_str in SNMP_OIDS.items():
-            error_indication, error_status, error_index, var_binds = await getCmd(
+            error_indication, error_status, error_index, var_binds = await get_cmd(
                 engine, auth, transport, context,
                 ObjectType(ObjectIdentity(oid_str)),
             )

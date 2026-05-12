@@ -951,7 +951,7 @@ async def _collect_routes_snmp(device_name: str, device_ip: str) -> list[dict]:
 
     This is the first direct-to-device SNMP path in the controller (distinct
     from snmp_exporter which is Prometheus-native). Uses pysnmp async HLAPI
-    with bulkCmd for efficiency.
+    with bulk_cmd for efficiency.
 
     Tries MIBs in order:
       1. ipCidrRouteTable (1.3.6.1.2.1.4.24.4) — RFC 2096, widely supported
