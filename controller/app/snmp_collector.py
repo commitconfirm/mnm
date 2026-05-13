@@ -336,6 +336,7 @@ async def walk_table(
     *,
     version: str = "2c",
     timeout_sec: float = 10.0,
+    retries: int = 1,
     max_repetitions: int = 25,
     port: int = 161,
 ) -> list[dict[str, Any]]:
@@ -359,6 +360,7 @@ async def walk_table(
         oid: Base OID of the table (e.g. ``"1.3.6.1.2.1.4.22.1"``).
         version: SNMP version string; only ``"2c"`` is supported.
         timeout_sec: Per-PDU response timeout in seconds.
+        retries: pysnmp transport retry count.
         max_repetitions: BulkCmd max-repetitions value.
         port: SNMP UDP port (default 161).
 
@@ -380,7 +382,7 @@ async def walk_table(
     target = await UdpTransportTarget.create(
         (device_ip, port),
         timeout=timeout_sec,
-        retries=1,
+        retries=retries,
     )
     auth = CommunityData(community, mpModel=1)  # mpModel=1 → SNMPv2c
     ctx = ContextData()
@@ -468,6 +470,7 @@ async def get_scalar(
     *,
     version: str = "2c",
     timeout_sec: float = 10.0,
+    retries: int = 1,
     port: int = 161,
 ) -> Any:
     """Fetch a single SNMP scalar value.
@@ -481,6 +484,7 @@ async def get_scalar(
         oid: Scalar OID, e.g. ``"1.3.6.1.2.1.1.1.0"`` (sysDescr.0).
         version: SNMP version string; only ``"2c"`` is supported.
         timeout_sec: Per-PDU response timeout in seconds.
+        retries: pysnmp transport retry count.
         port: SNMP UDP port (default 161).
 
     Returns:
@@ -499,7 +503,7 @@ async def get_scalar(
     target = await UdpTransportTarget.create(
         (device_ip, port),
         timeout=timeout_sec,
-        retries=1,
+        retries=retries,
     )
     auth = CommunityData(community, mpModel=1)
     ctx = ContextData()
@@ -552,6 +556,7 @@ async def collect_ifindex_to_name(
     *,
     version: str = "2c",
     timeout_sec: float = 10.0,
+    retries: int = 1,
     port: int = 161,
 ) -> dict[int, str]:
     """Build an {ifIndex: interface_name} mapping for a device.
@@ -573,7 +578,7 @@ async def collect_ifindex_to_name(
     try:
         ifname_rows = await walk_table(
             device_ip, community, OIDS["IF-MIB::ifName"],
-            version=version, timeout_sec=timeout_sec, port=port,
+            version=version, timeout_sec=timeout_sec, retries=retries, port=port,
         )
     except SnmpError:
         ifname_rows = []
@@ -593,7 +598,7 @@ async def collect_ifindex_to_name(
         try:
             ifdescr_rows = await walk_table(
                 device_ip, community, OIDS["IF-MIB::ifDescr"],
-                version=version, timeout_sec=timeout_sec, port=port,
+                version=version, timeout_sec=timeout_sec, retries=retries, port=port,
             )
         except SnmpError:
             return ifindex_to_name
@@ -616,6 +621,7 @@ async def collect_bridgeport_to_ifindex(
     *,
     version: str = "2c",
     timeout_sec: float = 10.0,
+    retries: int = 1,
     port: int = 161,
 ) -> dict[int, int]:
     """Build a {bridge_port: ifIndex} map for a device.
@@ -639,7 +645,7 @@ async def collect_bridgeport_to_ifindex(
     try:
         rows = await walk_table(
             device_ip, community, OIDS["BRIDGE-MIB::dot1dBasePortIfIndex"],
-            version=version, timeout_sec=timeout_sec, port=port,
+            version=version, timeout_sec=timeout_sec, retries=retries, port=port,
         )
     except SnmpError:
         return bridge_to_ifindex

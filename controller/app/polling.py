@@ -59,6 +59,35 @@ MAX_CONCURRENT = int(os.environ.get("MNM_COLLECTION_CONCURRENCY",
 JITTER_FACTOR = 0.10  # 10% random jitter on next_due
 
 
+def _env_numeric(key: str, default, parse):
+    """Read a numeric env var. On bad input, log a warning and return default.
+
+    Used for ``MNM_SNMP_TIMEOUT_SEC`` / ``MNM_SNMP_RETRIES`` so a typo in
+    ``.env`` doesn't crash controller startup — a clear log line names the
+    offending value and we proceed with the documented default.
+    """
+    raw = os.environ.get(key)
+    if raw is None or raw == "":
+        return default
+    try:
+        return parse(raw)
+    except (ValueError, TypeError):
+        log.warning("env_var_invalid",
+                    f"{key} is not a valid {parse.__name__}; using default",
+                    context={"value": raw, "default": default})
+        return default
+
+
+# SNMP timeout/retries for polling SNMP operations
+# (collect_arp / collect_mac / collect_lldp / route SNMP walks).
+# Discovery sweep keeps its internal 3s / 1-retry constants (see
+# discovery.py:_snmp_get) — folding sweep under the polling default would
+# 3× dead-IP iteration cost. Per-device polling overrides are planned for
+# v1.1; until then, this is the single operator-facing polling knob.
+SNMP_TIMEOUT_SEC: float = _env_numeric("MNM_SNMP_TIMEOUT_SEC", 10.0, float)
+SNMP_RETRIES: int = _env_numeric("MNM_SNMP_RETRIES", 1, int)
+
+
 # ---------------------------------------------------------------------------
 # Device poll table management
 # ---------------------------------------------------------------------------
@@ -446,7 +475,10 @@ async def collect_arp(device_name: str, device_id: str,
               context={"device": device_name})
 
     try:
-        arp_entries = await arp_snmp.collect_arp(device_ip, community)
+        arp_entries = await arp_snmp.collect_arp(
+            device_ip, community,
+            timeout_sec=SNMP_TIMEOUT_SEC, retries=SNMP_RETRIES,
+        )
     except snmp_collector.SnmpError as exc:
         duration = time.monotonic() - t0
         err = f"{exc.__class__.__name__}: {str(exc)[:400]}"
@@ -461,7 +493,10 @@ async def collect_arp(device_name: str, device_id: str,
     # ifIndex → interface name. collect_ifindex_to_name swallows SnmpError
     # internally and returns {} on failure; an empty map means every entry
     # gets the ifindex:N sentinel — degraded but not lost.
-    name_map = await snmp_collector.collect_ifindex_to_name(device_ip, community)
+    name_map = await snmp_collector.collect_ifindex_to_name(
+        device_ip, community,
+        timeout_sec=SNMP_TIMEOUT_SEC, retries=SNMP_RETRIES,
+    )
     if not name_map:
         log.warning("arp_snmp_ifindex_lookup_empty",
                     "ifIndex→name resolution returned empty; "
@@ -558,7 +593,10 @@ async def collect_mac(device_name: str, device_id: str,
               context={"device": device_name})
 
     try:
-        mac_entries = await mac_snmp.collect_mac(device_ip, community)
+        mac_entries = await mac_snmp.collect_mac(
+            device_ip, community,
+            timeout_sec=SNMP_TIMEOUT_SEC, retries=SNMP_RETRIES,
+        )
     except snmp_collector.SnmpError as exc:
         duration = time.monotonic() - t0
         err = f"{exc.__class__.__name__}: {str(exc)[:400]}"
@@ -575,8 +613,12 @@ async def collect_mac(device_name: str, device_id: str,
     # get the ifindex:N sentinel — degraded but data preserved.
     bridge_to_ifindex = await snmp_collector.collect_bridgeport_to_ifindex(
         device_ip, community,
+        timeout_sec=SNMP_TIMEOUT_SEC, retries=SNMP_RETRIES,
     )
-    name_map = await snmp_collector.collect_ifindex_to_name(device_ip, community)
+    name_map = await snmp_collector.collect_ifindex_to_name(
+        device_ip, community,
+        timeout_sec=SNMP_TIMEOUT_SEC, retries=SNMP_RETRIES,
+    )
 
     sentinel_count = 0
     # Dedupe by (mac.upper(), interface, vlan_int) — matches the upsert's
@@ -719,7 +761,10 @@ async def collect_lldp(device_name: str, device_id: str,
               context={"device": device_name})
 
     try:
-        neighbors = await lldp_snmp.collect_lldp(device_ip, community)
+        neighbors = await lldp_snmp.collect_lldp(
+            device_ip, community,
+            timeout_sec=SNMP_TIMEOUT_SEC, retries=SNMP_RETRIES,
+        )
     except snmp_collector.SnmpError as exc:
         duration = time.monotonic() - t0
         err = f"{exc.__class__.__name__}: {str(exc)[:400]}"
@@ -735,7 +780,10 @@ async def collect_lldp(device_name: str, device_id: str,
     # local_port_name internally via the same helper, but we re-run here
     # to derive the *grouping key* (the dict key the upsert uses to derive
     # local_interface). Empty map → all entries get ifindex:N sentinels.
-    name_map = await snmp_collector.collect_ifindex_to_name(device_ip, community)
+    name_map = await snmp_collector.collect_ifindex_to_name(
+        device_ip, community,
+        timeout_sec=SNMP_TIMEOUT_SEC, retries=SNMP_RETRIES,
+    )
 
     sentinel_count = 0
     grouped: dict[str, list[dict]] = {}
@@ -987,7 +1035,10 @@ async def _snmp_walk_ip_cidr_route(
     import ipaddress as _ipaddress
 
     BASE_OID = "1.3.6.1.2.1.4.24.4"
-    raw_results = await snmp_collector.walk_table(device_ip, community, BASE_OID)
+    raw_results = await snmp_collector.walk_table(
+        device_ip, community, BASE_OID,
+        timeout_sec=SNMP_TIMEOUT_SEC, retries=SNMP_RETRIES,
+    )
     if not raw_results:
         return []
 
@@ -1044,7 +1095,10 @@ async def _snmp_walk_ip_route(
     import ipaddress as _ipaddress
 
     BASE_OID = "1.3.6.1.2.1.4.21"
-    raw_results = await snmp_collector.walk_table(device_ip, community, BASE_OID)
+    raw_results = await snmp_collector.walk_table(
+        device_ip, community, BASE_OID,
+        timeout_sec=SNMP_TIMEOUT_SEC, retries=SNMP_RETRIES,
+    )
     if not raw_results:
         return []
 

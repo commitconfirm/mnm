@@ -4,6 +4,36 @@ All notable changes to MNM are documented in this file. Format follows [Keep a C
 
 ## [Unreleased]
 
+### Added
+- `MNM_SNMP_TIMEOUT_SEC` and `MNM_SNMP_RETRIES` environment
+  variables for tuning SNMP polling against slow devices.
+  Defaults (10s, 1 retry) preserve existing behavior. Per-device
+  overrides planned for v1.1.
+- `UPGRADE.md` at the repo root documenting the canonical
+  end-user update procedure. README links to it from a new
+  "Updating" section.
+
+### Changed
+- `controller/app/polling.py` now passes `timeout_sec` and
+  `retries` to all SNMP collector calls
+  (`arp_snmp.collect_arp`, `mac_snmp.collect_mac`,
+  `lldp_snmp.collect_lldp`, `snmp_collector.walk_table` for
+  the route SNMP fallbacks, and the `collect_ifindex_to_name`
+  / `collect_bridgeport_to_ifindex` resolution helpers).
+- Public collectors and `snmp_collector.walk_table` /
+  `get_scalar` / `collect_ifindex_to_name` /
+  `collect_bridgeport_to_ifindex` gained a `retries: int = 1`
+  kwarg (default preserves existing behavior; CLI scripts and
+  tests are unaffected).
+- Discovery sweep (`discovery.py:_snmp_get`) retains its
+  internal `timeout=3, retries=1` values as a deliberate sweep
+  optimization — documented inline. Folding sweep under the
+  polling default would 3× dead-IP iteration cost (a /24 going
+  from ~9 min to ~30 min with concurrency=16).
+- Controller startup log now emits an effective SNMP polling
+  configuration line so operators can see the active values in
+  `docker compose logs controller`.
+
 ## [1.0.0] - 2026-05-06
 
 ### Release notes

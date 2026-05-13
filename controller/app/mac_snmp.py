@@ -105,6 +105,7 @@ async def _collect_fdb_vlan_map(
     *,
     version: str,
     timeout_sec: float,
+    retries: int,
     port: int,
 ) -> dict[int, int]:
     """Walk dot1qVlanCurrentTable and return {fdb_id: vlan_id}.
@@ -114,7 +115,7 @@ async def _collect_fdb_vlan_map(
     """
     rows = await snmp_collector.walk_table(
         device_ip, community, _OID_VLAN_CURRENT,
-        version=version, timeout_sec=timeout_sec, port=port,
+        version=version, timeout_sec=timeout_sec, retries=retries, port=port,
     )
     fdb_vlan_map: dict[int, int] = {}
     for row in rows:
@@ -361,6 +362,7 @@ async def collect_mac(
     *,
     version: str = "2c",
     timeout_sec: float = 10.0,
+    retries: int = 1,
     port: int = 161,
 ) -> list[MacEntry]:
     """Collect the MAC/FDB table from a device via SNMP.
@@ -377,6 +379,7 @@ async def collect_mac(
         community: SNMP community string.
         version: SNMP version string; only "2c" is supported.
         timeout_sec: Per-PDU response timeout in seconds.
+        retries: pysnmp transport retry count.
         port: SNMP UDP port (default 161).
 
     When dot1qVlanCurrentTable returns empty (Junos does not implement it),
@@ -401,7 +404,7 @@ async def collect_mac(
     try:
         rows = await snmp_collector.walk_table(
             device_ip, community, _OID_Q_BRIDGE,
-            version=version, timeout_sec=timeout_sec, port=port,
+            version=version, timeout_sec=timeout_sec, retries=retries, port=port,
         )
     except (SnmpTimeoutError, SnmpAuthError):
         raise
@@ -421,7 +424,7 @@ async def collect_mac(
         try:
             bridge_rows = await snmp_collector.walk_table(
                 device_ip, community, _OID_BRIDGE,
-                version=version, timeout_sec=timeout_sec, port=port,
+                version=version, timeout_sec=timeout_sec, retries=retries, port=port,
             )
         except (SnmpTimeoutError, SnmpAuthError):
             raise
@@ -440,7 +443,7 @@ async def collect_mac(
         try:
             fdb_vlan_map = await _collect_fdb_vlan_map(
                 device_ip, community,
-                version=version, timeout_sec=timeout_sec, port=port,
+                version=version, timeout_sec=timeout_sec, retries=retries, port=port,
             )
         except (SnmpTimeoutError, SnmpAuthError, SnmpError):
             fdb_vlan_map = {}
@@ -456,7 +459,7 @@ async def collect_mac(
             try:
                 junos_rows = await snmp_collector.walk_table(
                     device_ip, community, _OID_JUNOS_VLAN,
-                    version=version, timeout_sec=timeout_sec, port=port,
+                    version=version, timeout_sec=timeout_sec, retries=retries, port=port,
                 )
                 fdb_vlan_map = _parse_junos_fdb_to_vlan(junos_rows)
             except SnmpTimeoutError:

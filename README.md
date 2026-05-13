@@ -155,6 +155,10 @@ For the full architectural breakdown including container map, port assignments, 
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common issues drawn from real deployment experience |
 | [docs/PLUGIN.md](docs/PLUGIN.md) | The mnm-plugin Nautobot Django app — Endpoint, ARP, MAC, LLDP, Route, BGP, and Fingerprint models surfaced in Nautobot (v1.0 Block E) |
 
+## Updating
+
+To update an existing install, follow [UPGRADE.md](UPGRADE.md). It documents the standard `git pull` → `.env` review → `docker compose build` → `docker compose up -d` → verify procedure, including selective service rebuilds, rollback, and troubleshooting for common failure modes.
+
 ## Supported Vendors
 
 MNM uses NAPALM for multi-vendor device communication. Tested:

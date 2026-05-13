@@ -105,6 +105,21 @@ async def on_startup():
                                       "GNMI_USERNAME") if os.environ.get(k)],
     })
 
+    # SNMP polling configuration — log effective values so operator sees them
+    # in `docker compose logs controller` after every restart. Discovery
+    # sweep uses its own internal 3s/1 constants (see discovery.py:_snmp_get).
+    snmp_default = (polling.SNMP_TIMEOUT_SEC == 10.0 and polling.SNMP_RETRIES == 1)
+    log.info(
+        "snmp_config" if snmp_default else "snmp_config_tuned",
+        f"SNMP polling configuration: timeout={polling.SNMP_TIMEOUT_SEC}s, "
+        f"retries={polling.SNMP_RETRIES} (discovery sweep uses 3s/1 internally)",
+        context={
+            "timeout_sec": polling.SNMP_TIMEOUT_SEC,
+            "retries": polling.SNMP_RETRIES,
+            "default": snmp_default,
+        },
+    )
+
     # Initialize controller database (Phase 2.7)
     db_ok = await db.init_db()
     if db_ok:

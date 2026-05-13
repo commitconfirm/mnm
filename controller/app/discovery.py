@@ -783,6 +783,14 @@ async def _snmp_get(ip: str, community: str, snmp_v3: dict | None = None) -> dic
         from app.snmp_collector import _get_engine
 
         engine = _get_engine()
+        # Discovery sweep uses a deliberately short timeout (3s) and single
+        # retry to keep dead-IP iteration fast. Most IPs in a sweep are
+        # unresponsive; optimizing for that path dominates sweep wall-clock
+        # time. Polling (collect_arp / collect_mac / collect_lldp / route SNMP)
+        # uses MNM_SNMP_TIMEOUT_SEC / MNM_SNMP_RETRIES for slow-but-alive
+        # devices. Do NOT parameterize these values without revisiting the
+        # sweep-cost tradeoff (a /24 sweep against dead IPs goes from ~9 min
+        # to ~30 min when timeout moves from 3s to 10s with concurrency=16).
         transport = await UdpTransportTarget.create((ip, 161), timeout=3, retries=1)
         context = ContextData()
         auth = CommunityData(community, mpModel=1)  # SNMPv2c

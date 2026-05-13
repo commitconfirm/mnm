@@ -190,6 +190,7 @@ async def collect_arp(
     *,
     version: str = "2c",
     timeout_sec: float = 10.0,
+    retries: int = 1,
     port: int = 161,
 ) -> list[ArpEntry]:
     """Collect the ARP table from a device via SNMP.
@@ -211,7 +212,7 @@ async def collect_arp(
     try:
         rows = await snmp_collector.walk_table(
             device_ip, community, _OID_ARP_TABLE,
-            version=version, timeout_sec=timeout_sec, port=port,
+            version=version, timeout_sec=timeout_sec, retries=retries, port=port,
         )
     except (SnmpTimeoutError, SnmpAuthError):
         raise
@@ -233,7 +234,7 @@ async def collect_arp(
         try:
             phys_rows = await snmp_collector.walk_table(
                 device_ip, community, _OID_ARP_PHYSICAL,
-                version=version, timeout_sec=timeout_sec, port=port,
+                version=version, timeout_sec=timeout_sec, retries=retries, port=port,
             )
         except (SnmpTimeoutError, SnmpAuthError):
             raise

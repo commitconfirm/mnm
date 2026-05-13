@@ -410,6 +410,7 @@ async def collect_lldp(
     *,
     version: str = "2c",
     timeout_sec: float = 10.0,
+    retries: int = 1,
     port: int = 161,
 ) -> list[LldpNeighbor]:
     """Collect LLDP neighbors from a device via SNMP.
@@ -438,7 +439,7 @@ async def collect_lldp(
     try:
         rem_rows = await snmp_collector.walk_table(
             device_ip, community, _OID_LLDP_REM,
-            version=version, timeout_sec=timeout_sec, port=port,
+            version=version, timeout_sec=timeout_sec, retries=retries, port=port,
         )
     except (SnmpTimeoutError, SnmpAuthError):
         raise
@@ -463,7 +464,7 @@ async def collect_lldp(
     try:
         man_addr_rows = await snmp_collector.walk_table(
             device_ip, community, _OID_LLDP_MAN_ADDR,
-            version=version, timeout_sec=timeout_sec, port=port,
+            version=version, timeout_sec=timeout_sec, retries=retries, port=port,
         )
     except (SnmpError, SnmpTimeoutError, SnmpAuthError) as exc:
         log.debug("lldp_snmp_man_addr_walk_failed",
@@ -476,7 +477,7 @@ async def collect_lldp(
     # Interface name resolution — shared helper, degrades to empty internally
     ifindex_to_name = await snmp_collector.collect_ifindex_to_name(
         device_ip, community,
-        version=version, timeout_sec=timeout_sec, port=port,
+        version=version, timeout_sec=timeout_sec, retries=retries, port=port,
     )
 
     neighbors, skipped = _parse_lldp_rem_table(
