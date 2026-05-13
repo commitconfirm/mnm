@@ -5,6 +5,14 @@ All notable changes to MNM are documented in this file. Format follows [Keep a C
 ## [Unreleased]
 
 ### Added
+
+### Changed
+
+### Fixed
+
+## [1.0.1] - 2026-05-12
+
+### Added
 - `MNM_SNMP_TIMEOUT_SEC` and `MNM_SNMP_RETRIES` environment
   variables for tuning SNMP polling against slow devices.
   Defaults (10s, 1 retry) preserve existing behavior. Per-device
